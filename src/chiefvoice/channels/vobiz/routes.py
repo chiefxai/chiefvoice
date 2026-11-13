@@ -29,7 +29,16 @@ async def inbound_answer(request: Request):
 
 @router.api_route("/webhooks/vobiz/answer", methods=["GET", "POST"])
 async def outbound_answer(request: Request):
-    return await _adapter(request).answer_outbound(request)
+    coordinator: CallCoordinator | None = getattr(request.app.state, "call_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(status_code=503, detail="Call services are not configured")
+    adapter = _adapter(request)
+    session = await adapter.answer_outbound(request)
+    try:
+        await coordinator.mark_answered(session)
+    except LookupError:
+        return adapter.reject_outbound_answer()
+    return adapter.outbound_answer_response(session)
 
 
 @router.api_route("/webhooks/vobiz/hangup", methods=["GET", "POST"])

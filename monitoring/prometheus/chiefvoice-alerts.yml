@@ -1,0 +1,88 @@
+groups:
+  - name: chiefvoice-availability
+    rules:
+      - alert: ChiefvoiceHighHttp5xxRate
+        expr: |
+          (
+            sum(rate(chiefvoice_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(chiefvoice_http_requests_total[5m])), 0.001)
+          ) > 0.05
+          and sum(rate(chiefvoice_http_requests_total[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: Chiefvoice HTTP error rate is elevated
+          description: More than 5% of HTTP requests have returned 5xx responses for five minutes.
+
+      - alert: ChiefvoiceOutboundCallStartsFailing
+        expr: increase(chiefvoice_call_start_events_total{result=~"failed|unavailable"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: Outbound call starts are failing
+          description: At least one outbound call start failed or the call service was unavailable in the last ten minutes.
+
+      - alert: ChiefvoicePostCallJobsExhausted
+        expr: increase(chiefvoice_post_call_jobs_total{event="failed"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: A post-call job exhausted its retries
+          description: At least one post-call analysis job reached its terminal failed state in the last ten minutes.
+
+      - alert: ChiefvoicePostCallWebhookDeliveriesExhausted
+        expr: increase(chiefvoice_post_call_webhook_deliveries_total{event="failed"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: A post-call webhook exhausted its retries
+          description: At least one CRM webhook delivery reached its terminal failed state in the last ten minutes.
+
+      - alert: ChiefvoiceProviderCallErrors
+        expr: increase(chiefvoice_sessions_ended_total{reason="provider_error"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: The telephony provider reported call errors
+          description: Provider error terminations occurred in the last ten minutes.
+
+      - alert: ChiefvoiceCallsReachingDurationCap
+        expr: increase(chiefvoice_call_duration_limit_events_total[15m]) > 0
+        for: 2m
+        labels:
+          severity: info
+          service: chiefvoice
+        annotations:
+          summary: Calls are reaching configured duration caps
+          description: At least one call hit its configured duration cap in the last fifteen minutes.
+
+      - alert: ChiefvoiceBackupRunFailed
+        expr: increase(chiefvoice_data_lifecycle_runs_total{task="backup",result="failed"}[2h]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: chiefvoice
+        annotations:
+          summary: Chiefvoice database backup failed
+          description: A scheduled backup or verification pass failed in the last two hours.
+
+      - alert: ChiefvoiceRetentionRunFailed
+        expr: increase(chiefvoice_data_lifecycle_runs_total{task="retention",result="failed"}[2h]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: Chiefvoice retention run failed
+          description: A scheduled retention pass failed in the last two hours.

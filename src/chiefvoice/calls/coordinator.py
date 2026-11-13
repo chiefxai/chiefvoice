@@ -8,12 +8,13 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException, Request, Response
 
+from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
-from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.billing import SubscriptionAuthorizer
 from chiefvoice.channels.base import ChannelAdapter, InboundCall, OutboundCall
 from chiefvoice.observability.setup import (
+    call_duration_limit_event,
     post_call_missing_transcript,
     session_ended,
     session_started,
@@ -97,6 +98,7 @@ class CallCoordinator:
             session_id=session.session_id,
         )
         session.recording_allowed = call.recording_allowed
+        session.max_call_seconds = entitlement.max_call_seconds
         try:
             session = await adapter.initiate_outbound(call, session)
         except BaseException:
@@ -146,6 +148,13 @@ class CallCoordinator:
                 return await adapter.reject_inbound(inbound, str(exc.detail))
             raise
         session.recording_allowed = entitlement.recording_allowed
+        session.max_call_seconds = entitlement.max_call_seconds
+        session.started_at = datetime.now(UTC)
+        try:
+            await self.mark_answered(session)
+        except LookupError as exc:
+            await self.subscriptions.release_voice(inbound.tenant_id, session.session_id)
+            return await adapter.reject_inbound(inbound, str(exc))
         try:
             session, response = await adapter.accept_inbound(inbound, session)
         except BaseException:
@@ -154,20 +163,48 @@ class CallCoordinator:
         session_started(session.channel, session.provider)
         return response
 
+    async def mark_answered(self, session: AcceptedSession) -> datetime:
+        if session.tenant_id is None:
+            return session.started_at
+        canonical_answered_at = await self.subscriptions.mark_answered(
+            session.tenant_id, session.session_id, session.started_at
+        )
+        if canonical_answered_at is not None:
+            session.started_at = canonical_answered_at
+        return session.started_at
+
     async def end_session(self, session: AcceptedSession, reason: str) -> None:
         ended_at = datetime.now(UTC)
+        elapsed_seconds = max(
+            0.0, (ended_at - _aware_utc(session.started_at)).total_seconds()
+        )
+        emit_limit_event = False
         try:
             if session.tenant_id:
-                await self.subscriptions.settle_voice(
+                emit_limit_event = await self.subscriptions.settle_voice(
                     session.tenant_id,
                     session.session_id,
                     _billable_seconds(session.started_at, ended_at),
+                    ended_at=ended_at,
                 )
+                if reason == "timeout":
+                    emit_limit_event = (
+                        await self.subscriptions.mark_duration_limit_event(
+                            session.tenant_id, session.session_id
+                        )
+                    ) or emit_limit_event
         finally:
             # Setup failures release reservations; completed sessions settle them.
             # Billing policies must make settlement idempotent by session ID because
             # providers may deliver both a media disconnect and a hangup callback.
-            session_ended(session.channel, session.provider, reason)
+            session_ended(
+                session.channel,
+                session.provider,
+                reason,
+                duration_seconds=elapsed_seconds,
+            )
+            if emit_limit_event:
+                call_duration_limit_event()
             await self._enqueue_post_call(session, ended_at)
 
     async def _enqueue_post_call(self, session: AcceptedSession, ended_at: datetime) -> None:
@@ -247,8 +284,10 @@ class _OutboundCallData:
 
 def _billable_seconds(started_at: datetime, ended_at: datetime) -> int:
     """Round any partial billable second up and tolerate legacy naive timestamps."""
-    if started_at.tzinfo is None:
-        started_at = started_at.replace(tzinfo=UTC)
-    if ended_at.tzinfo is None:
-        ended_at = ended_at.replace(tzinfo=UTC)
+    started_at = _aware_utc(started_at)
+    ended_at = _aware_utc(ended_at)
     return max(0, ceil((ended_at - started_at).total_seconds()))
+
+
+def _aware_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

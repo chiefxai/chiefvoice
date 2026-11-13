@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextlib import suppress
@@ -29,11 +30,25 @@ from chiefvoice.channels.base import ChannelAdapter
 from chiefvoice.core.config import settings
 from chiefvoice.observability import configure_logging, instrument_app
 from chiefvoice.billing import SubscriptionAuthorizer
+from chiefvoice.billing import BillingPolicyRegistry, PostpaidBillingPolicy, PrepaidBillingPolicy
+from chiefvoice.billing.routes import router as billing_router
+from chiefvoice.billing.store import SqlBillingDirectory
 from chiefvoice.channels.vobiz.adapter import VobizAdapter
 from chiefvoice.channels.vobiz.routes import router as vobiz_router
 from chiefvoice.channels.integration_routes import router as integrations_router
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
-from chiefvoice.recordings.storage import LocalRecordingStore
+from chiefvoice.recordings.storage import create_recording_store
+from chiefvoice.data_lifecycle.retention import (
+    RetentionRunner,
+    StaticRetentionPolicyDirectory,
+    run_retention_periodically,
+)
+from chiefvoice.data_lifecycle.backup import (
+    BackupRunner,
+    StaticBackupPolicyDirectory,
+    run_backups_periodically,
+)
+from chiefvoice.data_lifecycle.postgres_backup import EncryptedPostgresBackupProvider
 from chiefvoice.sessions import AcceptedSession
 from chiefvoice.calls.routes import router as calls_router
 
@@ -50,10 +65,13 @@ async def lifespan(_app: FastAPI):
     agent_profile_directory = getattr(_app.state, "agent_profile_directory", None)
     post_call_dispatcher = getattr(_app.state, "post_call_dispatcher", None)
     post_call_agent = getattr(_app.state, "post_call_agent", None)
-    worker_task = None
+    billing_directory = getattr(_app.state, "billing_directory", None)
+    worker_tasks: list[asyncio.Task] = []
     try:
         if account_store is not None:
             await account_store.initialize()
+        if billing_directory is not None:
+            await billing_directory.initialize()
         if integration_store is not None:
             await integration_store.initialize()
         if api_key_directory is not None:
@@ -65,16 +83,29 @@ async def lifespan(_app: FastAPI):
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.initialize()
         if isinstance(post_call_dispatcher, SqlPostCallQueue) and post_call_agent is not None:
-            worker_task = asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent))
+            worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent)))
+        retention_runner = getattr(_app.state, "retention_runner", None)
+        if retention_runner is not None:
+            worker_tasks.append(asyncio.create_task(
+                run_retention_periodically(retention_runner, settings.retention_interval_seconds)
+            ))
+        backup_runner = getattr(_app.state, "backup_runner", None)
+        if backup_runner is not None:
+            worker_tasks.append(asyncio.create_task(
+                run_backups_periodically(backup_runner, settings.backup_interval_seconds)
+            ))
         logger.info("application_started", extra={"event": "application_started"})
         yield
     finally:
-        if worker_task is not None:
+        for worker_task in worker_tasks:
             worker_task.cancel()
+        for worker_task in worker_tasks:
             with suppress(asyncio.CancelledError):
                 await worker_task
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.close()
+        if billing_directory is not None:
+            await billing_directory.close()
         if integration_store is not None:
             await integration_store.close()
         if post_call_webhook_directory is not None:
@@ -98,6 +129,7 @@ def create_app(
     api_key_directory: SqlApiKeyDirectory | None = None,
     post_call_webhook_directory: SqlPostCallWebhookDirectory | None = None,
     agent_profile_directory: AgentProfileDirectory | None = None,
+    billing_directory: SqlBillingDirectory | None = None,
     post_call_dispatcher: PostCallDispatcher | None = None,
     voice_pipeline_factory: Callable[
         [AcceptedSession, BaseTransport], Pipeline | Awaitable[Pipeline]
@@ -133,6 +165,8 @@ def create_app(
     application.state.post_call_required = post_call_required
     if agent_profile_directory is None and settings.database_url:
         agent_profile_directory = SqlAgentProfileDirectory(settings.database_url)
+    recording_store = create_recording_store()
+    application.state.recording_store = recording_store
     if voice_pipeline_factory is None and settings.realtime_provider == "vertex":
         if settings.vertex_project_id and settings.vertex_location:
             vertex_provider = VertexGeminiLiveProvider(
@@ -148,11 +182,23 @@ def create_app(
             voice_pipeline_factory = create_realtime_pipeline_factory(
                 RealtimeAgentRegistry([vertex_provider]),
                 "vertex",
-                recording_store=(LocalRecordingStore() if settings.recordings_enabled else None),
+                recording_store=recording_store,
             )
     adapters = dict(channel_adapters or {})
     if account_store is None and settings.database_url:
         account_store = SqlAccountStore(settings.database_url)
+    if billing_directory is None and settings.database_url:
+        billing_directory = SqlBillingDirectory(settings.database_url)
+    if subscription_authorizer is None and billing_directory is not None:
+        subscription_authorizer = SubscriptionAuthorizer(
+            billing_directory,
+            BillingPolicyRegistry(
+                [
+                    PrepaidBillingPolicy(billing_directory),
+                    PostpaidBillingPolicy(billing_directory),
+                ]
+            ),
+        )
     if provider_integration_store is None and settings.database_url and settings.credentials_encryption_key:
         provider_integration_store = SqlProviderIntegrationStore(
             settings.database_url, settings.credentials_encryption_key
@@ -167,15 +213,59 @@ def create_app(
         post_call_webhook_directory = SqlPostCallWebhookDirectory(
             settings.database_url, settings.post_call_encryption_key
         )
+    retention_policies = StaticRetentionPolicyDirectory.from_json(settings.retention_policies_json)
+    retention_runner = None
+    if retention_policies.policies:
+        if settings.retention_interval_seconds < 60:
+            raise ValueError("RETENTION_INTERVAL_SECONDS must be at least 60")
+        targets = []
+        if recording_store is not None:
+            targets.append(recording_store)
+        if isinstance(post_call_dispatcher, SqlPostCallQueue):
+            targets.append(post_call_dispatcher)
+        supported = {target.data_class for target in targets}
+        unsupported = {
+            policy.data_class for policy in retention_policies.policies
+            if policy.enabled and not policy.legal_hold and policy.data_class not in supported
+        }
+        if unsupported:
+            names = ", ".join(sorted(item.value for item in unsupported))
+            raise ValueError(f"Configured retention classes have no active storage target: {names}")
+        retention_runner = RetentionRunner(retention_policies, targets)
+    backup_policies = StaticBackupPolicyDirectory.from_json(settings.backup_policies_json)
+    backup_runner = None
+    if backup_policies.policies:
+        if settings.backup_interval_seconds < 60:
+            raise ValueError("BACKUP_INTERVAL_SECONDS must be at least 60")
+        if not settings.database_url:
+            raise ValueError("DATABASE_URL is required when BACKUP_POLICIES_JSON is configured")
+        if not settings.backup_encryption_key:
+            raise ValueError("BACKUP_ENCRYPTION_KEY is required when backups are enabled")
+        try:
+            restore_targets = json.loads(settings.backup_restore_targets_json or "[]")
+        except json.JSONDecodeError as exc:
+            raise ValueError("BACKUP_RESTORE_TARGETS_JSON must be a JSON list of DSNs") from exc
+        if not isinstance(restore_targets, list) or any(not isinstance(item, str) for item in restore_targets):
+            raise ValueError("BACKUP_RESTORE_TARGETS_JSON must be a JSON list of DSNs")
+        provider = EncryptedPostgresBackupProvider(
+            settings.database_url,
+            settings.backup_directory,
+            settings.backup_encryption_key,
+            allowed_restore_targets=tuple(restore_targets),
+        )
+        backup_runner = BackupRunner(backup_policies, provider)
     vobiz_adapter = adapters.get("vobiz")
     if vobiz_adapter is None and settings.vobiz_webhook_secret and provider_integration_store is not None:
         vobiz_adapter = VobizAdapter(provider_integration_store)
         adapters["vobiz"] = vobiz_adapter
     application.state.provider_integration_store = provider_integration_store
     application.state.account_store = account_store
+    application.state.billing_directory = billing_directory
     application.state.api_key_directory = api_key_directory
     application.state.post_call_webhook_directory = post_call_webhook_directory
     application.state.agent_profile_directory = agent_profile_directory
+    application.state.retention_runner = retention_runner
+    application.state.backup_runner = backup_runner
     application.state.channel_adapters = adapters
     application.state.vobiz_adapter = vobiz_adapter
     application.state.subscription_authorizer = subscription_authorizer
@@ -209,6 +299,7 @@ def create_app(
     application.include_router(api_key_router)
     application.include_router(post_call_webhook_router)
     application.include_router(agent_profiles_router)
+    application.include_router(billing_router)
     return application
 
 

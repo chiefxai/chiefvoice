@@ -49,6 +49,12 @@ HTTP_REQUEST_DURATION = Histogram(
     "HTTP request duration in seconds",
     ["method", "route"],
 )
+CALL_DURATION = Histogram(
+    "chiefvoice_call_duration_seconds",
+    "Completed or terminated voice call duration in seconds",
+    ["channel", "provider", "reason"],
+    buckets=(5, 15, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600),
+)
 SESSIONS_STARTED = Counter(
     "chiefvoice_sessions_started_total", "Voice sessions started", ["channel", "provider"]
 )
@@ -70,19 +76,51 @@ POST_CALL_WEBHOOKS = Counter(
     "Post-call webhook delivery lifecycle events",
     ["event"],
 )
+CALL_STARTS = Counter(
+    "chiefvoice_call_start_events_total",
+    "Outbound call start outcomes",
+    ["result"],
+)
+DATA_LIFECYCLE_RUNS = Counter(
+    "chiefvoice_data_lifecycle_runs_total",
+    "Retention and backup worker lifecycle events",
+    ["task", "result"],
+)
+CALL_DURATION_LIMITS = Counter(
+    "chiefvoice_call_duration_limit_events_total",
+    "Calls that reached or exceeded their configured duration cap",
+)
 
 
 def session_started(channel: str, provider: str) -> None:
     SESSIONS_STARTED.labels(channel, provider).inc()
 
 
-def session_ended(channel: str, provider: str, reason: str) -> None:
+def call_start_event(result: str) -> None:
+    if result in {"accepted", "rejected", "failed", "unavailable"}:
+        CALL_STARTS.labels(result).inc()
+
+
+def call_duration_limit_event() -> None:
+    CALL_DURATION_LIMITS.inc()
+
+
+def data_lifecycle_run(task: str, result: str) -> None:
+    if task in {"backup", "retention"} and result in {"succeeded", "failed"}:
+        DATA_LIFECYCLE_RUNS.labels(task, result).inc()
+
+
+def session_ended(
+    channel: str, provider: str, reason: str, duration_seconds: float | None = None
+) -> None:
     safe_reason = (
         reason
         if reason in {"completed", "caller_hangup", "provider_error", "timeout", "cancelled"}
         else "other"
     )
     SESSIONS_ENDED.labels(channel, provider, safe_reason).inc()
+    if duration_seconds is not None and duration_seconds >= 0:
+        CALL_DURATION.labels(channel, provider, safe_reason).observe(duration_seconds)
 
 
 def post_call_missing_transcript(channel: str, provider: str) -> None:

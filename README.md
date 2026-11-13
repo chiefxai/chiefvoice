@@ -76,9 +76,26 @@ Start outbound calls with `POST /v1/calls/outbound`. New requests keep live conv
 
 The post-call schema accepts a bounded JSON Schema subset: objects, strings, integers, numbers, booleans, arrays, enums, and nested fields. It is compiled into a strict Pydantic model. LangChain structured output is validated against that model before the result is stored or delivered; invalid output retries through the durable post-call worker and is never sent as a successful result. This validates the response shape and allowed values, not factual truth, so prompts should request transcript-supported answers and encode an explicit unknown or unresolved value.
 
-Billing abstractions live in `src/chiefvoice/billing/`: `BillingPolicyRegistry` selects the tenant's `PrepaidBillingPolicy` or `PostpaidBillingPolicy` from its account billing mode. The call coordinator now settles rounded-up elapsed seconds when a call ends; each ledger must make settlement idempotent by session ID and atomically close its reservation. The mode-specific `PrepaidLedger` and `PostpaidLedger` protocols still need concrete persistent implementations for balance reservation/debit, credit authorization, and usage accrual before calls can be enabled in production.
+Billing abstractions live in `src/chiefvoice/billing/`. The PostgreSQL store reserves credit atomically per call, snapshots integer minor-unit rates, records idempotent prepaid debits or postpaid accruals, and caps reservations by the configured maximum call duration. `0004_voice_billing` creates the plan, reservation, and ledger tables. The first-writer answer timestamp is persisted so ring time is excluded from usage. Stale unanswered reservations are released; stale answered reservations close at their reserved cap so they stop holding credit and concurrency.
 
-Billing mode is a tenant account property selected during account creation: `billing_mode` is either `prepaid` or `postpaid`. It is not selected per call. Prepaid calls are designed to reserve balance before provider call control and refund unused reservation; postpaid calls check account/credit status and accrue usage for invoicing. Reservation and settlement must be idempotent by session ID. A later billing-mode change should use an explicit, audited account update/migration flow. Billing-mode changes and concrete ledgers are not wired yet.
+Billing mode is a tenant account property selected during account creation: `billing_mode` is either `prepaid` or `postpaid`. It is not selected per call. Configure the tenant's voice plan with `PUT /v1/billing/current` and the `billing:admin` scope; read it with `GET /v1/billing/current` and `billing:read`. The `billing:admin` scope must be held only by trusted operators and must never be issued to tenant users or tenant API keys: it can enable calls, set rates and limits, and grant prepaid balance or postpaid credit. Amounts are integers in the configured currency's minor unit, with one rate per minute and a maximum call duration.
+
+Example prepaid plan body (for a `prepaid` account):
+
+```json
+{
+  "voice_enabled": true,
+  "currency": "USD",
+  "rate_per_minute_minor": 25,
+  "max_call_seconds": 300,
+  "allowed_channels": ["phone"],
+  "max_concurrent_sessions": 2,
+  "recording_allowed": false,
+  "prepaid_balance_minor": 5000
+}
+```
+
+This ledger is internal usage accounting only. It does not charge a card, accept payments, create invoices, or perform currency conversion. Postpaid usage accumulates against the configured credit limit; an operator must reconcile payments and adjust the limit until a payment/invoicing integration is added. If a call provider fails to report the end event, the reconciler caps answered usage at its reserved maximum; actual usage beyond that cap is not billed through this ledger.
 
 Create the authenticated tenant account with `POST /v1/accounts` and the `accounts:create` scope. The API takes `tenant_id` from the verified OIDC token and requires `display_name` and `billing_mode` in the request body. `GET /v1/accounts/current` with `accounts:read` returns the current tenant's account and billing mode. Creating the account does not itself activate a voice subscription; the subscription entitlement store remains a separate integration.
 
@@ -88,11 +105,15 @@ Create the authenticated tenant account with `POST /v1/accounts` and the `accoun
 
 ## Audio recordings
 
-Recordings are disabled by default. Enable them with `RECORDINGS_ENABLED=true`; the default Vertex pipeline then attaches `LocalRecordingStore`. Recording still requires the per-session subscription/consent decision (`recording_allowed=True`). The local store writes under a tenant-hashed directory with owner-only filesystem permissions. It is not encrypted and is for development only; production should provide a private encrypted object-store implementation of `RecordingStore` with retention, deletion, and access auditing.
+Recordings are disabled by default. Enable them with `RECORDINGS_ENABLED=true`; recording still requires the per-session subscription/consent decision (`recording_allowed=True`). With `RECORDINGS_ENCRYPTION_KEY`, the default pipeline uses encrypted tenant-isolated local storage. Plain WAV files are allowed only in local development when `RECORDINGS_ALLOW_UNENCRYPTED_LOCAL=true`. The storage interface can be replaced with private object storage for production; the included filesystem backend is not replicated or offsite.
 
 The local store writes valid WAV segments under `RECORDINGS_DIR` (default `./var/recordings`). Do not put recordings or raw provider payloads in logs.
 
-Cross-cutting data lifecycle contracts live in `src/chiefvoice/data_lifecycle/`. `RetentionPolicyDirectory` supplies tenant/data-class rules and `RetentionTarget` implementations purge expired records in bounded batches while respecting record-level legal holds. `BackupPolicyDirectory` and `BackupProvider` define scoped snapshots, encryption requirements, checksum/restore verification, and expiry. Concrete schedules, storage/database adapters, restore approvals, and retention audit events still need to be wired before production use.
+Cross-cutting data lifecycle code lives in `src/chiefvoice/data_lifecycle/`. Explicit `RETENTION_POLICIES_JSON` settings start a bounded background purge worker for recordings and post-call transcript/result records. Empty policy lists disable deletion. Legal holds are honored for encrypted recordings; transcript retention skips active leased jobs. Policies are deployment configuration today, not yet tenant-editable UI/API, and supported data classes depend on wired storage targets.
+
+PostgreSQL backups can be enabled with `BACKUP_POLICIES_JSON`, `BACKUP_ENCRYPTION_KEY`, and a configured `DATABASE_URL`. The worker streams `pg_dump` into an authenticated encrypted local artifact, verifies its checksum and archive structure, and prunes expired files. `BACKUP_RESTORE_TARGETS_JSON` is an optional JSON list of exact DSNs permitted for restore; restoring to the source database is rejected. Backups are service-scoped because tenants share a database. Local backup files are not disaster recovery: production must use durable offsite storage, tightly controlled restore targets, and scheduled restore drills. No live backup or restore was run for this code change.
+
+Retention and backup worker outcomes are emitted as low-cardinality Prometheus metrics. Example dashboard and alert rules are in `monitoring/`; import/configure them in your Prometheus/Grafana stack. These files do not provision monitoring infrastructure.
 
 ## Realtime agent providers
 
@@ -132,4 +153,4 @@ Access logs are disabled in the local command because Vobiz answer and media URL
 
 ## Current scope
 
-The Vobiz control/media adapter, tenant-scoped provider integration store, shared session and pipeline boundaries, Vertex AI realtime provider, recording hook, health endpoints, structured logs, metrics, and request traces are in place. The subscription authorizer still needs a concrete entitlement store before live calls can run. Other channels and realtime model providers can follow their respective adapter boundaries. See [ARCHITECTURE.md](ARCHITECTURE.md) for the boundaries and sequence.
+The Vobiz control/media adapter, tenant-scoped provider integration store, shared session and pipeline boundaries, Vertex AI realtime provider, recording hook, prepaid/postpaid usage ledgers, lifecycle workers, health endpoints, structured logs, metrics, and request traces are in place. This remains an integration foundation, not a hosted production service: configure real identity, database, Vobiz and Vertex credentials, subscription entitlements, provider pricing, secrets management, storage, and monitoring infrastructure before customer traffic. Inbound is scaffolded, while the current product focus is outbound. Other channels and realtime model providers can follow their respective adapter boundaries. See [ARCHITECTURE.md](ARCHITECTURE.md) for the boundaries and sequence.

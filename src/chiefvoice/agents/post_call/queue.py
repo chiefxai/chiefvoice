@@ -16,13 +16,14 @@ from typing import Protocol
 
 from cryptography.fernet import Fernet
 import httpx
-from sqlalchemy import DateTime, Index, Integer, MetaData, String, Text, or_, select, update
+from sqlalchemy import DateTime, Index, Integer, MetaData, String, Text, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent, PostCallResult
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
+from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.observability.setup import post_call_job_event, post_call_webhook_event
 
 logger = logging.getLogger(__name__)
@@ -208,6 +209,8 @@ class PostCallDispatcher(Protocol):
 class SqlPostCallQueue:
     """Encrypted PostgreSQL outbox plus a polling worker for post-call analysis."""
 
+    data_class = RetentionClass.TRANSCRIPT
+
     def __init__(
         self,
         database_url: str,
@@ -301,6 +304,49 @@ class SqlPostCallQueue:
                 "webhook_status": delivery.status if delivery else None,
                 "webhook_attempts": delivery.attempts if delivery else 0,
             }
+
+    async def purge_expired(self, tenant_id, cutoff, batch_size: int) -> int:
+        """Delete expired transcript/result rows and their undelivered webhook event.
+
+        A tenant-wide transcript policy legal hold is enforced by `RetentionRunner`
+        before this target is called. Active, leased analysis jobs are skipped.
+        """
+        if not tenant_id or cutoff.tzinfo is None or cutoff.utcoffset() is None:
+            raise ValueError("Tenant and timezone-aware cutoff are required")
+        if batch_size < 1:
+            raise ValueError("Purge batch size must be positive")
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            result = await session.scalars(
+                select(PostCallJobRow.session_id)
+                .where(
+                    PostCallJobRow.tenant_id == tenant_id,
+                    PostCallJobRow.ended_at <= cutoff,
+                    or_(
+                        PostCallJobRow.status != "processing",
+                        PostCallJobRow.lease_expires_at <= now,
+                    ),
+                )
+                .order_by(PostCallJobRow.ended_at)
+                .limit(batch_size)
+                .with_for_update(skip_locked=True)
+            )
+            session_ids = list(result.all())
+            if not session_ids:
+                return 0
+            await session.execute(
+                delete(PostCallWebhookDeliveryRow).where(
+                    PostCallWebhookDeliveryRow.tenant_id == tenant_id,
+                    PostCallWebhookDeliveryRow.session_id.in_(session_ids),
+                )
+            )
+            await session.execute(
+                delete(PostCallJobRow).where(
+                    PostCallJobRow.tenant_id == tenant_id,
+                    PostCallJobRow.session_id.in_(session_ids),
+                )
+            )
+            return len(session_ids)
 
     async def run_worker(self, agent: PostCallAgent) -> None:
         """Poll durable jobs until cancelled; safe for multiple workers via SKIP LOCKED."""

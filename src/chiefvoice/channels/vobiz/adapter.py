@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import inspect
 import json
@@ -168,9 +169,7 @@ class VobizAdapter:
         self, call: InboundCall, session: AcceptedSession
     ) -> tuple[AcceptedSession, Response]:
         session.recording_allowed = session.recording_allowed and settings.vobiz_record_inbound
-        # Inbound calls begin billing when the provider is answered, not when the
-        # webhook first arrived and subscription admission ran.
-        session.started_at = datetime.now(UTC)
+        # Coordinator persists and canonicalizes the answer timestamp before this.
         state = self._make_state(session)
         return session, self._answer_xml(state)
 
@@ -182,15 +181,35 @@ class VobizAdapter:
             media_type="application/xml",
         )
 
-    async def answer_outbound(self, request: Request) -> Response:
+    async def answer_outbound(self, request: Request) -> AcceptedSession:
         self._require_configured()
         state = request.query_params.get("state", "")
         claims = self._read_state(state)
         # The outbound API callback runs after the callee answers. Put that timestamp
         # into the media URL so billable duration excludes ringing and setup time.
-        claims["started_at"] = datetime.now(UTC).isoformat()
-        answered_state = self._state.dumps(claims)
-        return self._answer_xml(answered_state)
+        session = self._session_from_state(claims)
+        session.started_at = datetime.now(UTC)
+        form = await request.form()
+        provider_call_id = _string_value(
+            form.get("CallUUID") or form.get("RequestUUID")
+        ) or _string_value(
+            request.query_params.get("CallUUID") or request.query_params.get("RequestUUID")
+        )
+        if provider_call_id:
+            session.provider_call_id = provider_call_id[:256]
+        return session
+
+    def outbound_answer_response(self, session: AcceptedSession) -> Response:
+        """Create signed stream instructions after answer time is persisted."""
+        return self._answer_xml(self._make_state(session))
+
+    @staticmethod
+    def reject_outbound_answer() -> Response:
+        root = Element("Response")
+        SubElement(root, "Hangup")
+        return FastAPIResponse(
+            content=tostring(root, encoding="unicode"), media_type="application/xml"
+        )
 
     async def hangup_callback(self, request: Request) -> AcceptedSession:
         state = self._read_state(request.query_params.get("state", ""))
@@ -280,7 +299,70 @@ class VobizAdapter:
                     enable_usage_metrics=True,
                 ),
             )
-            await PipelineRunner(handle_sigint=False).run(task)
+            runner_task = asyncio.create_task(
+                PipelineRunner(handle_sigint=False).run(task),
+                name=f"vobiz-pipeline-{session.session_id}",
+            )
+            timeout_task = None
+            try:
+                if session.max_call_seconds is None:
+                    await runner_task
+                else:
+                    started_at = session.started_at
+                    if started_at.tzinfo is None or started_at.utcoffset() is None:
+                        raise ValueError("Call start time must include a timezone")
+                    remaining_seconds = max(
+                        0.0,
+                        session.max_call_seconds
+                        - (datetime.now(UTC) - started_at.astimezone(UTC)).total_seconds(),
+                    )
+                    timeout_task = asyncio.create_task(
+                        asyncio.sleep(remaining_seconds),
+                        name=f"vobiz-call-limit-{session.session_id}",
+                    )
+                    done, _pending = await asyncio.wait(
+                        {runner_task, timeout_task}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if timeout_task in done and runner_task not in done:
+                        end_reason = "timeout"
+                        logger.warning(
+                            "vobiz_media_session_max_duration_reached",
+                            extra={
+                                "session_id": session.session_id,
+                                "provider": self.provider,
+                                "max_call_seconds": session.max_call_seconds,
+                                "remaining_seconds": remaining_seconds,
+                            },
+                        )
+                        try:
+                            await self.hangup(session, "max_call_duration_reached")
+                        except Exception as exc:
+                            logger.error(
+                                "vobiz_max_duration_hangup_failed",
+                                extra={
+                                    "session_id": session.session_id,
+                                    "provider": self.provider,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                        if websocket.client_state.name != "DISCONNECTED":
+                            try:
+                                await websocket.close(
+                                    code=1000, reason="Maximum call duration reached"
+                                )
+                            except RuntimeError:
+                                pass
+                        try:
+                            await asyncio.wait_for(runner_task, timeout=5.0)
+                        except TimeoutError:
+                            runner_task.cancel()
+                            await asyncio.gather(runner_task, return_exceptions=True)
+                    else:
+                        await runner_task
+            finally:
+                if timeout_task is not None:
+                    timeout_task.cancel()
+                    await asyncio.gather(timeout_task, return_exceptions=True)
         except Exception as exc:
             end_reason = "provider_error"
             logger.error(
@@ -358,6 +440,7 @@ class VobizAdapter:
                     session.provider_call_id, "provider_call_id", 256
                 ),
                 "bot_config_id": _optional_state_string(session.bot_config_id, "bot_config_id", 128),
+                "max_call_seconds": session.max_call_seconds,
                 "started_at": started_at.isoformat(),
             }
             call_context = {
@@ -408,6 +491,13 @@ class VobizAdapter:
             ):
                 _optional_state_string(claims.get(field), field, limit)
             _parse_state_datetime(claims.get("started_at"))
+            max_call_seconds = claims.get("max_call_seconds")
+            if max_call_seconds is not None and (
+                not isinstance(max_call_seconds, int)
+                or isinstance(max_call_seconds, bool)
+                or not 1 <= max_call_seconds <= 3_600
+            ):
+                raise ValueError("Invalid max call duration")
             encrypted_context = claims.get("encrypted_call_context")
             if encrypted_context is not None:
                 if not isinstance(encrypted_context, str) or not settings.credentials_encryption_key:
@@ -450,6 +540,7 @@ class VobizAdapter:
             session_id=claims["session_id"],
             recording_allowed=claims.get("recording_allowed") is True,
             started_at=_parse_state_datetime(claims["started_at"]),
+            max_call_seconds=claims.get("max_call_seconds"),
             live_agent_context=claims.get("call_context", {}).get("live_agent_context"),
             post_call_context=claims.get("call_context", {}).get("post_call_context"),
             post_call_output_schema=claims.get("call_context", {}).get(

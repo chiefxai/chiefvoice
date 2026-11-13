@@ -1,0 +1,120 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus data source for Chiefvoice metrics",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "annotations": {"list": []},
+  "description": "Operational overview for outbound call setup, HTTP requests, post-call processing, and CRM webhook delivery.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [{"expr": "sum(rate(chiefvoice_call_start_events_total{job=~\"$job\",result=\"accepted\"}[5m]))", "legendFormat": "accepted", "refId": "A"}],
+      "title": "Outbound calls accepted / sec",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "id": 2,
+      "targets": [{"expr": "sum by (result) (rate(chiefvoice_call_start_events_total{job=~\"$job\"}[5m]))", "legendFormat": "{{result}}", "refId": "A"}],
+      "title": "Outbound call start outcomes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "id": 3,
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, route) (rate(chiefvoice_http_request_duration_seconds_bucket{job=~\"$job\"}[5m])))", "legendFormat": "{{route}} p95", "refId": "A"}],
+      "title": "HTTP request latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 4,
+      "targets": [{"expr": "sum by (status) (rate(chiefvoice_http_requests_total{job=~\"$job\",status=~\"5..\"}[5m]))", "legendFormat": "HTTP {{status}}", "refId": "A"}],
+      "title": "HTTP 5xx rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 5,
+      "targets": [{"expr": "sum by (event) (rate(chiefvoice_post_call_jobs_total{job=~\"$job\"}[5m]))", "legendFormat": "analysis {{event}}", "refId": "A"}, {"expr": "sum by (event) (rate(chiefvoice_post_call_webhook_deliveries_total{job=~\"$job\"}[5m]))", "legendFormat": "webhook {{event}}", "refId": "B"}],
+      "title": "Post-call and webhook lifecycle",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "id": 6,
+      "targets": [{"expr": "sum by (provider, channel, reason) (rate(chiefvoice_sessions_ended_total{job=~\"$job\"}[5m]))", "legendFormat": "{{provider}} / {{channel}} / {{reason}}", "refId": "A"}],
+      "title": "Call terminations by provider and reason",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24},
+      "id": 7,
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, provider, channel) (rate(chiefvoice_call_duration_seconds_bucket{job=~\"$job\"}[15m])))", "legendFormat": "{{provider}} / {{channel}} p95", "refId": "A"}],
+      "title": "Call duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+      "id": 8,
+      "targets": [{"expr": "sum by (task, result) (increase(chiefvoice_data_lifecycle_runs_total{job=~\"$job\"}[1h]))", "legendFormat": "{{task}} {{result}}", "refId": "A"}],
+      "title": "Retention and backup runs",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["chiefvoice", "voice", "operations"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "chiefvoice", "value": "chiefvoice"},
+        "definition": "label_values(chiefvoice_http_requests_total, job)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Prometheus job",
+        "multi": false,
+        "name": "job",
+        "options": [],
+        "query": {"query": "label_values(chiefvoice_http_requests_total, job)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Chiefvoice Operations",
+  "uid": "chiefvoice-operations",
+  "version": 1,
+  "weekStart": ""
+}

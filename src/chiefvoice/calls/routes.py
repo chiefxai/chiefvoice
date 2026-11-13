@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
 from chiefvoice.calls.coordinator import CallCoordinator, OutboundCallCommand
 from chiefvoice.identity.auth import Principal, require_scope
+from chiefvoice.observability.setup import call_start_event
 
 router = APIRouter()
 
@@ -81,32 +82,41 @@ async def start_outbound_call(
     coordinator: Annotated[CallCoordinator, Depends(get_call_coordinator)],
 ):
     if getattr(request.app.state, "voice_pipeline_factory", None) is None:
+        call_start_event("unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Voice pipeline is not configured",
         )
-    session = await coordinator.start_outbound(
-        OutboundCallCommand(
-            provider=body.provider,
-            channel=body.channel,
-            tenant_id=principal.tenant_id,
-            destination=body.destination,
-            caller_id=body.caller_id,
-            bot_config_id=(
-                body.live_agent.agent_id
-                if body.live_agent and body.live_agent.agent_id
-                else body.bot_config_id
-            ),
-            live_agent_context=body.live_agent.context if body.live_agent else None,
-            post_call_context=body.post_call.context if body.post_call else None,
-            post_call_output_schema=(
-                body.post_call.output_schema.model_dump(exclude_none=True)
-                if body.post_call
-                else None
-            ),
-            recording_allowed=body.recording_allowed,
+    try:
+        session = await coordinator.start_outbound(
+            OutboundCallCommand(
+                provider=body.provider,
+                channel=body.channel,
+                tenant_id=principal.tenant_id,
+                destination=body.destination,
+                caller_id=body.caller_id,
+                bot_config_id=(
+                    body.live_agent.agent_id
+                    if body.live_agent and body.live_agent.agent_id
+                    else body.bot_config_id
+                ),
+                live_agent_context=body.live_agent.context if body.live_agent else None,
+                post_call_context=body.post_call.context if body.post_call else None,
+                post_call_output_schema=(
+                    body.post_call.output_schema.model_dump(exclude_none=True)
+                    if body.post_call
+                    else None
+                ),
+                recording_allowed=body.recording_allowed,
+            )
         )
-    )
+    except HTTPException as exc:
+        call_start_event("rejected" if exc.status_code < 500 else "failed")
+        raise
+    except Exception:
+        call_start_event("failed")
+        raise
+    call_start_event("accepted")
     return {
         "session_id": session.session_id,
         "provider": session.provider,

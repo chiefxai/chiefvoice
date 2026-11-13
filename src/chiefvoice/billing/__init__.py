@@ -9,6 +9,7 @@ from chiefvoice.billing.policies import BillingPolicyRegistry, VoiceBillingPolic
 from chiefvoice.billing.policies.postpaid import PostpaidBillingPolicy
 from chiefvoice.billing.policies.postpaid import PostpaidLedger
 from chiefvoice.billing.policies.prepaid import PrepaidBillingPolicy, PrepaidLedger
+from chiefvoice.billing.store import SqlBillingDirectory
 
 __all__ = [
     "BillingMode",
@@ -19,6 +20,7 @@ __all__ = [
     "PrepaidBillingPolicy",
     "PrepaidLedger",
     "SubscriptionAuthorizer",
+    "SqlBillingDirectory",
     "VoiceBillingPolicy",
     "VoiceEntitlement",
 ]

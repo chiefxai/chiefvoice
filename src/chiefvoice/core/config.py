@@ -9,6 +9,18 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
     recordings_enabled: bool = os.getenv("RECORDINGS_ENABLED", "false").lower() == "true"
     recordings_dir: Path = Path(os.getenv("RECORDINGS_DIR", "./var/recordings"))
+    recordings_encryption_key: str | None = os.getenv("RECORDINGS_ENCRYPTION_KEY") or None
+    recordings_allow_unencrypted_local: bool = os.getenv(
+        "RECORDINGS_ALLOW_UNENCRYPTED_LOCAL",
+        "true" if os.getenv("APP_ENV", "local").lower() == "local" else "false",
+    ).lower() == "true"
+    retention_interval_seconds: int = int(os.getenv("RETENTION_INTERVAL_SECONDS", "3600"))
+    retention_policies_json: str = os.getenv("RETENTION_POLICIES_JSON", "[]")
+    backup_directory: Path = Path(os.getenv("BACKUP_DIRECTORY", "./var/backups"))
+    backup_encryption_key: str | None = os.getenv("BACKUP_ENCRYPTION_KEY") or None
+    backup_policies_json: str = os.getenv("BACKUP_POLICIES_JSON", "[]")
+    backup_interval_seconds: int = int(os.getenv("BACKUP_INTERVAL_SECONDS", "3600"))
+    backup_restore_targets_json: str = os.getenv("BACKUP_RESTORE_TARGETS_JSON", "[]")
     otel_service_name: str = os.getenv("OTEL_SERVICE_NAME", "chiefvoice-api")
     otel_exporter_otlp_endpoint: str | None = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or None
     oidc_issuer: str | None = os.getenv("OIDC_ISSUER") or None

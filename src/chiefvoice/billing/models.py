@@ -17,3 +17,4 @@ class VoiceEntitlement:
     allowed_channels: frozenset[str]
     max_concurrent_sessions: int
     recording_allowed: bool
+    max_call_seconds: int = 3_600

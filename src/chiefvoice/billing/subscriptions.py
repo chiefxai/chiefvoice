@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol
 
 from fastapi import HTTPException
@@ -49,8 +50,27 @@ class SubscriptionAuthorizer:
         await self.policies.release_voice_session(tenant_id, session_id)
 
     async def settle_voice(
-        self, tenant_id: str, session_id: str, billable_seconds: int
-    ) -> None:
-        await self.policies.settle_voice_session(
-            tenant_id, session_id, max(0, billable_seconds)
+        self,
+        tenant_id: str,
+        session_id: str,
+        billable_seconds: int,
+        ended_at: datetime | None = None,
+    ) -> bool:
+        seconds = max(0, billable_seconds)
+        if ended_at is None:
+            await self.policies.settle_voice_session(tenant_id, session_id, seconds)
+            return False
+        else:
+            return await self.policies.settle_voice_session_at(
+                tenant_id, session_id, seconds, ended_at
+            )
+
+    async def mark_answered(
+        self, tenant_id: str, session_id: str, answered_at: datetime
+    ) -> datetime | None:
+        return await self.policies.mark_voice_session_answered(
+            tenant_id, session_id, answered_at
         )
+
+    async def mark_duration_limit_event(self, tenant_id: str, session_id: str) -> bool:
+        return await self.policies.mark_duration_limit_event(tenant_id, session_id)
