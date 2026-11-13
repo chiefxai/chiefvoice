@@ -23,6 +23,10 @@ class AcceptedSession:
     live_agent_context: dict[str, Any] | None = None
     post_call_context: str | None = None
     post_call_output_schema: dict[str, Any] | None = None
+    post_call_tools: list[str] | None = None
+    post_call_time_zone: str | None = None
+    post_call_time_format: str | None = None
+    include_live_agent_context: bool = False
     max_call_seconds: int | None = None
     recording_allowed: bool = False
     session_id: str = field(default_factory=lambda: str(uuid4()))

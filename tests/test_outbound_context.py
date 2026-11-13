@@ -33,6 +33,10 @@ def test_call_contract_keeps_live_and_post_call_context_separate():
             "post_call": {
                 "context": "Extract the confirmed appointment outcome.",
                 "output_schema": _schema(),
+                "tools": ["calculator", "time"],
+                "time_zone": "Asia/Kolkata",
+                "time_format": "%Y-%m-%dT%H:%M:%S%z",
+                "include_live_agent_context": True,
             },
         }
     )
@@ -40,6 +44,33 @@ def test_call_contract_keeps_live_and_post_call_context_separate():
     assert body.live_agent.context == {"patient_name": "Alex"}
     assert body.post_call.context == "Extract the confirmed appointment outcome."
     assert body.post_call.output_schema.type == "object"
+    assert body.post_call.tools == ["calculator", "time"]
+    assert body.post_call.time_zone == "Asia/Kolkata"
+    assert body.post_call.include_live_agent_context is True
+
+
+def test_time_tool_requires_valid_zone_and_explicit_offset_format():
+    request = {
+        "provider": "vobiz",
+        "channel": "phone",
+        "destination": "+15551234567",
+        "post_call": {
+            "context": "Extract the appointment time.",
+            "output_schema": _schema(),
+            "tools": ["time"],
+        },
+    }
+    with pytest.raises(ValidationError):
+        OutboundCallBody.model_validate(
+            {**request, "post_call": {**request["post_call"], "time_zone": "Mars/Olympus"}}
+        )
+    with pytest.raises(ValidationError):
+        OutboundCallBody.model_validate(
+            {
+                **request,
+                "post_call": {**request["post_call"], "time_format": "%Y-%m-%d %H:%M"},
+            }
+        )
 
 
 def test_output_model_rejects_wrong_enum_missing_field_and_extra_field():

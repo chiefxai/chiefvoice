@@ -58,6 +58,10 @@ Start outbound calls with `POST /v1/calls/outbound`. New requests keep live conv
   },
   "post_call": {
     "context": "Record whether the patient confirmed or requested a new time. Do not guess if it was not discussed.",
+    "tools": ["calculator", "time"],
+    "time_zone": "Asia/Kolkata",
+    "time_format": "%Y-%m-%dT%H:%M:%S%z",
+    "include_live_agent_context": true,
     "output_schema": {
       "type": "object",
       "properties": {
@@ -75,6 +79,8 @@ Start outbound calls with `POST /v1/calls/outbound`. New requests keep live conv
 ```
 
 The post-call schema accepts a bounded JSON Schema subset: objects, strings, integers, numbers, booleans, arrays, enums, and nested fields. It is compiled into a strict Pydantic model. LangChain structured output is validated against that model before the result is stored or delivered; invalid output retries through the durable post-call worker and is never sent as a successful result. This validates the response shape and allowed values, not factual truth, so prompts should request transcript-supported answers and encode an explicit unknown or unresolved value.
+
+Post-call requests may select `calculator` and `time` in `post_call.tools`; only selected tools are exposed to the LangChain agent. The calculator evaluates bounded arithmetic locally without code execution. The time tool accepts an ISO 8601 timestamp with an explicit offset, converts it using `post_call.time_zone` (an IANA zone), and returns both `formatted` using `post_call.time_format` and an ISO 8601 value with the zone offset. The format must include `%z`. Defaults are `UTC` and `%Y-%m-%dT%H:%M:%S%z`. Set `include_live_agent_context` to `true` only when post-call extraction needs the live agent's context; otherwise that context is not copied into the post-call job or prompt.
 
 Billing abstractions live in `src/chiefvoice/billing/`. The PostgreSQL store reserves credit atomically per call, snapshots integer minor-unit rates, records idempotent prepaid debits or postpaid accruals, and caps reservations by the configured maximum call duration. `0004_voice_billing` creates the plan, reservation, and ledger tables. The first-writer answer timestamp is persisted so ring time is excluded from usage. Stale unanswered reservations are released; stale answered reservations close at their reserved cap so they stop holding credit and concurrency.
 

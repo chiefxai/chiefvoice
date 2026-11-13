@@ -242,6 +242,10 @@ class SqlPostCallQueue:
             "recording_uri": call.recording_uri,
             "post_call_context": call.post_call_context,
             "output_schema": call.output_schema,
+            "tools": call.tools,
+            "time_zone": call.time_zone,
+            "time_format": call.time_format,
+            "live_agent_context": call.live_agent_context,
         }
         encrypted_payload = self._fernet.encrypt(
             json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -424,6 +428,10 @@ class SqlPostCallQueue:
                 recording_uri=payload.get("recording_uri"),
                 post_call_context=payload.get("post_call_context"),
                 output_schema=payload.get("output_schema"),
+                tools=tuple(payload.get("tools", ())),
+                time_zone=payload.get("time_zone", "UTC"),
+                time_format=payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
+                live_agent_context=payload.get("live_agent_context"),
             )
             result = await asyncio.wait_for(
                 agent.process(completed_call), timeout=self.lease_duration.total_seconds() / 2

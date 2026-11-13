@@ -17,6 +17,10 @@ class CompletedCall:
     recording_uri: str | None = None
     post_call_context: str | None = None
     output_schema: dict[str, Any] | None = None
+    tools: tuple[str, ...] = ()
+    time_zone: str = "UTC"
+    time_format: str = "%Y-%m-%dT%H:%M:%S%z"
+    live_agent_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

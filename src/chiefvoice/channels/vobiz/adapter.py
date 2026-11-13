@@ -447,8 +447,17 @@ class VobizAdapter:
                 "live_agent_context": session.live_agent_context,
                 "post_call_context": session.post_call_context,
                 "post_call_output_schema": session.post_call_output_schema,
+                "post_call_tools": session.post_call_tools,
+                "post_call_time_zone": session.post_call_time_zone,
+                "post_call_time_format": session.post_call_time_format,
+                "include_live_agent_context": session.include_live_agent_context,
             }
-            if any(value is not None for value in call_context.values()):
+            has_call_context = any(
+                value is not None
+                for name, value in call_context.items()
+                if name != "include_live_agent_context"
+            ) or session.include_live_agent_context
+            if has_call_context:
                 if not settings.credentials_encryption_key:
                     raise HTTPException(
                         status_code=503,
@@ -515,12 +524,31 @@ class VobizAdapter:
                 live_context = call_context.get("live_agent_context")
                 post_context = call_context.get("post_call_context")
                 output_schema = call_context.get("post_call_output_schema")
+                post_call_tools = call_context.get("post_call_tools")
+                time_zone = call_context.get("post_call_time_zone")
+                time_format = call_context.get("post_call_time_format")
+                include_live_context = call_context.get("include_live_agent_context", False)
                 if live_context is not None and not isinstance(live_context, dict):
                     raise ValueError("Invalid live agent context")
                 if post_context is not None and not isinstance(post_context, str):
                     raise ValueError("Invalid post-call context")
                 if output_schema is not None and not isinstance(output_schema, dict):
                     raise ValueError("Invalid post-call output schema")
+                if post_call_tools is not None and (
+                    not isinstance(post_call_tools, list)
+                    or any(
+                        not isinstance(tool, str) or tool not in {"calculator", "time"}
+                        for tool in post_call_tools
+                    )
+                    or len(set(post_call_tools)) != len(post_call_tools)
+                ):
+                    raise ValueError("Invalid post-call tools")
+                if time_zone is not None and not isinstance(time_zone, str):
+                    raise ValueError("Invalid post-call time zone")
+                if time_format is not None and not isinstance(time_format, str):
+                    raise ValueError("Invalid post-call time format")
+                if not isinstance(include_live_context, bool):
+                    raise ValueError("Invalid live agent context flag")
                 claims["call_context"] = call_context
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="Not found") from exc
@@ -545,6 +573,12 @@ class VobizAdapter:
             post_call_context=claims.get("call_context", {}).get("post_call_context"),
             post_call_output_schema=claims.get("call_context", {}).get(
                 "post_call_output_schema"
+            ),
+            post_call_tools=claims.get("call_context", {}).get("post_call_tools"),
+            post_call_time_zone=claims.get("call_context", {}).get("post_call_time_zone"),
+            post_call_time_format=claims.get("call_context", {}).get("post_call_time_format"),
+            include_live_agent_context=claims.get("call_context", {}).get(
+                "include_live_agent_context", False
             ),
         )
 

@@ -28,6 +28,10 @@ class OutboundCall(Protocol):
     live_agent_context: dict[str, Any] | None
     post_call_context: str | None
     post_call_output_schema: dict[str, Any] | None
+    post_call_tools: list[str] | None
+    post_call_time_zone: str | None
+    post_call_time_format: str | None
+    include_live_agent_context: bool
     recording_allowed: bool
     session_id: str
 

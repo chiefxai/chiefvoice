@@ -49,6 +49,10 @@ async def test_outbound_context_survives_coordinator_to_channel_adapter():
         live_agent_context={"patient_name": "Alex"},
         post_call_context="Extract confirmation status.",
         post_call_output_schema=output_schema,
+        post_call_tools=["calculator", "time"],
+        post_call_time_zone="Asia/Kolkata",
+        post_call_time_format="%Y-%m-%dT%H:%M:%S%z",
+        include_live_agent_context=True,
     )
 
     session: AcceptedSession = await coordinator.start_outbound(command)
@@ -57,3 +61,7 @@ async def test_outbound_context_survives_coordinator_to_channel_adapter():
     assert adapter.call.live_agent_context == {"patient_name": "Alex"}
     assert adapter.session.post_call_context == "Extract confirmation status."
     assert adapter.session.post_call_output_schema == output_schema
+    assert adapter.call.post_call_tools == ["calculator", "time"]
+    assert adapter.session.post_call_time_zone == "Asia/Kolkata"
+    assert adapter.session.post_call_time_format == "%Y-%m-%dT%H:%M:%S%z"
+    assert adapter.session.include_live_agent_context is True

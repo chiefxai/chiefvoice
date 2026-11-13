@@ -1,5 +1,7 @@
 import json
-from typing import Annotated, Any
+from datetime import datetime
+from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -24,6 +26,37 @@ class PostCallBody(BaseModel):
 
     context: str = Field(min_length=1, max_length=8_000)
     output_schema: OutputSchema
+    tools: list[Literal["calculator", "time"]] = Field(default_factory=list, max_length=2)
+    time_zone: str = Field(default="UTC", min_length=1, max_length=100)
+    time_format: str = Field(default="%Y-%m-%dT%H:%M:%S%z", min_length=1, max_length=100)
+    include_live_agent_context: bool = False
+
+    @field_validator("tools")
+    @classmethod
+    def validate_tools(cls, tools: list[str]) -> list[str]:
+        if len(set(tools)) != len(tools):
+            raise ValueError("post_call.tools must not contain duplicates")
+        return tools
+
+    @field_validator("time_zone")
+    @classmethod
+    def validate_time_zone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("time_zone must be a valid IANA time zone") from exc
+        return value
+
+    @field_validator("time_format")
+    @classmethod
+    def validate_time_format(cls, value: str) -> str:
+        if "%z" not in value:
+            raise ValueError("time_format must include %z so the UTC offset is explicit")
+        try:
+            datetime.now().strftime(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("time_format is not a valid strftime format") from exc
+        return value
 
     @field_validator("output_schema")
     @classmethod
@@ -57,6 +90,12 @@ class OutboundCallBody(BaseModel):
                 self.post_call.output_schema.model_dump(exclude_none=True)
                 if self.post_call
                 else None
+            ),
+            "post_call_tools": self.post_call.tools if self.post_call else [],
+            "post_call_time_zone": self.post_call.time_zone if self.post_call else None,
+            "post_call_time_format": self.post_call.time_format if self.post_call else None,
+            "include_live_agent_context": (
+                self.post_call.include_live_agent_context if self.post_call else False
             ),
         }
         if len(json.dumps(context_payload, ensure_ascii=False).encode("utf-8")) > 6_000:
@@ -106,6 +145,12 @@ async def start_outbound_call(
                     body.post_call.output_schema.model_dump(exclude_none=True)
                     if body.post_call
                     else None
+                ),
+                post_call_tools=body.post_call.tools if body.post_call else None,
+                post_call_time_zone=body.post_call.time_zone if body.post_call else None,
+                post_call_time_format=body.post_call.time_format if body.post_call else None,
+                include_live_agent_context=(
+                    body.post_call.include_live_agent_context if body.post_call else False
                 ),
                 recording_allowed=body.recording_allowed,
             )

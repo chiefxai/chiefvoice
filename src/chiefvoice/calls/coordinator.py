@@ -35,6 +35,10 @@ class OutboundCallCommand:
     live_agent_context: dict[str, Any] | None = None
     post_call_context: str | None = None
     post_call_output_schema: dict[str, Any] | None = None
+    post_call_tools: list[str] | None = None
+    post_call_time_zone: str | None = None
+    post_call_time_format: str | None = None
+    include_live_agent_context: bool = False
     recording_allowed: bool = False
 
 
@@ -80,6 +84,10 @@ class CallCoordinator:
             live_agent_context=command.live_agent_context,
             post_call_context=command.post_call_context,
             post_call_output_schema=command.post_call_output_schema,
+            post_call_tools=command.post_call_tools,
+            post_call_time_zone=command.post_call_time_zone,
+            post_call_time_format=command.post_call_time_format,
+            include_live_agent_context=command.include_live_agent_context,
         )
         entitlement = await self.subscriptions.authorize_voice(
             command.tenant_id, session.session_id, command.channel, Direction.OUTBOUND
@@ -94,6 +102,10 @@ class CallCoordinator:
             live_agent_context=command.live_agent_context,
             post_call_context=command.post_call_context,
             post_call_output_schema=command.post_call_output_schema,
+            post_call_tools=command.post_call_tools,
+            post_call_time_zone=command.post_call_time_zone,
+            post_call_time_format=command.post_call_time_format,
+            include_live_agent_context=command.include_live_agent_context,
             recording_allowed=command.recording_allowed and entitlement.recording_allowed,
             session_id=session.session_id,
         )
@@ -236,6 +248,12 @@ class CallCoordinator:
             transcript=transcript,
             post_call_context=session.post_call_context,
             output_schema=session.post_call_output_schema,
+            tools=tuple(session.post_call_tools or ()),
+            time_zone=session.post_call_time_zone or "UTC",
+            time_format=session.post_call_time_format or "%Y-%m-%dT%H:%M:%S%z",
+            live_agent_context=(
+                session.live_agent_context if session.include_live_agent_context else None
+            ),
         )
         try:
             # This writes a durable queue record only; model work happens in the worker.
@@ -278,6 +296,10 @@ class _OutboundCallData:
     live_agent_context: dict[str, Any] | None
     post_call_context: str | None
     post_call_output_schema: dict[str, Any] | None
+    post_call_tools: list[str] | None
+    post_call_time_zone: str | None
+    post_call_time_format: str | None
+    include_live_agent_context: bool
     recording_allowed: bool
     session_id: str
 
