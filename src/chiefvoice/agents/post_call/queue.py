@@ -237,6 +237,8 @@ class SqlPostCallQueue:
         payload = {
             "transcript": call.transcript,
             "recording_uri": call.recording_uri,
+            "post_call_context": call.post_call_context,
+            "output_schema": call.output_schema,
         }
         encrypted_payload = self._fernet.encrypt(
             json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -374,6 +376,8 @@ class SqlPostCallQueue:
                 ended_at=job["ended_at"],
                 transcript=payload["transcript"],
                 recording_uri=payload.get("recording_uri"),
+                post_call_context=payload.get("post_call_context"),
+                output_schema=payload.get("output_schema"),
             )
             result = await asyncio.wait_for(
                 agent.process(completed_call), timeout=self.lease_duration.total_seconds() / 2

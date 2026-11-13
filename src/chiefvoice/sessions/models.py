@@ -20,6 +20,9 @@ class AcceptedSession:
     provider_call_id: str | None = None
     tenant_id: str | None = None
     bot_config_id: str | None = None
+    live_agent_context: dict[str, Any] | None = None
+    post_call_context: str | None = None
+    post_call_output_schema: dict[str, Any] | None = None
     recording_allowed: bool = False
     session_id: str = field(default_factory=lambda: str(uuid4()))
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))

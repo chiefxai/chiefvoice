@@ -1,4 +1,4 @@
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from fastapi import Request, Response
 from pipecat.transports.base_transport import BaseTransport
@@ -25,6 +25,9 @@ class OutboundCall(Protocol):
     destination: str
     caller_id: str | None
     bot_config_id: str | None
+    live_agent_context: dict[str, Any] | None
+    post_call_context: str | None
+    post_call_output_schema: dict[str, Any] | None
     recording_allowed: bool
     session_id: str
 

@@ -1,5 +1,6 @@
 import hmac
 import inspect
+import json
 import logging
 import urllib.parse
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 from xml.etree.ElementTree import Element, SubElement, tostring
 
+from cryptography.fernet import Fernet, InvalidToken
 import httpx
 from fastapi import HTTPException, Request, Response, WebSocket
 from fastapi.responses import Response as FastAPIResponse
@@ -27,7 +29,7 @@ from chiefvoice.sessions import AcceptedSession, Direction
 logger = logging.getLogger(__name__)
 VOBIZ_API = "https://api.vobiz.ai"
 PIPELINE_SAMPLE_RATE = 8000
-MAX_CALL_STATE_TOKEN_LENGTH = 4096
+MAX_CALL_STATE_TOKEN_LENGTH = 16_384
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,6 +360,21 @@ class VobizAdapter:
                 "bot_config_id": _optional_state_string(session.bot_config_id, "bot_config_id", 128),
                 "started_at": started_at.isoformat(),
             }
+            call_context = {
+                "live_agent_context": session.live_agent_context,
+                "post_call_context": session.post_call_context,
+                "post_call_output_schema": session.post_call_output_schema,
+            }
+            if any(value is not None for value in call_context.values()):
+                if not settings.credentials_encryption_key:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Call context encryption is not configured",
+                    )
+                encrypted_context = Fernet(
+                    settings.credentials_encryption_key.encode("ascii")
+                ).encrypt(json.dumps(call_context, ensure_ascii=False).encode("utf-8"))
+                claims["encrypted_call_context"] = encrypted_context.decode("ascii")
         except (AttributeError, ValueError) as exc:
             raise HTTPException(
                 status_code=422, detail="Call state contains invalid session data"
@@ -391,6 +408,30 @@ class VobizAdapter:
             ):
                 _optional_state_string(claims.get(field), field, limit)
             _parse_state_datetime(claims.get("started_at"))
+            encrypted_context = claims.get("encrypted_call_context")
+            if encrypted_context is not None:
+                if not isinstance(encrypted_context, str) or not settings.credentials_encryption_key:
+                    raise ValueError("Invalid encrypted call context")
+                try:
+                    call_context = json.loads(
+                        Fernet(settings.credentials_encryption_key.encode("ascii"))
+                        .decrypt(encrypted_context.encode("ascii"))
+                        .decode("utf-8")
+                    )
+                except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("Invalid encrypted call context") from exc
+                if not isinstance(call_context, dict):
+                    raise ValueError("Invalid call context")
+                live_context = call_context.get("live_agent_context")
+                post_context = call_context.get("post_call_context")
+                output_schema = call_context.get("post_call_output_schema")
+                if live_context is not None and not isinstance(live_context, dict):
+                    raise ValueError("Invalid live agent context")
+                if post_context is not None and not isinstance(post_context, str):
+                    raise ValueError("Invalid post-call context")
+                if output_schema is not None and not isinstance(output_schema, dict):
+                    raise ValueError("Invalid post-call output schema")
+                claims["call_context"] = call_context
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="Not found") from exc
         return claims
@@ -409,6 +450,11 @@ class VobizAdapter:
             session_id=claims["session_id"],
             recording_allowed=claims.get("recording_allowed") is True,
             started_at=_parse_state_datetime(claims["started_at"]),
+            live_agent_context=claims.get("call_context", {}).get("live_agent_context"),
+            post_call_context=claims.get("call_context", {}).get("post_call_context"),
+            post_call_output_schema=claims.get("call_context", {}).get(
+                "post_call_output_schema"
+            ),
         )
 
     def _public_url(self, path: str, query: dict[str, str]) -> str:

@@ -42,6 +42,40 @@ Create tenant-scoped live agent profiles with `POST /v1/agents` and `agents:writ
 }
 ```
 
+Start outbound calls with `POST /v1/calls/outbound`. New requests keep live conversation data separate from the post-call task and requested result shape. The live context is added as reference data to the selected live agent; the post-call task and schema are used only after hangup. Per-call context is encrypted in provider callback state and in the durable post-call queue. Combined contexts and schema are limited to 6,000 bytes.
+
+```json
+{
+  "provider": "vobiz",
+  "channel": "phone",
+  "destination": "+15551234567",
+  "live_agent": {
+    "agent_id": "appointment-caller",
+    "context": {
+      "patient_name": "Alex",
+      "appointment_date": "Tuesday"
+    }
+  },
+  "post_call": {
+    "context": "Record whether the patient confirmed or requested a new time. Do not guess if it was not discussed.",
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": ["confirmed", "reschedule_requested", "unresolved"]
+        },
+        "notes": { "type": "string" }
+      },
+      "required": ["outcome", "notes"],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+The post-call schema accepts a bounded JSON Schema subset: objects, strings, integers, numbers, booleans, arrays, enums, and nested fields. It is compiled into a strict Pydantic model. LangChain structured output is validated against that model before the result is stored or delivered; invalid output retries through the durable post-call worker and is never sent as a successful result. This validates the response shape and allowed values, not factual truth, so prompts should request transcript-supported answers and encode an explicit unknown or unresolved value.
+
 Billing abstractions live in `src/chiefvoice/billing/`: `BillingPolicyRegistry` selects the tenant's `PrepaidBillingPolicy` or `PostpaidBillingPolicy` from its account billing mode. The call coordinator now settles rounded-up elapsed seconds when a call ends; each ledger must make settlement idempotent by session ID and atomically close its reservation. The mode-specific `PrepaidLedger` and `PostpaidLedger` protocols still need concrete persistent implementations for balance reservation/debit, credit authorization, and usage accrual before calls can be enabled in production.
 
 Billing mode is a tenant account property selected during account creation: `billing_mode` is either `prepaid` or `postpaid`. It is not selected per call. Prepaid calls are designed to reserve balance before provider call control and refund unused reservation; postpaid calls check account/credit status and accrue usage for invoicing. Reservation and settlement must be idempotent by session ID. A later billing-mode change should use an explicit, audited account update/migration flow. Billing-mode changes and concrete ledgers are not wired yet.
@@ -66,7 +100,7 @@ The conversation engine has a provider boundary independent of the phone channel
 
 The default app factory wires Vertex when project and location are configured. For another model provider, implement `RealtimeAgentProvider.create_processors(session)` in `agents/call/providers/` and register it through `RealtimeAgentRegistry`; `create_realtime_pipeline_factory(...)` keeps the transport, recording, and call lifecycle shared. This leaves room for an OpenAI/ChatGPT realtime backend without coupling it to Vobiz or other channels.
 
-Post-call analysis lives in `agents/post_call/` and uses LangChain with a structured result (`summary`, `disposition`, `extracted_data`, and `action_items`). Its initial model is Gemini on Vertex AI, configured with the same Vertex project/location and credentials plus `POST_CALL_MODEL`. The live Pipecat pipeline collects Gemini Live caller and assistant transcription frames. At call end, a completed call with a transcript is inserted idempotently into the encrypted PostgreSQL `post_call_jobs` outbox; a background worker runs LangChain analysis off the hangup path and stores the encrypted result. Fetch job status and completed analysis with `GET /v1/calls/{session_id}/post-call` and the `calls:read` scope. Post-call analysis is required by default, so calls fail closed if the agent or durable queue is missing. To explicitly disable it, set `POST_CALL_AGENT_PROVIDER=disabled`. Apply the database migration and configure `POST_CALL_ENCRYPTION_KEY` (a dedicated Fernet key) to enable dispatch. Generate a key with `uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'` and keep it separate from `CREDENTIALS_ENCRYPTION_KEY`. Jobs retry with backoff and a processing lease; monitor `chiefvoice_post_call_jobs_total{event="failed"}` and `chiefvoice_post_call_missing_transcripts_total`. Missing transcripts are logged without transcript content; other live providers must emit compatible Pipecat transcription/text frames or provide their own transcript collector.
+Post-call analysis lives in `agents/post_call/` and uses LangChain with a structured result (`summary`, `disposition`, `extracted_data`, `action_items`, and optional caller-defined `structured_output`). Its initial model is Gemini on Vertex AI, configured with the same Vertex project/location and credentials plus `POST_CALL_MODEL`. The live Pipecat pipeline collects Gemini Live caller and assistant transcription frames. At call end, a completed call with a transcript is inserted idempotently into the encrypted PostgreSQL `post_call_jobs` outbox; a background worker runs LangChain analysis off the hangup path and stores the encrypted result. Fetch job status and completed analysis with `GET /v1/calls/{session_id}/post-call` and the `calls:read` scope. Post-call analysis is required by default, so calls fail closed if the agent or durable queue is missing. To explicitly disable it, set `POST_CALL_AGENT_PROVIDER=disabled`. Apply the database migration and configure `POST_CALL_ENCRYPTION_KEY` (a dedicated Fernet key) to enable dispatch. Generate a key with `uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'` and keep it separate from `CREDENTIALS_ENCRYPTION_KEY`. Jobs retry with backoff and a processing lease; monitor `chiefvoice_post_call_jobs_total{event="failed"}` and `chiefvoice_post_call_missing_transcripts_total`. Missing transcripts are logged without transcript content; other live providers must emit compatible Pipecat transcription/text frames or provide their own transcript collector.
 
 ## Post-call webhooks
 

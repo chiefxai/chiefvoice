@@ -1,21 +1,66 @@
-from typing import Annotated
+import json
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from chiefvoice.identity.auth import Principal, require_scope
+from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
 from chiefvoice.calls.coordinator import CallCoordinator, OutboundCallCommand
+from chiefvoice.identity.auth import Principal, require_scope
 
 router = APIRouter()
 
 
+class LiveAgentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str | None = Field(default=None, max_length=128)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class PostCallBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: str = Field(min_length=1, max_length=8_000)
+    output_schema: OutputSchema
+
+    @field_validator("output_schema")
+    @classmethod
+    def require_object_root(cls, schema: OutputSchema) -> OutputSchema:
+        return validate_output_schema(schema.model_dump(exclude_none=True))
+
+
 class OutboundCallBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = Field(min_length=1, max_length=40)
     channel: str = Field(min_length=1, max_length=40)
     destination: str = Field(min_length=3, max_length=64)
     caller_id: str | None = Field(default=None, max_length=64)
+    live_agent: LiveAgentBody | None = None
+    post_call: PostCallBody | None = None
+    # Kept temporarily for existing clients; new integrations should use live_agent.agent_id.
     bot_config_id: str | None = Field(default=None, max_length=128)
     recording_allowed: bool = False
+
+    @model_validator(mode="after")
+    def validate_context_payloads(self) -> "OutboundCallBody":
+        if self.live_agent and self.live_agent.agent_id and self.bot_config_id:
+            if self.live_agent.agent_id != self.bot_config_id:
+                raise ValueError("live_agent.agent_id and bot_config_id must match")
+        live_context: dict[str, Any] = self.live_agent.context if self.live_agent else {}
+        context_payload = {
+            "live_agent_context": live_context,
+            "post_call_context": self.post_call.context if self.post_call else None,
+            "post_call_output_schema": (
+                self.post_call.output_schema.model_dump(exclude_none=True)
+                if self.post_call
+                else None
+            ),
+        }
+        if len(json.dumps(context_payload, ensure_ascii=False).encode("utf-8")) > 6_000:
+            raise ValueError("combined per-call contexts and output schema exceed 6000 bytes")
+        return self
 
 
 def get_call_coordinator(request: Request) -> CallCoordinator:
@@ -47,7 +92,18 @@ async def start_outbound_call(
             tenant_id=principal.tenant_id,
             destination=body.destination,
             caller_id=body.caller_id,
-            bot_config_id=body.bot_config_id,
+            bot_config_id=(
+                body.live_agent.agent_id
+                if body.live_agent and body.live_agent.agent_id
+                else body.bot_config_id
+            ),
+            live_agent_context=body.live_agent.context if body.live_agent else None,
+            post_call_context=body.post_call.context if body.post_call else None,
+            post_call_output_schema=(
+                body.post_call.output_schema.model_dump(exclude_none=True)
+                if body.post_call
+                else None
+            ),
             recording_allowed=body.recording_allowed,
         )
     )

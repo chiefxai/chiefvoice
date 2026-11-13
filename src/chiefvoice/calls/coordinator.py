@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
+from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException, Request, Response
@@ -30,6 +31,9 @@ class OutboundCallCommand:
     destination: str
     caller_id: str | None = None
     bot_config_id: str | None = None
+    live_agent_context: dict[str, Any] | None = None
+    post_call_context: str | None = None
+    post_call_output_schema: dict[str, Any] | None = None
     recording_allowed: bool = False
 
 
@@ -72,6 +76,9 @@ class CallCoordinator:
             callee=command.destination,
             tenant_id=command.tenant_id,
             bot_config_id=command.bot_config_id,
+            live_agent_context=command.live_agent_context,
+            post_call_context=command.post_call_context,
+            post_call_output_schema=command.post_call_output_schema,
         )
         entitlement = await self.subscriptions.authorize_voice(
             command.tenant_id, session.session_id, command.channel, Direction.OUTBOUND
@@ -83,6 +90,9 @@ class CallCoordinator:
             destination=command.destination,
             caller_id=command.caller_id,
             bot_config_id=command.bot_config_id,
+            live_agent_context=command.live_agent_context,
+            post_call_context=command.post_call_context,
+            post_call_output_schema=command.post_call_output_schema,
             recording_allowed=command.recording_allowed and entitlement.recording_allowed,
             session_id=session.session_id,
         )
@@ -187,6 +197,8 @@ class CallCoordinator:
             started_at=session.started_at.isoformat(),
             ended_at=ended_at.isoformat(),
             transcript=transcript,
+            post_call_context=session.post_call_context,
+            output_schema=session.post_call_output_schema,
         )
         try:
             # This writes a durable queue record only; model work happens in the worker.
@@ -226,6 +238,9 @@ class _OutboundCallData:
     destination: str
     caller_id: str | None
     bot_config_id: str | None
+    live_agent_context: dict[str, Any] | None
+    post_call_context: str | None
+    post_call_output_schema: dict[str, Any] | None
     recording_allowed: bool
     session_id: str
 
