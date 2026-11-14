@@ -52,6 +52,14 @@ http.interceptors.request.use(config => {
   if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
+http.interceptors.response.use(response => response, error => {
+  if (axios.isAxiosError(error) && error.response?.status === 401) {
+    sessionStorage.removeItem('chiefvoice.token')
+    void logout().catch(() => undefined)
+    window.dispatchEvent(new Event('chiefvoice-auth-expired'))
+  }
+  return Promise.reject(error)
+})
 
 const api = {
   phoneNumbers: () => http.get<{ items: RegisteredNumber[] }>('/v1/admin/customers/phone-numbers').then(r => r.data.items),
@@ -109,6 +117,17 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     void initializeAuth()
     return () => { active = false }
   }, [])
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      setToken('')
+      setAuthReady(true)
+      setAuthError('Your sign-in could not be verified. Please sign in again.')
+      void queryClient.clear()
+    }
+    window.addEventListener('chiefvoice-auth-expired', handleUnauthorized)
+    return () => window.removeEventListener('chiefvoice-auth-expired', handleUnauthorized)
+  }, [queryClient])
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
   const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && page === 'API', retry: false })
   const issueMutation = useMutation({

@@ -9,10 +9,12 @@ import json
 import os
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from time import time
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import jwt
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 ISSUER = os.getenv("DEV_OIDC_ISSUER", "http://localhost:9000").rstrip("/")
@@ -20,7 +22,6 @@ AUDIENCE = "chiefvoice-local"
 CLIENT_ID = "chiefvoice-console"
 REDIRECT_URI = os.getenv("DEV_OIDC_REDIRECT_URI", "http://localhost:5173/")
 KEY_ID = "chiefvoice-local-dev"
-PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 LOCAL_SCOPES = (
     "accounts:create accounts:read agents:read agents:write api_keys:read api_keys:write "
     "billing:admin billing:read calls:read calls:reconcile calls:write integrations:read "
@@ -28,6 +29,32 @@ LOCAL_SCOPES = (
     "webhooks:read webhooks:write"
 )
 _AUTHORIZATION_CODES: dict[str, dict[str, object]] = {}
+
+
+def _load_or_create_signing_key():
+    key_path = Path(
+        os.getenv("DEV_OIDC_SIGNING_KEY_PATH", "/home/chiefvoice/.local/oidc-signing-key.pem")
+    )
+    try:
+        return serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+    except FileNotFoundError:
+        key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        try:
+            descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        with os.fdopen(descriptor, "wb") as key_file:
+            key_file.write(pem)
+        return private_key
+
+
+PRIVATE_KEY = _load_or_create_signing_key()
 
 
 def _b64int(value: int) -> str:

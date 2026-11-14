@@ -115,6 +115,7 @@ services:
     command: ["python", "/app/scripts/dev_oidc.py"]
     volumes:
       - ./scripts/dev_oidc.py:/app/scripts/dev_oidc.py:ro
+      - dev-oidc-data:/home/chiefvoice
     environment:
       DEV_OIDC_PORT: "9000"
       DEV_OIDC_ISSUER: http://localhost:9000
@@ -139,3 +140,4 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  dev-oidc-data:
