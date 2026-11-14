@@ -14,6 +14,7 @@ from chiefvoice.agents.post_call.fallback_spool import PostCallFallbackSpool
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
 from chiefvoice.billing import SubscriptionAuthorizer
 from chiefvoice.channels.base import ChannelAdapter, InboundCall, OutboundCall
+from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.observability.setup import (
     call_duration_limit_event,
     post_call_enqueue_fallback_event,
@@ -55,6 +56,8 @@ class CallCoordinator:
         post_call_available: bool = False,
         agent_profile_directory: AgentProfileDirectory | None = None,
         post_call_fallback_spool: PostCallFallbackSpool | None = None,
+        vertex_project_directory: TenantVertexProjectDirectory | None = None,
+        require_tenant_vertex_project: bool = False,
     ):
         self.adapters = adapters
         self.subscriptions = subscriptions
@@ -63,9 +66,12 @@ class CallCoordinator:
         self.post_call_available = post_call_available
         self.agent_profile_directory = agent_profile_directory
         self.post_call_fallback_spool = post_call_fallback_spool
+        self.vertex_project_directory = vertex_project_directory
+        self.require_tenant_vertex_project = require_tenant_vertex_project
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
         self._require_post_call_ready()
+        await self._require_vertex_project(command.tenant_id)
         adapter = self._adapter(command.provider)
         if command.bot_config_id is not None:
             if self.agent_profile_directory is None:
@@ -126,6 +132,10 @@ class CallCoordinator:
     async def handle_inbound(self, provider: str, request: Request) -> Response:
         adapter = self._adapter(provider)
         inbound = await adapter.parse_inbound(request)
+        try:
+            await self._require_vertex_project(inbound.tenant_id)
+        except HTTPException as exc:
+            return await adapter.reject_inbound(inbound, str(exc.detail))
         bot_config_id = getattr(inbound, "bot_config_id", None)
         if bot_config_id is not None:
             if self.agent_profile_directory is None:
@@ -178,6 +188,14 @@ class CallCoordinator:
             raise
         session_started(session.channel, session.provider)
         return response
+
+    async def _require_vertex_project(self, tenant_id: str) -> None:
+        if not self.require_tenant_vertex_project:
+            return
+        if self.vertex_project_directory is None:
+            raise HTTPException(status_code=503, detail="Tenant Vertex project storage is not configured")
+        if await self.vertex_project_directory.get_ready_project_id(tenant_id) is None:
+            raise HTTPException(status_code=503, detail="Tenant Vertex project is not ready")
 
     async def mark_answered(self, session: AcceptedSession) -> datetime:
         if session.tenant_id is None:

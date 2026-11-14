@@ -7,6 +7,7 @@ from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.call.providers.base import RealtimeAgentProvider
+from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.sessions import AcceptedSession
 
 
@@ -18,7 +19,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
     def __init__(
         self,
         *,
-        project_id: str,
+        project_id: str | None,
         location: str,
         model: str,
         voice: str,
@@ -26,9 +27,13 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         profile_directory: AgentProfileDirectory | None = None,
         credentials_json: str | None = None,
         credentials_path: str | None = None,
+        project_directory: TenantVertexProjectDirectory | None = None,
+        require_tenant_project: bool = False,
     ):
-        if not project_id or not location:
-            raise ValueError("Vertex AI project ID and location are required")
+        if (not project_id and not project_directory) or not location:
+            raise ValueError("Vertex AI project ID or tenant project directory and location are required")
+        if require_tenant_project and project_directory is None:
+            raise ValueError("Tenant Vertex project directory is required when project isolation is enabled")
         self.project_id = project_id
         self.location = location
         self.model = model
@@ -37,10 +42,24 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         self.profile_directory = profile_directory
         self.credentials_json = credentials_json
         self.credentials_path = credentials_path
+        self.project_directory = project_directory
+        self.require_tenant_project = require_tenant_project
 
     async def create_processors(self, session: AcceptedSession) -> Sequence[FrameProcessor]:
         # Import lazily so deployments using another backend do not require Google packages.
         from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
+
+        project_id = self.project_id
+        if self.require_tenant_project:
+            project_id = None
+        if self.project_directory is not None:
+            if session.tenant_id is None:
+                raise HTTPException(status_code=503, detail="Tenant Vertex project is unavailable")
+            project_id = await self.project_directory.get_ready_project_id(session.tenant_id)
+            if project_id is None:
+                raise HTTPException(status_code=503, detail="Tenant Vertex project is not ready")
+        if not project_id:
+            raise HTTPException(status_code=503, detail="Vertex AI project is not configured")
 
         voice = self.voice
         system_instruction = self.system_instruction
@@ -77,7 +96,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             )
 
         service = GeminiLiveVertexLLMService(
-            project_id=self.project_id,
+            project_id=project_id,
             location=self.location,
             credentials=self.credentials_json,
             credentials_path=self.credentials_path,

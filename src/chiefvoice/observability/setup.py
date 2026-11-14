@@ -24,7 +24,7 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("session_id", "channel", "provider", "event"):
+        for key in ("session_id", "tenant_id", "project_id", "channel", "provider", "event", "attempt", "error_type"):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         if record.exc_info:
@@ -108,6 +108,15 @@ RECORDING_STORAGE_EVENTS = Counter(
     "chiefvoice_recording_storage_events_total",
     "Encrypted recording object storage outcomes",
     ["result"],
+)
+VERTEX_PROJECT_PROVISIONING = Counter(
+    "chiefvoice_vertex_project_provisioning_total",
+    "Tenant Vertex project provisioning outcomes",
+    ["result"],
+)
+VERTEX_PROJECT_PROVISIONING_DURATION = Histogram(
+    "chiefvoice_vertex_project_provisioning_duration_seconds",
+    "Duration of tenant Vertex project provisioning attempts",
 )
 
 

@@ -2,7 +2,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-CURRENT_SCHEMA_REVISION = "0005_post_call_lambda_dispatch"
+CURRENT_SCHEMA_REVISION = "0006_tenant_vertex_projects"
 CONSTRAINT_NAMING = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",

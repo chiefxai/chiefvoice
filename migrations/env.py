@@ -11,6 +11,7 @@ from chiefvoice.accounts.store import Base as AccountBase
 from chiefvoice.agents.call.configs.store import AgentProfileRow  # noqa: F401
 from chiefvoice.agents.post_call.queue import Base as PostCallBase
 from chiefvoice.channels.integration_store import Base as IntegrationBase
+from chiefvoice.cloud_projects.store import VertexProjectBase
 
 config = context.config
 if config.config_file_name is not None:
@@ -22,7 +23,12 @@ if database_url:
     # ConfigParser treats percent signs as interpolation markers.
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
-target_metadata = [AccountBase.metadata, IntegrationBase.metadata, PostCallBase.metadata]
+target_metadata = [
+    AccountBase.metadata,
+    IntegrationBase.metadata,
+    PostCallBase.metadata,
+    VertexProjectBase.metadata,
+]
 
 
 def run_migrations_offline() -> None:

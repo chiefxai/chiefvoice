@@ -60,6 +60,12 @@ class Settings:
     )
     vertex_credentials_json: str | None = os.getenv("VERTEX_CREDENTIALS_JSON") or None
     vertex_credentials_path: str | None = os.getenv("VERTEX_CREDENTIALS_PATH") or None
+    vertex_project_isolation_enabled: bool = os.getenv("VERTEX_PROJECT_ISOLATION_ENABLED", "false").lower() == "true"
+    gcp_project_parent: str | None = os.getenv("GCP_PROJECT_PARENT") or None
+    gcp_billing_account_id: str | None = os.getenv("GCP_BILLING_ACCOUNT_ID") or None
+    gcp_runtime_service_account: str | None = os.getenv("GCP_RUNTIME_SERVICE_ACCOUNT") or None
+    gcp_budget_api_project_id: str | None = os.getenv("GCP_BUDGET_API_PROJECT_ID") or None
+    gcp_vertex_monthly_spend_cap: str | None = os.getenv("GCP_VERTEX_MONTHLY_SPEND_CAP") or None
     post_call_agent_provider: str = os.getenv("POST_CALL_AGENT_PROVIDER", "langchain_vertex").strip().lower()
     post_call_model: str = os.getenv("POST_CALL_MODEL", "gemini-2.5-flash")
     post_call_encryption_key: str | None = os.getenv("POST_CALL_ENCRYPTION_KEY") or None

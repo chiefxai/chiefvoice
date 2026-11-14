@@ -31,6 +31,15 @@ def _serialize(account):
     }
 
 
+async def _with_vertex_project(request: Request, account, payload: dict) -> dict:
+    directory = getattr(request.app.state, "vertex_project_directory", None)
+    if directory is not None:
+        payload["vertex_project"] = await directory.request_provisioning(
+            account.tenant_id, account.display_name
+        )
+    return payload
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_account(
     body: CreateAccountBody,
@@ -48,7 +57,7 @@ async def create_account(
         raise HTTPException(status_code=422, detail="Account name cannot be blank")
     if not await store.create(account):
         raise HTTPException(status_code=409, detail="An account already exists for this tenant")
-    return _serialize(account)
+    return await _with_vertex_project(request, account, _serialize(account))
 
 
 @router.get("/current")
@@ -59,4 +68,32 @@ async def get_current_account(
     account = await _account_store(request).get(principal.tenant_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Account has not been created")
-    return _serialize(account)
+    return await _with_vertex_project(request, account, _serialize(account))
+
+
+@router.get("/current/vertex-project")
+async def get_current_vertex_project(
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("accounts:read"))],
+):
+    directory = getattr(request.app.state, "vertex_project_directory", None)
+    if directory is None:
+        raise HTTPException(status_code=404, detail="Tenant Vertex project provisioning is disabled")
+    account = await _account_store(request).get(principal.tenant_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account has not been created")
+    return await directory.request_provisioning(account.tenant_id, account.display_name)
+
+
+@router.post("/current/vertex-project/retry")
+async def retry_current_vertex_project(
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("accounts:create"))],
+):
+    directory = getattr(request.app.state, "vertex_project_directory", None)
+    if directory is None:
+        raise HTTPException(status_code=404, detail="Tenant Vertex project provisioning is disabled")
+    try:
+        return await directory.retry(principal.tenant_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Tenant Vertex project was not requested") from exc

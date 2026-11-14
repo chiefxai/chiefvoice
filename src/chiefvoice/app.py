@@ -33,6 +33,9 @@ from chiefvoice.agents.post_call.webhook_routes import router as post_call_webho
 from chiefvoice.calls.coordinator import CallCoordinator
 from chiefvoice.channels.base import ChannelAdapter
 from chiefvoice.core.config import settings
+from chiefvoice.cloud_projects.google_provisioner import GoogleCloudTenantProjectProvisioner
+from chiefvoice.cloud_projects.post_call import TenantVertexPostCallAgent
+from chiefvoice.cloud_projects.store import SqlTenantVertexProjectDirectory
 from chiefvoice.observability import configure_logging, instrument_app
 from chiefvoice.billing import SubscriptionAuthorizer
 from chiefvoice.billing import BillingPolicyRegistry, PostpaidBillingPolicy, PrepaidBillingPolicy
@@ -79,6 +82,8 @@ async def lifespan(_app: FastAPI):
     recording_store = getattr(_app.state, "recording_store", None)
     backup_provider = getattr(_app.state, "backup_provider", None)
     backup_execution_lock = getattr(_app.state, "backup_execution_lock", None)
+    vertex_project_directory = getattr(_app.state, "vertex_project_directory", None)
+    vertex_project_provisioner = getattr(_app.state, "vertex_project_provisioner", None)
     worker_tasks: list[asyncio.Task] = []
     storage_checks = getattr(_app.state, "object_storage_checks", [])
     _app.state.object_storage_ready = not storage_checks
@@ -95,6 +100,11 @@ async def lifespan(_app: FastAPI):
             await post_call_webhook_directory.initialize()
         if agent_profile_directory is not None:
             await agent_profile_directory.initialize()
+        if vertex_project_directory is not None:
+            await vertex_project_directory.initialize()
+            worker_tasks.append(asyncio.create_task(
+                vertex_project_directory.run_worker(vertex_project_provisioner)
+            ))
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.initialize()
         if post_call_replay_service is not None:
@@ -160,6 +170,8 @@ async def lifespan(_app: FastAPI):
             await api_key_directory.close()
         if account_store is not None:
             await account_store.close()
+        if vertex_project_directory is not None:
+            await vertex_project_directory.close()
         logger.info("application_stopped", extra={"event": "application_stopped"})
 
 
@@ -182,18 +194,50 @@ def create_app(
 ) -> FastAPI:
     application = FastAPI(title="Chiefvoice", version="0.1.0", lifespan=lifespan)
     post_call_agent = None
+    vertex_project_directory = None
+    vertex_project_provisioner = None
+    if settings.vertex_project_isolation_enabled:
+        required_gcp_config = {
+            "DATABASE_URL": settings.database_url,
+            "GCP_PROJECT_PARENT": settings.gcp_project_parent,
+            "GCP_BILLING_ACCOUNT_ID": settings.gcp_billing_account_id,
+            "GCP_RUNTIME_SERVICE_ACCOUNT": settings.gcp_runtime_service_account,
+            "GCP_BUDGET_API_PROJECT_ID": settings.gcp_budget_api_project_id,
+            "GCP_VERTEX_MONTHLY_SPEND_CAP": settings.gcp_vertex_monthly_spend_cap,
+            "VERTEX_LOCATION": settings.vertex_location,
+        }
+        missing = [key for key, value in required_gcp_config.items() if not value]
+        if missing:
+            raise ValueError("Vertex project isolation requires: " + ", ".join(missing))
+        vertex_project_directory = SqlTenantVertexProjectDirectory(settings.database_url)
+        vertex_project_provisioner = GoogleCloudTenantProjectProvisioner(
+            parent=settings.gcp_project_parent,
+            billing_account_id=settings.gcp_billing_account_id,
+            runtime_service_account=settings.gcp_runtime_service_account,
+            budget_api_project_id=settings.gcp_budget_api_project_id,
+            monthly_vertex_spend_cap=settings.gcp_vertex_monthly_spend_cap,
+        )
     if (
         settings.post_call_agent_provider == "langchain_vertex"
-        and settings.vertex_project_id
+        and (settings.vertex_project_id or settings.vertex_project_isolation_enabled)
         and settings.vertex_location
     ):
-        post_call_agent = create_vertex_post_call_agent(
-            project_id=settings.vertex_project_id,
-            location=settings.vertex_location,
-            model=settings.post_call_model,
-            credentials_json=settings.vertex_credentials_json,
-            credentials_path=settings.vertex_credentials_path,
-        )
+        if settings.vertex_project_isolation_enabled:
+            post_call_agent = TenantVertexPostCallAgent(
+                vertex_project_directory,
+                location=settings.vertex_location,
+                model=settings.post_call_model,
+                credentials_json=settings.vertex_credentials_json,
+                credentials_path=settings.vertex_credentials_path,
+            )
+        else:
+            post_call_agent = create_vertex_post_call_agent(
+                project_id=settings.vertex_project_id,
+                location=settings.vertex_location,
+                model=settings.post_call_model,
+                credentials_json=settings.vertex_credentials_json,
+                credentials_path=settings.vertex_credentials_path,
+            )
     application.state.post_call_agent = post_call_agent
     if settings.post_call_execution_backend not in {"in_process", "lambda"}:
         raise ValueError("POST_CALL_EXECUTION_BACKEND must be 'in_process' or 'lambda'")
@@ -203,13 +247,14 @@ def create_app(
             raise ValueError("POST_CALL_LAMBDA_FUNCTION_NAME is required for Lambda execution")
         if (
             settings.post_call_agent_provider != "langchain_vertex"
-            or not settings.vertex_project_id
+            or (not settings.vertex_project_id and not settings.vertex_project_isolation_enabled)
             or not settings.vertex_location
             or not settings.database_url
             or not settings.post_call_encryption_key
         ):
             raise ValueError(
-                "Lambda post-call execution requires LangChain Vertex, Vertex project/location, "
+                "Lambda post-call execution requires LangChain Vertex, Vertex project isolation or "
+                "a Vertex project/location, "
                 "DATABASE_URL, and POST_CALL_ENCRYPTION_KEY"
             )
         post_call_lambda_invoker = LambdaAsyncInvoker(
@@ -217,6 +262,8 @@ def create_app(
             settings.post_call_lambda_region,
         )
     application.state.post_call_lambda_invoker = post_call_lambda_invoker
+    application.state.vertex_project_directory = vertex_project_directory
+    application.state.vertex_project_provisioner = vertex_project_provisioner
     post_call_required = settings.post_call_agent_provider != "disabled"
     if (
         post_call_dispatcher is None
@@ -259,7 +306,7 @@ def create_app(
     application.state.recording_store = recording_store
     application.state.post_call_recovery_spool = post_call_recovery_spool
     if voice_pipeline_factory is None and settings.realtime_provider == "vertex":
-        if settings.vertex_project_id and settings.vertex_location:
+        if (settings.vertex_project_id or settings.vertex_project_isolation_enabled) and settings.vertex_location:
             vertex_provider = VertexGeminiLiveProvider(
                 project_id=settings.vertex_project_id,
                 location=settings.vertex_location,
@@ -269,6 +316,8 @@ def create_app(
                 profile_directory=agent_profile_directory,
                 credentials_json=settings.vertex_credentials_json,
                 credentials_path=settings.vertex_credentials_path,
+                project_directory=vertex_project_directory,
+                require_tenant_project=settings.vertex_project_isolation_enabled,
             )
             voice_pipeline_factory = create_realtime_pipeline_factory(
                 RealtimeAgentRegistry([vertex_provider]),
@@ -396,6 +445,8 @@ def create_app(
             post_call_available=(post_call_agent is not None and post_call_dispatcher is not None),
             agent_profile_directory=agent_profile_directory,
             post_call_fallback_spool=post_call_recovery_spool,
+            vertex_project_directory=vertex_project_directory,
+            require_tenant_vertex_project=settings.vertex_project_isolation_enabled,
         )
         if subscription_authorizer is not None
         else None
@@ -441,6 +492,10 @@ async def readyz(request: Request):
         "billing": getattr(state, "subscription_authorizer", None) is not None,
         "voice_pipeline": getattr(state, "voice_pipeline_factory", None) is not None,
         "account_store": getattr(state, "account_store", None) is not None,
+        "vertex_project_isolation": (
+            not settings.vertex_project_isolation_enabled
+            or getattr(state, "vertex_project_directory", None) is not None
+        ),
         "provider_integration_store": getattr(state, "provider_integration_store", None) is not None,
         "object_storage": getattr(state, "object_storage_ready", True),
         "channel_adapter": bool(adapters),
