@@ -136,15 +136,29 @@ async def start_outbound_call(
     coordinator: Annotated[CallCoordinator, Depends(get_call_coordinator)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
-    if principal.auth_method == "api_key" and principal.assigned_provider is not None:
-        if not principal.assigned_phone_number or body.provider != principal.assigned_provider:
+    caller_id = body.caller_id
+    if principal.auth_method == "api_key":
+        provider_numbers = [
+            number for provider, number in principal.assigned_numbers if provider == body.provider
+        ]
+        if not provider_numbers:
             raise HTTPException(
-                status_code=403, detail="This API key is assigned to another phone number"
+                status_code=403, detail="This API key is not assigned a number for this provider"
             )
-        if body.caller_id and body.caller_id != principal.assigned_phone_number:
+        if caller_id is not None and (body.provider, caller_id) not in principal.assigned_numbers:
             raise HTTPException(
-                status_code=403, detail="This API key cannot place calls from another number"
+                status_code=403, detail="This API key cannot place calls from that phone number"
             )
+        if caller_id is None:
+            if len(provider_numbers) != 1:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "caller_id is required when this API key has multiple numbers "
+                        "for the provider"
+                    ),
+                )
+            caller_id = provider_numbers[0]
     if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 200):
         raise HTTPException(status_code=400, detail="Idempotency-Key must be 1 to 200 characters")
     if getattr(request.app.state, "voice_pipeline_factory", None) is None:
@@ -160,7 +174,7 @@ async def start_outbound_call(
                 channel=body.channel,
                 tenant_id=principal.tenant_id,
                 destination=body.destination,
-                caller_id=principal.assigned_phone_number or body.caller_id,
+                caller_id=caller_id,
                 bot_config_id=(
                     body.live_agent.agent_id
                     if body.live_agent and body.live_agent.agent_id
@@ -219,24 +233,29 @@ async def get_call_status(
 
 
 async def _enforce_number_binding(store: Any, principal: Principal, session_id: str) -> None:
-    if principal.auth_method != "api_key" or principal.assigned_provider is None:
+    if principal.auth_method != "api_key":
         return
-    if not principal.assigned_phone_number or not await store.matches_phone_binding(
-        principal.tenant_id,
-        session_id,
-        principal.assigned_provider,
-        principal.assigned_phone_number,
-    ):
+    for provider, number in principal.assigned_numbers:
+        if await store.matches_phone_binding(principal.tenant_id, session_id, provider, number):
+            return
+    if not principal.assigned_numbers:
         raise HTTPException(status_code=404, detail="Call not found")
+    raise HTTPException(status_code=404, detail="Call not found")
 
 
 @router.post("/v1/calls/{session_id}/reconcile", tags=["calls"])
 async def reconcile_outbound_call_start(
     session_id: str,
     body: OutboundStartReconciliation,
+    request: Request,
     principal: Annotated[Principal, Security(require_scope("calls:reconcile"))],
     coordinator: Annotated[CallCoordinator, Depends(get_call_coordinator)],
 ):
+    if principal.auth_method == "api_key":
+        store = getattr(request.app.state, "call_session_store", None)
+        if store is None:
+            raise HTTPException(status_code=503, detail="Call status storage is not configured")
+        await _enforce_number_binding(store, principal, session_id)
     outcome = await coordinator.resolve_outbound_start(
         principal.tenant_id,
         session_id,

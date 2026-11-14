@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import IntegrityError
 
 from chiefvoice.identity.api_keys import ApiKeyDirectory
 from chiefvoice.identity.auth import Principal, current_principal
@@ -14,11 +15,15 @@ _NEVER_DELEGATE = frozenset({"api_keys:read", "api_keys:write", "accounts:create
 _MAX_KEY_LIFETIME = timedelta(days=365)
 
 
+class PhoneNumberAssignment(BaseModel):
+    provider: str = Field(min_length=1, max_length=40)
+    phone_number: str = Field(min_length=5, max_length=64)
+
+
 class CreateApiKeyBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     scopes: list[str] = Field(min_length=1, max_length=50)
-    assigned_provider: str = Field(min_length=1, max_length=40)
-    assigned_phone_number: str = Field(min_length=5, max_length=64)
+    assigned_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     expires_at: datetime | None = None
 
     @field_validator("name")
@@ -75,12 +80,20 @@ async def create_api_key(
     integration_store = getattr(request.app.state, "provider_integration_store", None)
     if integration_store is None:
         raise HTTPException(status_code=503, detail="Phone number directory is not configured")
-    integration = await integration_store.get(body.assigned_provider, principal.tenant_id)
-    if integration is None or not any(
-        phone.number == body.assigned_phone_number and phone.outbound_enabled
-        for phone in integration.phone_numbers
-    ):
-        raise HTTPException(status_code=422, detail="Select an outbound-enabled phone number")
+    numbers = [(item.provider, item.phone_number) for item in body.assigned_numbers]
+    if len(numbers) != len(set(numbers)) or len({number for _, number in numbers}) != len(numbers):
+        raise HTTPException(status_code=422, detail="Phone number assignments must be unique")
+    integrations = {}
+    for provider, phone_number in numbers:
+        integration = integrations.get(provider)
+        if provider not in integrations:
+            integration = await integration_store.get(provider, principal.tenant_id)
+            integrations[provider] = integration
+        if integration is None or not any(
+            phone.number == phone_number and phone.outbound_enabled
+            for phone in integration.phone_numbers
+        ):
+            raise HTTPException(status_code=422, detail="Select outbound-enabled phone numbers")
     requested_scopes = set(body.scopes)
     forbidden = requested_scopes & _NEVER_DELEGATE
     if forbidden:
@@ -104,15 +117,19 @@ async def create_api_key(
                 status_code=422,
                 detail="expires_at must be in the future and within 365 days",
             )
-    token, key = await _directory(request).create(
-        tenant_id=principal.tenant_id,
-        name=body.name,
-        scopes=tuple(sorted(requested_scopes)),
-        created_by=principal.subject,
-        expires_at=expires_at,
-        assigned_provider=body.assigned_provider,
-        assigned_phone_number=body.assigned_phone_number,
-    )
+    try:
+        token, key = await _directory(request).create(
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            scopes=tuple(sorted(requested_scopes)),
+            created_by=principal.subject,
+            expires_at=expires_at,
+            assigned_numbers=tuple(numbers),
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="A selected phone number is already assigned to another API"
+        ) from exc
     return {
         "id": key.key_id,
         "name": key.name,
@@ -121,8 +138,10 @@ async def create_api_key(
         "scopes": key.scopes,
         "created_at": key.created_at.isoformat(),
         "expires_at": key.expires_at.isoformat() if key.expires_at else None,
-        "assigned_provider": key.assigned_provider,
-        "assigned_phone_number": key.assigned_phone_number,
+        "assigned_numbers": [
+            {"provider": provider, "phone_number": number}
+            for provider, number in key.assigned_numbers
+        ],
         "message": "Copy this key now; it will not be shown again.",
     }
 
@@ -145,8 +164,10 @@ async def list_api_keys(
                 "expires_at": key.expires_at.isoformat() if key.expires_at else None,
                 "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
                 "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
-                "assigned_provider": key.assigned_provider,
-                "assigned_phone_number": key.assigned_phone_number,
+                "assigned_numbers": [
+                    {"provider": provider, "phone_number": number}
+                    for provider, number in key.assigned_numbers
+                ],
             }
             for key in keys
         ]

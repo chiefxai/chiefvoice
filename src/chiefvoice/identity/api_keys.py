@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
-from sqlalchemy import CheckConstraint, DateTime, Index, String, Text, select, update
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,8 +28,7 @@ class ApiKeyIdentity:
     tenant_id: str
     subject: str
     scopes: frozenset[str]
-    assigned_provider: str | None = None
-    assigned_phone_number: str | None = None
+    assigned_numbers: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +43,7 @@ class ApiKeySummary:
     expires_at: datetime | None
     last_used_at: datetime | None
     revoked_at: datetime | None
-    assigned_provider: str | None = None
-    assigned_phone_number: str | None = None
+    assigned_numbers: tuple[tuple[str, str], ...] = ()
 
 
 class ApiKeyDirectory(Protocol):
@@ -58,12 +56,17 @@ class ApiKeyDirectory(Protocol):
         scopes: tuple[str, ...],
         created_by: str,
         expires_at: datetime | None,
-        assigned_provider: str | None = None,
-        assigned_phone_number: str | None = None,
+        assigned_numbers: tuple[tuple[str, str], ...] = (),
     ) -> tuple[str, ApiKeySummary]: ...
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
     async def list_all(self) -> list[ApiKeySummary]: ...
     async def revoke(self, tenant_id: str, key_id: str) -> bool: ...
+    async def replace_phone_numbers(
+        self,
+        tenant_id: str,
+        key_id: str,
+        assigned_numbers: tuple[tuple[str, str], ...],
+    ) -> bool: ...
     async def provision_customer(
         self,
         *,
@@ -78,13 +81,7 @@ class ApiKeyDirectory(Protocol):
 
 class ApiKeyRow(Base):
     __tablename__ = "api_keys"
-    __table_args__ = (
-        Index("ix_api_keys_tenant_id", "tenant_id"),
-        CheckConstraint(
-            "(assigned_provider IS NULL) = (assigned_phone_number IS NULL)",
-            name="api_key_phone_binding_pair",
-        ),
-    )
+    __table_args__ = (Index("ix_api_keys_tenant_id", "tenant_id"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -96,8 +93,20 @@ class ApiKeyRow(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    assigned_provider: Mapped[str | None] = mapped_column(String(40))
-    assigned_phone_number: Mapped[str | None] = mapped_column(String(64))
+
+
+class ApiKeyPhoneNumberRow(Base):
+    __tablename__ = "api_key_phone_numbers"
+    __table_args__ = (
+        Index("uq_api_key_phone_numbers_phone_number", "phone_number", unique=True),
+        Index("ix_api_key_phone_numbers_api_key_id", "api_key_id"),
+    )
+
+    api_key_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True, nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(40), primary_key=True, nullable=False)
+    phone_number: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
 
 
 class SqlApiKeyDirectory:
@@ -132,13 +141,17 @@ class SqlApiKeyDirectory:
             await session.execute(
                 update(ApiKeyRow).where(ApiKeyRow.id == key_id).values(last_used_at=now)
             )
+            bindings = await session.scalars(
+                select(ApiKeyPhoneNumberRow)
+                .where(ApiKeyPhoneNumberRow.api_key_id == row.id)
+                .order_by(ApiKeyPhoneNumberRow.provider, ApiKeyPhoneNumberRow.phone_number)
+            )
             return ApiKeyIdentity(
                 key_id=row.id,
                 tenant_id=row.tenant_id,
                 subject=f"api_key:{row.id}",
                 scopes=frozenset(json.loads(row.scopes_json)),
-                assigned_provider=row.assigned_provider,
-                assigned_phone_number=row.assigned_phone_number,
+                assigned_numbers=tuple((item.provider, item.phone_number) for item in bindings),
             )
 
     async def create(
@@ -149,11 +162,13 @@ class SqlApiKeyDirectory:
         scopes: tuple[str, ...],
         created_by: str,
         expires_at: datetime | None,
-        assigned_provider: str | None = None,
-        assigned_phone_number: str | None = None,
+        assigned_numbers: tuple[tuple[str, str], ...] = (),
     ) -> tuple[str, ApiKeySummary]:
-        if (assigned_provider is None) != (assigned_phone_number is None):
-            raise ValueError("API key provider and phone number must be assigned together")
+        normalized_numbers = tuple(sorted(set(assigned_numbers)))
+        if len(normalized_numbers) != len(assigned_numbers) or len(
+            {number for _, number in assigned_numbers}
+        ) != len(assigned_numbers):
+            raise ValueError("API key phone number assignments must be unique")
         key_id = secrets.token_hex(12)
         secret = secrets.token_urlsafe(32)
         token = f"{API_KEY_PREFIX}{key_id}.{secret}"
@@ -169,8 +184,6 @@ class SqlApiKeyDirectory:
             created_by=created_by,
             created_at=now,
             expires_at=expires_at,
-            assigned_provider=assigned_provider,
-            assigned_phone_number=assigned_phone_number,
         )
         async with self._sessions.begin() as session:
             account = await session.get(TenantAccountRow, tenant_id)
@@ -178,7 +191,14 @@ class SqlApiKeyDirectory:
                 raise LookupError("Customer account does not exist")
             session.add(row)
             await session.flush()
-        return token, _to_summary(row)
+            session.add_all(
+                ApiKeyPhoneNumberRow(
+                    api_key_id=key_id, provider=provider, phone_number=phone_number
+                )
+                for provider, phone_number in normalized_numbers
+            )
+            await session.flush()
+        return token, _to_summary(row, normalized_numbers)
 
     async def provision_customer(
         self,
@@ -234,12 +254,12 @@ class SqlApiKeyDirectory:
                 .where(ApiKeyRow.tenant_id == tenant_id)
                 .order_by(ApiKeyRow.created_at.desc())
             )
-            return [_to_summary(row) for row in rows]
+            return await _summaries_for_rows(session, list(rows))
 
     async def list_all(self) -> list[ApiKeySummary]:
         async with self._sessions() as session:
             rows = await session.scalars(select(ApiKeyRow).order_by(ApiKeyRow.created_at.desc()))
-            return [_to_summary(row) for row in rows]
+            return await _summaries_for_rows(session, list(rows))
 
     async def revoke(self, tenant_id: str, key_id: str) -> bool:
         async with self._sessions.begin() as session:
@@ -252,14 +272,70 @@ class SqlApiKeyDirectory:
                 )
                 .values(revoked_at=datetime.now(UTC))
             )
-            return result.rowcount == 1
+            if result.rowcount != 1:
+                return False
+            await session.execute(
+                delete(ApiKeyPhoneNumberRow).where(ApiKeyPhoneNumberRow.api_key_id == key_id)
+            )
+            return True
+
+    async def replace_phone_numbers(
+        self,
+        tenant_id: str,
+        key_id: str,
+        assigned_numbers: tuple[tuple[str, str], ...],
+    ) -> bool:
+        normalized = tuple(sorted(set(assigned_numbers)))
+        if len(normalized) != len(assigned_numbers) or len(
+            {number for _, number in assigned_numbers}
+        ) != len(assigned_numbers):
+            raise ValueError("API key phone number assignments must be unique")
+        async with self._sessions.begin() as session:
+            row = await session.scalar(
+                select(ApiKeyRow)
+                .where(
+                    ApiKeyRow.id == key_id,
+                    ApiKeyRow.tenant_id == tenant_id,
+                    ApiKeyRow.revoked_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            await session.execute(
+                delete(ApiKeyPhoneNumberRow).where(ApiKeyPhoneNumberRow.api_key_id == key_id)
+            )
+            session.add_all(
+                ApiKeyPhoneNumberRow(
+                    api_key_id=key_id, provider=provider, phone_number=phone_number
+                )
+                for provider, phone_number in normalized
+            )
+            await session.flush()
+            return True
 
 
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
-def _to_summary(row: ApiKeyRow) -> ApiKeySummary:
+async def _summaries_for_rows(session, rows: list[ApiKeyRow]) -> list[ApiKeySummary]:
+    if not rows:
+        return []
+    bindings = await session.scalars(
+        select(ApiKeyPhoneNumberRow).where(
+            ApiKeyPhoneNumberRow.api_key_id.in_([row.id for row in rows])
+        )
+    )
+    by_key: dict[str, list[tuple[str, str]]] = {}
+    for item in bindings:
+        by_key.setdefault(item.api_key_id, []).append((item.provider, item.phone_number))
+    return [_to_summary(row, tuple(sorted(by_key.get(row.id, [])))) for row in rows]
+
+
+def _to_summary(
+    row: ApiKeyRow, assigned_numbers: tuple[tuple[str, str], ...] = ()
+) -> ApiKeySummary:
     return ApiKeySummary(
         key_id=row.id,
         tenant_id=row.tenant_id,
@@ -271,6 +347,5 @@ def _to_summary(row: ApiKeyRow) -> ApiKeySummary:
         expires_at=row.expires_at,
         last_used_at=row.last_used_at,
         revoked_at=row.revoked_at,
-        assigned_provider=row.assigned_provider,
-        assigned_phone_number=row.assigned_phone_number,
+        assigned_numbers=assigned_numbers,
     )

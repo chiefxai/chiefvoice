@@ -16,8 +16,7 @@ class Principal:
     scopes: frozenset[str]
     auth_method: str = "oidc"
     api_key_id: str | None = None
-    assigned_provider: str | None = None
-    assigned_phone_number: str | None = None
+    assigned_numbers: tuple[tuple[str, str], ...] = ()
 
 
 class OidcTokenVerifier:
@@ -110,8 +109,7 @@ async def current_principal(
             scopes=identity.scopes,
             auth_method="api_key",
             api_key_id=identity.key_id,
-            assigned_provider=identity.assigned_provider,
-            assigned_phone_number=identity.assigned_phone_number,
+            assigned_numbers=identity.assigned_numbers,
         )
     verifier: OidcTokenVerifier | None = getattr(request.app.state, "token_verifier", None)
     if verifier is None:

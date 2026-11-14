@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import IntegrityError
 
 from chiefvoice.accounts.models import AccountStore, TenantAccount
 from chiefvoice.billing import BillingMode
@@ -89,9 +90,17 @@ class CreateCustomerApiKeyBody(BaseModel):
         return sorted(normalized)
 
 
-class CreatePhoneApiKeyBody(BaseModel):
+class PhoneNumberAssignment(BaseModel):
     provider: str = Field(min_length=1, max_length=40)
     phone_number: str = Field(min_length=5, max_length=64)
+
+
+class CreatePhoneApiKeyBody(BaseModel):
+    phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
+
+
+class ReplacePhoneApiKeyNumbersBody(BaseModel):
+    phone_numbers: list[PhoneNumberAssignment] = Field(max_length=100)
 
 
 def _platform_admin(required_scope: str):
@@ -163,8 +172,14 @@ def _key_json(key: ApiKeySummary) -> dict:
         "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
         "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
         "customer_id": key.tenant_id,
-        "assigned_provider": key.assigned_provider,
-        "assigned_phone_number": key.assigned_phone_number,
+        "assigned_numbers": [
+            {"provider": provider, "phone_number": number}
+            for provider, number in key.assigned_numbers
+        ],
+        "assigned_provider": key.assigned_numbers[0][0] if len(key.assigned_numbers) == 1 else None,
+        "assigned_phone_number": (
+            key.assigned_numbers[0][1] if len(key.assigned_numbers) == 1 else None
+        ),
     }
 
 
@@ -245,6 +260,12 @@ async def list_platform_phone_numbers(
     del principal
     account_store, _ = _stores(request)
     records = await _integration_store(request).list_phone_numbers()
+    api_keys = await _stores(request)[1].list_all()
+    number_owners = {
+        number: key
+        for key in api_keys
+        for _, number in key.assigned_numbers
+    }
     items = []
     account_cache: dict[str, TenantAccount | None] = {}
     for phone in records:
@@ -253,6 +274,7 @@ async def list_platform_phone_numbers(
         account = account_cache[phone.tenant_id]
         if account is None:
             continue
+        owner = number_owners.get(phone.number)
         items.append(
             {
                 "provider": phone.provider,
@@ -262,6 +284,8 @@ async def list_platform_phone_numbers(
                 "inbound_enabled": phone.inbound_enabled,
                 "outbound_enabled": phone.outbound_enabled,
                 "agent_id": phone.agent_id,
+                "api_key_id": owner.key_id if owner else None,
+                "api_key_name": owner.name if owner else None,
             }
         )
     return {"items": items}
@@ -290,39 +314,55 @@ async def issue_phone_api_key(
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
 ):
     account_store, api_key_directory = _stores(request)
-    phone = next(
-        (
-            item
-            for item in await _integration_store(request).list_phone_numbers()
-            if item.provider == body.provider
-            and item.number == body.phone_number
-            and item.outbound_enabled
-        ),
-        None,
-    )
-    if phone is None:
-        raise HTTPException(status_code=404, detail="Outbound-enabled phone number was not found")
-    account = await account_store.get(phone.tenant_id)
+    requested = [(item.provider, item.phone_number) for item in body.phone_numbers]
+    duplicate_pairs = len(requested) != len(set(requested))
+    duplicate_numbers = len({number for _, number in requested}) != len(requested)
+    if duplicate_pairs or duplicate_numbers:
+        raise HTTPException(status_code=422, detail="Phone number assignments must be unique")
+    registered = await _integration_store(request).list_phone_numbers()
+    selected = [
+        next(
+            (
+                item for item in registered
+                if item.provider == provider and item.number == number and item.outbound_enabled
+            ),
+            None,
+        )
+        for provider, number in requested
+    ]
+    if any(item is None for item in selected):
+        raise HTTPException(
+            status_code=404, detail="An outbound-enabled phone number was not found"
+        )
+    tenant_ids = {item.tenant_id for item in selected if item is not None}
+    if len(tenant_ids) != 1:
+        raise HTTPException(status_code=422, detail="All phone numbers must belong to one customer")
+    tenant_id = next(iter(tenant_ids))
+    account = await account_store.get(tenant_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Phone number customer was not found")
     expires_at = datetime.now(UTC) + MAX_API_KEY_LIFETIME
-    token, key = await api_key_directory.create(
-        tenant_id=phone.tenant_id,
-        name=f"API for {phone.number}",
-        scopes=tuple(DEFAULT_CUSTOMER_API_KEY_SCOPES),
-        created_by=principal.subject,
-        expires_at=expires_at,
-        assigned_provider=phone.provider,
-        assigned_phone_number=phone.number,
-    )
+    try:
+        token, key = await api_key_directory.create(
+            tenant_id=tenant_id,
+            name=f"API for {len(requested)} phone number{'s' if len(requested) != 1 else ''}",
+            scopes=tuple(DEFAULT_CUSTOMER_API_KEY_SCOPES),
+            created_by=principal.subject,
+            expires_at=expires_at,
+            assigned_numbers=tuple(requested),
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="A selected phone number is already assigned to another API"
+        ) from exc
     logger.info(
         "phone_api_key_issued",
         extra={
             "actor_subject": principal.subject,
-            "tenant_id": phone.tenant_id,
+            "tenant_id": tenant_id,
             "api_key_id": key.key_id,
-            "provider": phone.provider,
-            "phone_number": phone.number,
+            "phone_number_count": len(requested),
+            "providers": sorted({provider for provider, _ in requested}),
         },
     )
     return {
@@ -330,6 +370,58 @@ async def issue_phone_api_key(
         "api_key_record": {**_key_json(key), "customer_name": account.display_name},
         "message": "Copy this API key now; its secret will not be shown again.",
     }
+
+
+@router.put("/api-keys/{key_id}/phone-numbers")
+async def replace_phone_api_key_numbers(
+    key_id: str,
+    body: ReplacePhoneApiKeyNumbersBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+):
+    del principal
+    account_store, api_key_directory = _stores(request)
+    key = next((item for item in await api_key_directory.list_all() if item.key_id == key_id), None)
+    if key is None or key.revoked_at is not None:
+        raise HTTPException(status_code=404, detail="Active API key not found")
+    requested = [(item.provider, item.phone_number) for item in body.phone_numbers]
+    duplicate_pairs = len(requested) != len(set(requested))
+    duplicate_numbers = len({number for _, number in requested}) != len(requested)
+    if duplicate_pairs or duplicate_numbers:
+        raise HTTPException(status_code=422, detail="Phone number assignments must be unique")
+    registered = await _integration_store(request).list_phone_numbers()
+    for provider, number in requested:
+        phone = next(
+            (
+                item for item in registered
+                if item.tenant_id == key.tenant_id
+                and item.provider == provider
+                and item.number == number
+                and item.outbound_enabled
+            ),
+            None,
+        )
+        if phone is None:
+            raise HTTPException(
+                status_code=404, detail="An outbound-enabled number for this customer was not found"
+            )
+    try:
+        replaced = await api_key_directory.replace_phone_numbers(
+            key.tenant_id, key.key_id, tuple(requested)
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="A selected phone number is already assigned to another API"
+        ) from exc
+    if not replaced:
+        raise HTTPException(status_code=404, detail="Active API key not found")
+    account = await account_store.get(key.tenant_id)
+    refreshed = next(
+        item
+        for item in await api_key_directory.list_for_tenant(key.tenant_id)
+        if item.key_id == key.key_id
+    )
+    return {**_key_json(refreshed), "customer_name": account.display_name if account else ""}
 
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)

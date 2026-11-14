@@ -55,18 +55,33 @@ async def get_integration(
     if integration is None:
         raise HTTPException(status_code=404, detail="Provider is not configured for this account")
     phone_numbers = integration.phone_numbers
-    if principal.auth_method == "api_key" and principal.assigned_provider is not None:
-        if principal.assigned_provider != provider or not principal.assigned_phone_number:
+    integration_settings = integration.settings
+    if principal.auth_method == "api_key":
+        if not any(
+            assigned_provider == provider
+            for assigned_provider, _ in principal.assigned_numbers
+        ):
             raise HTTPException(
-                status_code=403, detail="This API key is assigned to another phone number"
+                status_code=403, detail="This API key is not assigned a number for this provider"
             )
         phone_numbers = tuple(
-            number for number in phone_numbers if number.number == principal.assigned_phone_number
+            number
+            for number in phone_numbers
+            if (provider, number.number) in principal.assigned_numbers
         )
+        if integration_settings.get("default_caller_id") not in {
+            number for assigned_provider, number in principal.assigned_numbers
+            if assigned_provider == provider
+        }:
+            integration_settings = {
+                key: value
+                for key, value in integration_settings.items()
+                if key != "default_caller_id"
+            }
     return {
         "provider": integration.provider,
         "credentials_configured": sorted(integration.credentials.keys()),
-        "settings": integration.settings,
+        "settings": integration_settings,
         "phone_numbers": [
             {
                 "number": n.number,
