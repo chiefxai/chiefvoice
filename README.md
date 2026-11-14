@@ -111,7 +111,7 @@ Create the authenticated tenant account with `POST /v1/accounts` and the `accoun
 {"display_name": "Acme Support", "billing_mode": "prepaid"}
 ```
 
-An async Python SDK is available at `src/chiefvoice_sdk`. It starts outbound calls, configures the post-call callback, and can poll result status. Call creation is never automatically retried because duplicate dialing is possible after a network timeout. For production integrations, configure webhooks and treat event IDs idempotently; use polling as a fallback.
+An async Python SDK is available at `src/chiefvoice_sdk`. Outbound creation accepts an optional `Idempotency-Key` header (1–200 characters), scoped to the tenant. Reusing the same key and same request returns the original call session; reusing it for a different request returns `409`. Use a fresh key for an intentional new call. The key is durable in Postgres, so the platform will not dial twice after a client retry or process restart. A timeout during the provider's own call-creation request can still leave an ambiguous `starting` session; query `GET /v1/calls/{session_id}` with `calls:read` before deciding what to do. This status endpoint also supports polling for call completion; post-call analysis remains available at `GET /v1/calls/{session_id}/post-call`.
 
 ## Audio recordings
 

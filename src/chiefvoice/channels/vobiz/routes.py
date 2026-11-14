@@ -1,6 +1,7 @@
+from xml.etree.ElementTree import Element, tostring
+
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import Response
-from xml.etree.ElementTree import Element, tostring
 
 from chiefvoice.calls.coordinator import CallCoordinator
 from chiefvoice.channels.vobiz.adapter import VobizAdapter
@@ -22,7 +23,11 @@ async def inbound_answer(request: Request):
     pipeline_factory = getattr(request.app.state, "voice_pipeline_factory", None)
     if coordinator is None or pipeline_factory is None:
         call = await adapter.parse_inbound(request)
-        reason = "Call services are not configured" if coordinator is None else "Voice pipeline is not configured"
+        reason = (
+            "Call services are not configured"
+            if coordinator is None
+            else "Voice pipeline is not configured"
+        )
         return await adapter.reject_inbound(call, reason)
     return await coordinator.handle_inbound("vobiz", request)
 
@@ -49,7 +54,10 @@ async def hangup_callback(request: Request):
         raise HTTPException(status_code=503, detail="Call services are not configured")
     session = await adapter.hangup_callback(request)
     await coordinator.end_session(session, "completed")
-    return Response(content=tostring(Element("Response"), encoding="unicode"), media_type="application/xml")
+    return Response(
+        content=tostring(Element("Response"), encoding="unicode"),
+        media_type="application/xml",
+    )
 
 
 @router.websocket("/webhooks/vobiz/media")
@@ -65,4 +73,5 @@ async def media_websocket(websocket: WebSocket, state: str = ""):
         state,
         pipeline_factory,
         coordinator.end_session,
+        coordinator.attach_session_persistence,
     )

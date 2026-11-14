@@ -23,6 +23,36 @@ variable "api_image_uri" {
   type        = string
   description = "Chiefvoice API image URI."
 }
+variable "public_domain" {
+  type        = string
+  description = "DNS name pointed at the output backend_public_ip; Caddy obtains and renews TLS certificates."
+}
+variable "oidc_issuer" { type = string }
+variable "oidc_audience" { type = string }
+variable "oidc_jwks_url" { type = string }
+variable "vertex_location" { type = string
+  default = "us-central1"
+}
+variable "vertex_model" { type = string
+  default = "google/gemini-live-2.5-flash-native-audio"
+}
+variable "post_call_model" { type = string
+  default = "gemini-2.5-flash"
+}
+variable "gcp_project_parent" { type = string }
+variable "gcp_billing_account_id" { type = string }
+variable "gcp_runtime_service_account" { type = string }
+variable "gcp_budget_api_project_id" { type = string }
+variable "gcp_vertex_monthly_spend_cap" { type = string
+  default = "100"
+}
+variable "google_credentials_secret_arn" {
+  type        = string
+  description = "AWS Secrets Manager ARN of the service-account JSON authorized to provision tenant Vertex projects and call Vertex."
+}
+variable "recordings_enabled" { type = bool
+  default = false
+}
 variable "post_call_lambda_image_uri" {
   type        = string
   description = "ARM64 Lambda image URI."

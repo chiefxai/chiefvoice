@@ -13,6 +13,7 @@ from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.fallback_spool import PostCallFallbackSpool
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
 from chiefvoice.billing import SubscriptionAuthorizer
+from chiefvoice.calls.store import IdempotencyConflict, SqlCallSessionStore
 from chiefvoice.channels.base import ChannelAdapter, OutboundCall
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.observability.setup import (
@@ -43,6 +44,7 @@ class OutboundCallCommand:
     post_call_time_format: str | None = None
     include_live_agent_context: bool = False
     recording_allowed: bool = False
+    idempotency_key: str | None = None
 
 
 class CallCoordinator:
@@ -58,6 +60,7 @@ class CallCoordinator:
         post_call_fallback_spool: PostCallFallbackSpool | None = None,
         vertex_project_directory: TenantVertexProjectDirectory | None = None,
         require_tenant_vertex_project: bool = False,
+        call_session_store: SqlCallSessionStore | None = None,
     ):
         self.adapters = adapters
         self.subscriptions = subscriptions
@@ -68,6 +71,7 @@ class CallCoordinator:
         self.post_call_fallback_spool = post_call_fallback_spool
         self.vertex_project_directory = vertex_project_directory
         self.require_tenant_vertex_project = require_tenant_vertex_project
+        self.call_session_store = call_session_store
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
         self._require_post_call_ready()
@@ -99,9 +103,59 @@ class CallCoordinator:
             post_call_time_format=command.post_call_time_format,
             include_live_agent_context=command.include_live_agent_context,
         )
-        entitlement = await self.subscriptions.authorize_voice(
-            command.tenant_id, session.session_id, command.channel, Direction.OUTBOUND
+        fingerprint = SqlCallSessionStore.fingerprint(
+            {
+                "provider": command.provider,
+                "channel": command.channel,
+                "destination": command.destination,
+                "caller_id": command.caller_id,
+                "bot_config_id": command.bot_config_id,
+                "live_agent_context": command.live_agent_context,
+                "post_call_context": command.post_call_context,
+                "post_call_output_schema": command.post_call_output_schema,
+                "post_call_tools": command.post_call_tools,
+                "post_call_time_zone": command.post_call_time_zone,
+                "post_call_time_format": command.post_call_time_format,
+                "include_live_agent_context": command.include_live_agent_context,
+                "recording_allowed": command.recording_allowed,
+            }
         )
+        if command.idempotency_key and self.call_session_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Durable idempotency storage is not configured",
+            )
+        if self.call_session_store is not None:
+            try:
+                session, created, previous_status = await self.call_session_store.register_outbound(
+                    session, command.idempotency_key, fingerprint
+                )
+            except IdempotencyConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if not created:
+                if previous_status == "failed":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "This idempotency key belongs to a failed call; "
+                            "use a new key to start another call"
+                        ),
+                    )
+                self.attach_session_persistence(session)
+                session.metadata["call_status"] = previous_status
+                return session
+        self.attach_session_persistence(session)
+        session.metadata["call_status"] = "starting"
+        try:
+            entitlement = await self.subscriptions.authorize_voice(
+                command.tenant_id, session.session_id, command.channel, Direction.OUTBOUND
+            )
+        except BaseException:
+            if self.call_session_store is not None:
+                await self.call_session_store.update_state(
+                    session, status="failed", end_reason="billing_authorization_failed"
+                )
+            raise
         call: OutboundCall = _OutboundCallData(
             provider=command.provider,
             channel=command.channel,
@@ -121,11 +175,29 @@ class CallCoordinator:
         )
         session.recording_allowed = call.recording_allowed
         session.max_call_seconds = entitlement.max_call_seconds
+        if self.call_session_store is not None:
+            try:
+                await self.call_session_store.update_state(session, status="starting")
+            except BaseException:
+                await self.subscriptions.release_voice(command.tenant_id, session.session_id)
+                await self.call_session_store.update_state(
+                    session, status="failed", end_reason="call_state_persist_failed"
+                )
+                raise
         try:
             session = await adapter.initiate_outbound(call, session)
         except BaseException:
             await self.subscriptions.release_voice(command.tenant_id, session.session_id)
+            if self.call_session_store is not None:
+                await self.call_session_store.update_state(
+                    session, status="failed", end_reason="provider_start_failed"
+                )
             raise
+        if self.call_session_store is not None:
+            await self.call_session_store.update_state(
+                session, status="initiated", provider_call_id=session.provider_call_id
+            )
+        session.metadata["call_status"] = "initiated"
         session_started(session.channel, session.provider)
         return session
 
@@ -205,7 +277,28 @@ class CallCoordinator:
         )
         if canonical_answered_at is not None:
             session.started_at = canonical_answered_at
+        self.attach_session_persistence(session)
+        if self.call_session_store is not None:
+            await self.call_session_store.update_state(
+                session,
+                status="answered",
+                provider_call_id=session.provider_call_id,
+                answered_at=session.started_at,
+            )
+        session.metadata["call_status"] = "answered"
         return session.started_at
+
+    def attach_session_persistence(self, session: AcceptedSession) -> None:
+        """Attach the durable transcript checkpoint hook to a live session."""
+        if self.call_session_store is None or session.tenant_id is None:
+            return
+
+        async def persist_segment(speaker: str, text: str) -> None:
+            await self.call_session_store.append_transcript(
+                session.session_id, session.tenant_id or "", speaker, text
+            )
+
+        session.metadata["persist_transcript_segment"] = persist_segment
 
     async def end_session(self, session: AcceptedSession, reason: str) -> None:
         ended_at = datetime.now(UTC)
@@ -239,12 +332,39 @@ class CallCoordinator:
             )
             if emit_limit_event:
                 call_duration_limit_event()
+            if session.metadata.get("transcript_persistence_error"):
+                logger.error(
+                    "call_transcript_checkpoint_incomplete",
+                    extra={"session_id": session.session_id, "tenant_id": session.tenant_id},
+                )
+            if self.call_session_store is not None:
+                try:
+                    await self.call_session_store.update_state(
+                        session,
+                        status="completed",
+                        provider_call_id=session.provider_call_id,
+                        ended_at=ended_at,
+                        end_reason=reason,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "call_lifecycle_persist_failed",
+                        extra={"session_id": session.session_id, "error_type": type(exc).__name__},
+                    )
+            session.metadata["call_status"] = "completed"
             await self._enqueue_post_call(session, ended_at)
 
     async def _enqueue_post_call(self, session: AcceptedSession, ended_at: datetime) -> None:
-        if not self.post_call_required or self.post_call_dispatcher is None or not session.tenant_id:
+        if not session.tenant_id:
             return
         if session.metadata.get("post_call_enqueued") is True:
+            return
+        if not self.post_call_required or self.post_call_dispatcher is None:
+            if self.call_session_store is not None:
+                await self.call_session_store.mark_post_call_enqueued(
+                    session.tenant_id, session.session_id
+                )
+            session.metadata["post_call_enqueued"] = True
             return
         transcript = session.metadata.get("post_call_transcript")
         if not isinstance(transcript, str) or not transcript.strip():
@@ -276,10 +396,15 @@ class CallCoordinator:
             live_agent_context=(
                 session.live_agent_context if session.include_live_agent_context else None
             ),
+            recording_uri=session.metadata.get("recording_uri"),
         )
         try:
             # This writes a durable queue record only; model work happens in the worker.
             await self.post_call_dispatcher.enqueue(call)
+            if self.call_session_store is not None:
+                await self.call_session_store.mark_post_call_enqueued(
+                    session.tenant_id, session.session_id
+                )
             session.metadata["post_call_enqueued"] = True
             session.metadata.pop("post_call_transcript", None)
         except Exception as exc:
@@ -308,6 +433,10 @@ class CallCoordinator:
                 )
                 return
             post_call_enqueue_fallback_event("saved")
+            if self.call_session_store is not None:
+                await self.call_session_store.mark_post_call_enqueued(
+                    session.tenant_id, session.session_id
+                )
             session.metadata["post_call_enqueued"] = True
             session.metadata.pop("post_call_transcript", None)
 

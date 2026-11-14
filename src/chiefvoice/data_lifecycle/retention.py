@@ -132,9 +132,9 @@ class RetentionRunner:
         if batch_size < 1:
             raise ValueError("Retention batch size must be positive")
         self.policy_directory = policy_directory
-        self.targets = {target.data_class: target for target in targets}
-        if len(self.targets) != len(targets):
-            raise ValueError("Only one retention target may be registered per data class")
+        self.targets: dict[RetentionClass, list[RetentionTarget]] = {}
+        for target in targets:
+            self.targets.setdefault(target.data_class, []).append(target)
         self.batch_size = batch_size
 
     async def run_once(self, now: datetime) -> dict[str, int]:
@@ -142,12 +142,17 @@ class RetentionRunner:
         for policy in await self.policy_directory.list_policies():
             if not policy.enabled or policy.legal_hold:
                 continue
-            target = self.targets.get(policy.data_class)
-            if target is None:
+            policy_targets = self.targets.get(policy.data_class)
+            if not policy_targets:
                 continue
             deleted_key = f"{policy.tenant_id}:{policy.data_class.value}"
-            deleted[deleted_key] = await target.purge_expired(
-                policy.tenant_id, policy.cutoff(now), self.batch_size
+            deleted[deleted_key] = sum(
+                [
+                    await target.purge_expired(
+                        policy.tenant_id, policy.cutoff(now), self.batch_size
+                    )
+                    for target in policy_targets
+                ]
             )
         return deleted
 

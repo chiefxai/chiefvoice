@@ -720,7 +720,7 @@ class SqlPostCallQueue:
         try:
             if delivery.get("invalid_job"):
                 raise RuntimeError("completed_call_result_missing")
-            await validate_public_webhook_url(delivery["target_url"])
+            parsed_target, pinned_address = await _resolve_public_webhook_target(delivery["target_url"])
             result = json.loads(
                 self._fernet.decrypt(delivery["encrypted_result"].encode("ascii"))
             )
@@ -754,15 +754,25 @@ class SqlPostCallQueue:
                 "X-Chiefvoice-Timestamp": timestamp,
                 "X-Chiefvoice-Signature": f"sha256={signature}",
             }
+            ip_literal = f"[{pinned_address}]" if ":" in pinned_address else pinned_address
+            pinned_url = urllib.parse.urlunsplit(
+                (parsed_target.scheme, ip_literal, parsed_target.path or "/", parsed_target.query, "")
+            )
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(10.0, connect=3.0),
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                async with client.stream(
-                    "POST", delivery["target_url"], content=body_bytes, headers=headers
-                ) as response:
-                    status_code = response.status_code
+                request = client.build_request(
+                    "POST",
+                    pinned_url,
+                    content=body_bytes,
+                    headers={**headers, "Host": parsed_target.hostname},
+                    extensions={"sni_hostname": parsed_target.hostname.encode("ascii")},
+                )
+                response = await client.send(request, stream=True)
+                status_code = response.status_code
+                await response.aclose()
             if not 200 <= status_code < 300:
                 raise RuntimeError(f"webhook_http_{status_code}")
         except Exception as exc:
@@ -845,15 +855,17 @@ def _parse_datetime(value: str | None) -> datetime | None:
 
 
 async def validate_public_webhook_url(target_url: str) -> None:
-    """Reject obvious SSRF destinations and re-check DNS immediately before delivery.
-
-    This DNS check and HTTPX's later DNS resolution are not pinned to one socket IP;
-    production deployments should also block private/link-local egress at the network layer.
-    """
-    await asyncio.to_thread(_validate_public_webhook_url, target_url)
+    """Reject SSRF destinations using the same resolution policy as delivery."""
+    await _resolve_public_webhook_target(target_url)
 
 
-def _validate_public_webhook_url(target_url: str) -> None:
+async def _resolve_public_webhook_target(target_url: str) -> tuple[urllib.parse.SplitResult, str]:
+    return await asyncio.to_thread(_resolve_public_webhook_target_sync, target_url)
+
+
+def _resolve_public_webhook_target_sync(
+    target_url: str,
+) -> tuple[urllib.parse.SplitResult, str]:
     try:
         parsed = urllib.parse.urlsplit(target_url)
         hostname = parsed.hostname
@@ -886,6 +898,9 @@ def _validate_public_webhook_url(target_url: str) -> None:
         records = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ValueError("Webhook URL hostname could not be resolved") from exc
-    addresses = {record[4][0] for record in records}
+    addresses = {record[4][0].split("%", 1)[0] for record in records}
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
         raise ValueError("Webhook URL must resolve only to public IP addresses")
+    # Pin one checked address in the HTTPS URL and provide the original hostname as
+    # SNI/Host, preserving certificate hostname validation while avoiding DNS TOCTOU.
+    return parsed, sorted(addresses)[0]

@@ -35,6 +35,7 @@ from chiefvoice.agents.post_call.queue import PostCallDispatcher, SqlPostCallQue
 from chiefvoice.agents.post_call.queue import SqlPostCallWebhookDirectory
 from chiefvoice.agents.post_call.webhook_routes import router as post_call_webhook_router
 from chiefvoice.calls.coordinator import CallCoordinator
+from chiefvoice.calls.store import SqlCallSessionStore
 from chiefvoice.channels.base import ChannelAdapter
 from chiefvoice.core.config import settings
 from chiefvoice.cloud_projects.google_provisioner import GoogleCloudTenantProjectProvisioner
@@ -82,6 +83,7 @@ async def lifespan(_app: FastAPI):
     post_call_async_invoker = getattr(_app.state, "post_call_async_invoker", None)
     post_call_replay_service = getattr(_app.state, "post_call_replay_service", None)
     post_call_recovery_spool = getattr(_app.state, "post_call_recovery_spool", None)
+    call_session_store = getattr(_app.state, "call_session_store", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
     recording_store = getattr(_app.state, "recording_store", None)
     backup_provider = getattr(_app.state, "backup_provider", None)
@@ -94,6 +96,8 @@ async def lifespan(_app: FastAPI):
     try:
         if account_store is not None:
             await account_store.initialize()
+        if call_session_store is not None:
+            await call_session_store.initialize()
         if billing_directory is not None:
             await billing_directory.initialize()
         if integration_store is not None:
@@ -111,6 +115,20 @@ async def lifespan(_app: FastAPI):
             ))
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.initialize()
+            if call_session_store is not None:
+                # The transcript checkpoint is written throughout the call, so a VM
+                # restart after hangup can still enqueue analysis exactly once.
+                while True:
+                    pending_calls = await call_session_store.pending_post_call(limit=100)
+                    if not pending_calls:
+                        break
+                    for completed_call in pending_calls:
+                        await post_call_dispatcher.enqueue(completed_call)
+                        await call_session_store.mark_post_call_enqueued(
+                            completed_call.tenant_id, completed_call.session_id
+                        )
+                    if len(pending_calls) < 100:
+                        break
         if post_call_replay_service is not None:
             await post_call_replay_service.initialize()
         for check_storage in storage_checks:
@@ -174,6 +192,8 @@ async def lifespan(_app: FastAPI):
             await api_key_directory.close()
         if account_store is not None:
             await account_store.close()
+        if call_session_store is not None:
+            await call_session_store.close()
         if vertex_project_directory is not None:
             await vertex_project_directory.close()
         logger.info("application_stopped", extra={"event": "application_stopped"})
@@ -215,10 +235,10 @@ def create_app(
             raise ValueError("Vertex project isolation requires: " + ", ".join(missing))
         vertex_project_directory = SqlTenantVertexProjectDirectory(settings.database_url)
         additional_vertex_identities = ()
-        if settings.post_call_execution_backend == "gcp_function":
+        if settings.post_call_execution_backend in {"gcp_function", "gcp_cloud_tasks"}:
             if not settings.gcp_post_call_service_account:
                 raise ValueError(
-                    "GCP_POST_CALL_SERVICE_ACCOUNT is required for the GCP function backend"
+                    "GCP_POST_CALL_SERVICE_ACCOUNT is required for the GCP post-call function backend"
                 )
             additional_vertex_identities = (settings.gcp_post_call_service_account,)
         vertex_project_provisioner = GoogleCloudTenantProjectProvisioner(
@@ -401,6 +421,11 @@ def create_app(
         post_call_webhook_directory = SqlPostCallWebhookDirectory(
             settings.database_url, settings.post_call_encryption_key
         )
+    call_session_store = (
+        SqlCallSessionStore(settings.database_url, settings.credentials_encryption_key)
+        if settings.database_url and settings.credentials_encryption_key
+        else None
+    )
     retention_policies = StaticRetentionPolicyDirectory.from_json(settings.retention_policies_json)
     retention_runner = None
     if retention_policies.policies:
@@ -411,6 +436,8 @@ def create_app(
             targets.append(recording_store)
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             targets.append(post_call_dispatcher)
+        if call_session_store is not None:
+            targets.append(call_session_store)
         supported = {target.data_class for target in targets}
         unsupported = {
             policy.data_class for policy in retention_policies.policies
@@ -471,6 +498,7 @@ def create_app(
         adapters["vobiz"] = vobiz_adapter
     application.state.provider_integration_store = provider_integration_store
     application.state.account_store = account_store
+    application.state.call_session_store = call_session_store
     application.state.billing_directory = billing_directory
     application.state.api_key_directory = api_key_directory
     application.state.post_call_webhook_directory = post_call_webhook_directory
@@ -495,6 +523,7 @@ def create_app(
             post_call_fallback_spool=post_call_recovery_spool,
             vertex_project_directory=vertex_project_directory,
             require_tenant_vertex_project=settings.vertex_project_isolation_enabled,
+            call_session_store=call_session_store,
         )
         if subscription_authorizer is not None
         else None

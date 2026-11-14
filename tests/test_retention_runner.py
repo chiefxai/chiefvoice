@@ -44,3 +44,19 @@ def test_legal_hold_disables_retention_for_tenant_data_class():
 
     assert asyncio.run(runner.run_once(datetime.now(UTC))) == {}
     assert target.calls == []
+
+
+def test_runner_applies_one_policy_to_each_storage_for_the_data_class():
+    directory = StaticRetentionPolicyDirectory.from_json(
+        '[{"tenant_id":"tenant-a","data_class":"recording",'
+        '"retain_for_seconds":86400}]'
+    )
+    first = _Target()
+    second = _Target()
+    runner = RetentionRunner(directory, [first, second])
+
+    result = asyncio.run(runner.run_once(datetime.now(UTC)))
+
+    assert result == {"tenant-a:recording": 4}
+    assert len(first.calls) == 1
+    assert len(second.calls) == 1

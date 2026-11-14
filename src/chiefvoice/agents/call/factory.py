@@ -7,12 +7,12 @@ from pipecat.transports.base_transport import BaseTransport
 
 from chiefvoice.agents.call.pipeline import build_pipeline
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
+from chiefvoice.agents.post_call.transcript import TranscriptCollector
 from chiefvoice.recordings.storage import (
     RecordingStore,
     attach_recording,
     create_recording_processor,
 )
-from chiefvoice.agents.post_call.transcript import TranscriptCollector
 from chiefvoice.sessions import AcceptedSession
 
 ProcessorFactory = Callable[
@@ -45,11 +45,13 @@ def create_voice_pipeline_factory(
         if recording_store is not None:
             recorder = create_recording_processor(session)
             attach_recording(recorder, session, recording_store)
+        caller_transcript, assistant_transcript = TranscriptCollector.for_pipeline(session)
         return build_pipeline(
             transport,
             conversation_processors,
             recording_processor=recorder,
-            transcript_processor=TranscriptCollector(session),
+            transcript_processor=caller_transcript,
+            assistant_transcript_processor=assistant_transcript,
         )
 
     return factory

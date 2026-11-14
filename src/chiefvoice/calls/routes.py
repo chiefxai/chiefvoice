@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
@@ -120,7 +120,10 @@ async def start_outbound_call(
     request: Request,
     principal: Annotated[Principal, Security(require_scope("calls:write"))],
     coordinator: Annotated[CallCoordinator, Depends(get_call_coordinator)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
+    if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 200):
+        raise HTTPException(status_code=400, detail="Idempotency-Key must be 1 to 200 characters")
     if getattr(request.app.state, "voice_pipeline_factory", None) is None:
         call_start_event("unavailable")
         raise HTTPException(
@@ -154,6 +157,7 @@ async def start_outbound_call(
                     body.post_call.include_live_agent_context if body.post_call else False
                 ),
                 recording_allowed=body.recording_allowed,
+                idempotency_key=idempotency_key,
             )
         )
     except HTTPException as exc:
@@ -168,8 +172,26 @@ async def start_outbound_call(
         "provider": session.provider,
         "channel": session.channel,
         "direction": session.direction,
-        "status": "starting",
+        "status": session.metadata.get("call_status", "starting"),
     }
+
+
+@router.get("/v1/calls/{session_id}", tags=["calls"])
+async def get_call_status(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("calls:read"))],
+):
+    store = getattr(request.app.state, "call_session_store", None)
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Call status storage is not configured",
+        )
+    result = await store.get_status(principal.tenant_id, session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+    return result
 
 
 @router.get("/v1/calls/{session_id}/post-call", tags=["calls"])

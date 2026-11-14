@@ -1,16 +1,19 @@
 import asyncio
+import base64
+import hashlib
 import hmac
 import inspect
 import json
 import logging
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable
+from typing import Any
 from xml.etree.ElementTree import Element, SubElement, tostring
 
-from cryptography.fernet import Fernet, InvalidToken
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, Request, Response, WebSocket
 from fastapi.responses import Response as FastAPIResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -64,6 +67,10 @@ class VobizAdapter:
         self._state = URLSafeTimedSerializer(
             settings.vobiz_webhook_secret, salt="chiefvoice-vobiz-call-state-v1"
         )
+        state_key = hashlib.sha256(
+            b"chiefvoice-vobiz-state-encryption-v1:" + settings.vobiz_webhook_secret.encode()
+        ).digest()
+        self._state_cipher = Fernet(base64.urlsafe_b64encode(state_key))
 
     @property
     def configured(self) -> bool:
@@ -88,7 +95,9 @@ class VobizAdapter:
         if not auth_id or not auth_token:
             raise HTTPException(status_code=403, detail="Vobiz credentials are incomplete")
         if caller_id not in {n.number for n in integration.phone_numbers if n.outbound_enabled}:
-            raise HTTPException(status_code=403, detail="Caller ID is not configured for this tenant")
+            raise HTTPException(
+                status_code=403, detail="Caller ID is not configured for this tenant"
+            )
 
         # These values are known before asking Vobiz to place the call. Preserve them
         # in the signed callback state so the media session gets the same call context.
@@ -155,6 +164,11 @@ class VobizAdapter:
         )
         if integration is None:
             raise HTTPException(status_code=404, detail="Inbound number is not configured")
+        auth_token = integration.credentials.get("auth_token", "")
+        if not auth_token or not self._valid_callback_signature(
+            request, auth_token, "/webhooks/vobiz/inbound"
+        ):
+            raise HTTPException(status_code=403, detail="Invalid Vobiz callback signature")
         return VobizInboundCall(
             provider=self.provider,
             channel="phone",
@@ -164,6 +178,38 @@ class VobizAdapter:
             provider_call_id=call_id,
             bot_config_id=_optional_config_id(integration.settings.get("default_agent_id")),
         )
+
+    @staticmethod
+    def _valid_callback_signature(request: Request, auth_token: str, path: str) -> bool:
+        """Validate Vobiz's V3 (preferred) or V2 callback HMAC.
+
+        Vobiz signs the configured callback URL without its query string and a
+        nonce. Use our configured public origin instead of proxy-controlled Host
+        and forwarded headers. The route token remains an additional check.
+        """
+        public_url = (settings.vobiz_public_url or "").rstrip("/")
+        base_url = f"{public_url}{path}"
+        v3_signature = request.headers.get("X-Vobiz-Signature-V3", "")
+        v3_nonce = request.headers.get("X-Vobiz-Signature-V3-Nonce", "")
+        v2_signature = request.headers.get("X-Vobiz-Signature-V2", "")
+        v2_nonce = request.headers.get("X-Vobiz-Signature-V2-Nonce", "")
+
+        for signature, nonce, separator in (
+            (v3_signature, v3_nonce, "."),
+            (v2_signature, v2_nonce, ""),
+        ):
+            if not signature or not nonce or len(nonce) > 128:
+                continue
+            expected = base64.b64encode(
+                hmac.new(
+                    auth_token.encode(),
+                    f"{base_url}{separator}{nonce}".encode(),
+                    hashlib.sha256,
+                ).digest()
+            ).decode()
+            if hmac.compare_digest(signature, expected):
+                return True
+        return False
 
     async def accept_inbound(
         self, call: InboundCall, session: AcceptedSession
@@ -267,8 +313,11 @@ class VobizAdapter:
         self,
         websocket: WebSocket,
         state_token: str,
-        pipeline_factory: Callable[[AcceptedSession, BaseTransport], Pipeline | Awaitable[Pipeline]] | None,
+        pipeline_factory: (
+            Callable[[AcceptedSession, BaseTransport], Pipeline | Awaitable[Pipeline]] | None
+        ),
         end_session: Callable[[AcceptedSession, str], Awaitable[None]],
+        attach_session_persistence: Callable[[AcceptedSession], Any] | None = None,
     ) -> None:
         try:
             state = self._read_state(state_token)
@@ -276,6 +325,10 @@ class VobizAdapter:
             await websocket.close(code=1008)
             return
         session = self._session_from_state(state)
+        if attach_session_persistence is not None:
+            persistence_result = attach_session_persistence(session)
+            if inspect.isawaitable(persistence_result):
+                await persistence_result
         end_reason = "completed"
         try:
             transport = await self.build_transport(session, websocket)
@@ -398,7 +451,9 @@ class VobizAdapter:
             f"{urllib.parse.quote(session.provider_call_id, safe='')}/"
         )
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.delete(endpoint, headers=self._auth_headers(auth_id, auth_token))
+            response = await client.delete(
+                endpoint, headers=self._auth_headers(auth_id, auth_token)
+            )
             response.raise_for_status()
 
     async def transfer(self, session: AcceptedSession, destination: str) -> None:
@@ -439,7 +494,9 @@ class VobizAdapter:
                 "provider_call_id": _optional_state_string(
                     session.provider_call_id, "provider_call_id", 256
                 ),
-                "bot_config_id": _optional_state_string(session.bot_config_id, "bot_config_id", 128),
+                "bot_config_id": _optional_state_string(
+                    session.bot_config_id, "bot_config_id", 128
+                ),
                 "max_call_seconds": session.max_call_seconds,
                 "started_at": started_at.isoformat(),
             }
@@ -471,7 +528,8 @@ class VobizAdapter:
             raise HTTPException(
                 status_code=422, detail="Call state contains invalid session data"
             ) from exc
-        token = self._state.dumps(claims)
+        signed_token = self._state.dumps(claims)
+        token = self._state_cipher.encrypt(signed_token.encode("ascii")).decode("ascii")
         if len(token) > MAX_CALL_STATE_TOKEN_LENGTH:
             raise HTTPException(status_code=422, detail="Call state exceeds the supported size")
         return token
@@ -480,8 +538,9 @@ class VobizAdapter:
         if not token or len(token) > MAX_CALL_STATE_TOKEN_LENGTH:
             raise HTTPException(status_code=404, detail="Not found")
         try:
-            claims = self._state.loads(token, max_age=12 * 60 * 60)
-        except (BadSignature, SignatureExpired) as exc:
+            signed_token = self._state_cipher.decrypt(token.encode("ascii")).decode("ascii")
+            claims = self._state.loads(signed_token, max_age=12 * 60 * 60)
+        except (InvalidToken, UnicodeDecodeError, BadSignature, SignatureExpired) as exc:
             raise HTTPException(status_code=404, detail="Not found") from exc
         if not isinstance(claims, dict):
             raise HTTPException(status_code=404, detail="Not found")
@@ -509,7 +568,10 @@ class VobizAdapter:
                 raise ValueError("Invalid max call duration")
             encrypted_context = claims.get("encrypted_call_context")
             if encrypted_context is not None:
-                if not isinstance(encrypted_context, str) or not settings.credentials_encryption_key:
+                if (
+                    not isinstance(encrypted_context, str)
+                    or not settings.credentials_encryption_key
+                ):
                     raise ValueError("Invalid encrypted call context")
                 try:
                     call_context = json.loads(

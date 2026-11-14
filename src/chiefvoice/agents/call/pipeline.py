@@ -13,6 +13,7 @@ def build_pipeline(
     *,
     recording_processor: FrameProcessor | None = None,
     transcript_processor: TranscriptCollector | None = None,
+    assistant_transcript_processor: TranscriptCollector | None = None,
 ) -> Pipeline:
     """Assemble a channel-neutral Pipecat pipeline around provider transport I/O.
 
@@ -22,7 +23,10 @@ def build_pipeline(
     processors: list[FrameProcessor] = [transport.input()]
     if transcript_processor is not None:
         processors.append(transcript_processor)
-    processors.extend([*conversation_processors, transport.output()])
+    processors.extend(conversation_processors)
+    if assistant_transcript_processor is not None:
+        processors.append(assistant_transcript_processor)
+    processors.append(transport.output())
     if recording_processor is not None:
         processors.append(recording_processor)
     return Pipeline(processors)

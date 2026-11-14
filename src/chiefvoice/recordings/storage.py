@@ -528,6 +528,7 @@ def attach_recording(
             )
             return
         if path:
+            session.metadata["recording_uri"] = path
             recording_storage_event("saved")
             logger.info(
                 "recording_saved",

@@ -1,10 +1,16 @@
-# GCP VM deployment (primary)
+# GCP VM deployment (active topology)
 
-This root runs the API and PostgreSQL together on one Compute Engine VM. Post-call jobs use Cloud Tasks targeting the separately deployed Cloud Function. Recording and backup objects use Cloud Storage through its S3-compatible endpoint (`https://storage.googleapis.com`) with an HMAC key and signing region `auto`.
+This Terraform root is the active GCP deployment: one Compute Engine VM runs the API and PostgreSQL, Cloud Tasks queues post-call work, and an authenticated second-generation Cloud Function processes jobs. PostgreSQL stays on the VM's encrypted persistent disk. Recordings and encrypted database backups use the private Cloud Storage bucket through its S3-compatible endpoint.
 
-The VM has an encrypted persistent boot disk and a public IP for the API. The Terraform root also creates a Serverless VPC Access connector and a firewall rule for Cloud Function traffic to PostgreSQL on the VM. Cloud Build must deploy the function with that connector and the VM's internal IP as its database host. The initial root does not yet create automated PostgreSQL backups or HTTPS termination; set those up before production.
+## Prerequisites
 
-Set `POST_CALL_EXECUTION_BACKEND=gcp_cloud_tasks` and configure the queue path, function URL, and task-caller service account. Cloud Tasks retries failed HTTP requests. Ensure the deployed function grants `roles/run.invoker` only to the task-caller service account. Terraform state includes the database password, bootstrap script and S3-compatible HMAC secret; use protected remote state.
+- Set `public_domain` to a DNS name you control. Point its A record to `backend_external_ip` before the first public deployment so Caddy can obtain/renew its HTTPS certificate. Provider callback URLs are HTTPS.
+- Configure OIDC issuer, audience and JWKS URL; `terraform.tfvars.example` shows all required values.
+- Set `tenant_project_parent` to `folders/<id>` or `organizations/<id>`, the billing account ID, the project used as the budget API consumer, and the required initial spend cap. Apply with an identity authorized to grant the specified parent and billing account roles. The VM identity receives project creation, billing-linking, service usage and budget permissions so it can create a separate Vertex project for each tenant. Vertex budgets retain the enforced spend-cap behavior.
+- Create the Cloud Build trigger using `cloud_build_service_account_email`. Edit its substitutions in `cloudbuild.yaml` (`_PUBLIC_DOMAIN`, project parent, billing account, budget API project, OIDC settings and service-account emails) to match Terraform. The Cloud Build SA receives scoped Artifact Registry access and the permissions required to deploy the function and update the VM over IAP.
+- Protect the Terraform remote state: it contains Secret Manager secret versions for the database password, Fernet keys, Vobiz secrets and HMAC object-storage credentials, as well as the rendered startup script. Runtime startup reads values from Secret Manager into root-only files; instance metadata contains secret IDs rather than those values.
+
+## Apply and deploy
 
 ```sh
 terraform init -backend-config=backend.hcl
@@ -12,4 +18,14 @@ terraform plan -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 ```
 
-`../scalable-infra/gcp` retains the earlier Cloud Run plus Cloud SQL layout for future use.
+Terraform reserves a regional static IP; point DNS to the `backend_external_ip` output. VM startup installs Docker, PostgreSQL, Caddy and the Google Cloud CLI, configures Artifact Registry authentication, and starts PostgreSQL. Cloud Build publishes the API image, deploys the post-call function with the Serverless VPC Access connector, binds `roles/run.invoker` only to the Cloud Tasks OIDC service account, obtains the HTTPS function URL, connects to the VM through IAP, waits for PostgreSQL readiness, runs `alembic upgrade head` using the same new image, then starts API and Caddy. The function uses a secret database URL targeting the VM's private address; the connector-only firewall rule allows its PostgreSQL traffic.
+
+Cloud Build also runs unit tests, lint, compilation and public `/healthz`, `/readyz` and `/metrics` probes. Register the trigger after Terraform has created the VM, Artifact Registry repository, connector, queue and service accounts. Later builds repeat migrations under an instance-local deployment lock and only expose the API after migration succeeds.
+
+## Backup and restore
+
+The API periodically takes service-scoped PostgreSQL backups with `pg_dump`, encrypts the archive using the dedicated `BACKUP_ENCRYPTION_KEY`, and stores the encrypted object in the private bucket. Policy is one day interval and 30 day retention. The VM service account has object access; the bucket enforces uniform access and public access prevention. Backups require no extra host cron job because the API's backup runner performs the scheduled work.
+
+Check a restore by running `sudo chiefvoice-backup-restore-check` on the VM. It creates a disposable database, verifies and decrypts the newest backup into it, and drops that database on exit. Confirm the `restore_verified` log line and then verify the restored database schema/data before treating a backup as usable. Never restore to the production database. The container image includes PostgreSQL 16 client tools used by the backup and restore provider.
+
+The backend endpoint is `https://<public_domain>`. Cloud Tasks queue retries are bounded by its configured retry policy; monitor Cloud Logging and the queue's oldest task age / retry metrics. `../scalable-infra/gcp` retains the older Cloud Run and Cloud SQL design and is not active.

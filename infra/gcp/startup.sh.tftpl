@@ -1,10 +1,46 @@
 #!/bin/bash
 set -euo pipefail
+
+exec > >(tee -a /var/log/chiefvoice-startup.log | logger -t chiefvoice-startup -s 2>/dev/console) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y docker.io
+apt-get install -y ca-certificates curl gnupg apt-transport-https util-linux
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" >/etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+# The VM uses its attached service account to pull the private Artifact Registry image.
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/cloud.google.gpg
+chmod a+r /etc/apt/keyrings/cloud.google.gpg
+echo "deb [signed-by=/etc/apt/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" >/etc/apt/sources.list.d/google-cloud-sdk.list
+apt-get update
+apt-get install -y google-cloud-cli
 systemctl enable --now docker
-mkdir -p /opt/chiefvoice
-cat >/opt/chiefvoice/compose.yaml <<'EOF'
+gcloud auth configure-docker ${artifact_registry_host} --quiet
+
+mkdir -p /opt/chiefvoice /opt/chiefvoice/pgbackups
+chmod 700 /opt/chiefvoice
+fetch_secret() {
+  gcloud secrets versions access latest --secret="$1"
+}
+database_password="$(fetch_secret '${secret_ids["database"]}')"
+credentials_key="$(fetch_secret '${secret_ids["credentials"]}')"
+post_call_key="$(fetch_secret '${secret_ids["post-call"]}')"
+recording_key="$(fetch_secret '${secret_ids["recordings"]}')"
+backup_key="$(fetch_secret '${secret_ids["backup"]}')"
+vobiz_webhook_secret="$(fetch_secret '${secret_ids["vobiz-webhook"]}')"
+vobiz_route_token="$(fetch_secret '${secret_ids["vobiz-route"]}')"
+object_access_id="$(fetch_secret '${secret_ids["object-access-id"]}')"
+object_secret="$(fetch_secret '${secret_ids["object-secret"]}')"
+cat >/opt/chiefvoice/.env <<ENVFILE
+DB_PASSWORD=$database_password
+ENVFILE
+chmod 600 /opt/chiefvoice/.env
+cat >/opt/chiefvoice/compose.yaml <<'COMPOSE'
 services:
   postgres:
     image: postgres:16
@@ -12,28 +48,139 @@ services:
     environment:
       POSTGRES_DB: chiefvoice
       POSTGRES_USER: chiefvoice
-      POSTGRES_PASSWORD: ${database_password}
+      POSTGRES_PASSWORD: $${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chiefvoice -d chiefvoice"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
   api:
-    image: ${api_image_uri}
+    image: $${API_IMAGE:-busybox}
     restart: unless-stopped
-    depends_on: [postgres]
-    ports: ["80:8080"]
-    environment:
-      APP_ENV: production
-      DATABASE_URL: postgresql+asyncpg://chiefvoice:${database_password}@postgres:5432/chiefvoice
-      OBJECT_STORAGE_BUCKET: ${object_bucket}
-      OBJECT_STORAGE_REGION: auto
-      OBJECT_STORAGE_ENDPOINT_URL: https://storage.googleapis.com
-      OBJECT_STORAGE_ADDRESSING_STYLE: path
-      OBJECT_STORAGE_ACCESS_KEY_ID: ${object_access_id}
-      OBJECT_STORAGE_SECRET_ACCESS_KEY: ${object_secret}
-      POST_CALL_EXECUTION_BACKEND: gcp_cloud_tasks
-      POST_CALL_CLOUD_TASKS_QUEUE: ${tasks_queue}
-      POST_CALL_GCP_FUNCTION_URL: ${function_url}
-      GCP_CLOUD_TASKS_SERVICE_ACCOUNT: ${function_service_account}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose: ["8080"]
+    env_file: [/opt/chiefvoice/api.env]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [api]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - /opt/chiefvoice/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 volumes:
   postgres_data:
-EOF
-docker compose -f /opt/chiefvoice/compose.yaml up -d
+  caddy_data:
+  caddy_config:
+COMPOSE
+
+cat >/opt/chiefvoice/Caddyfile <<'CADDY'
+${public_domain} {
+  encode zstd gzip
+  reverse_proxy api:8080
+}
+CADDY
+
+cat >/opt/chiefvoice/api.env <<ENV
+APP_ENV=production
+LOG_LEVEL=INFO
+DATABASE_URL=postgresql+asyncpg://chiefvoice:$database_password@postgres:5432/chiefvoice
+CREDENTIALS_ENCRYPTION_KEY=$credentials_key
+POST_CALL_ENCRYPTION_KEY=$post_call_key
+RECORDINGS_ENCRYPTION_KEY=$recording_key
+BACKUP_ENCRYPTION_KEY=$backup_key
+RECORDINGS_ENABLED=false
+RECORDINGS_STORAGE_BACKEND=s3
+BACKUP_STORAGE_BACKEND=s3
+BACKUP_POLICIES_JSON=[{"scope":"service","tenant_id":null,"resource":"postgres","interval_seconds":86400,"retain_for_seconds":2592000,"enabled":true}]
+BACKUP_INTERVAL_SECONDS=3600
+RETENTION_POLICIES_JSON=[]
+OBJECT_STORAGE_BUCKET=${object_bucket}
+OBJECT_STORAGE_REGION=auto
+OBJECT_STORAGE_ENDPOINT_URL=https://storage.googleapis.com
+OBJECT_STORAGE_ADDRESSING_STYLE=path
+OBJECT_STORAGE_ACCESS_KEY_ID=$object_access_id
+OBJECT_STORAGE_SECRET_ACCESS_KEY=$object_secret
+OBJECT_STORAGE_PREFIX=chiefvoice
+POST_CALL_EXECUTION_BACKEND=gcp_cloud_tasks
+POST_CALL_CLOUD_TASKS_QUEUE=${tasks_queue}
+POST_CALL_GCP_FUNCTION_URL=
+GCP_CLOUD_TASKS_SERVICE_ACCOUNT=${function_service_account}
+POST_CALL_AGENT_PROVIDER=langchain_vertex
+POST_CALL_MODEL=${post_call_model}
+REALTIME_AGENT_PROVIDER=vertex
+VERTEX_PROJECT_ISOLATION_ENABLED=true
+VERTEX_LOCATION=${vertex_location}
+VERTEX_MODEL=${vertex_model}
+GCP_PROJECT_PARENT=${tenant_project_parent}
+GCP_BILLING_ACCOUNT_ID=${tenant_billing_account_id}
+GCP_RUNTIME_SERVICE_ACCOUNT=${tenant_runtime_service_account}
+GCP_POST_CALL_SERVICE_ACCOUNT=${function_service_account}
+GCP_BUDGET_API_PROJECT_ID=${budget_api_project_id}
+GCP_VERTEX_MONTHLY_SPEND_CAP=${vertex_monthly_spend_cap}
+OIDC_ISSUER=${oidc_issuer}
+OIDC_AUDIENCE=${oidc_audience}
+OIDC_JWKS_URL=${oidc_jwks_url}
+VOBIZ_PUBLIC_URL=https://${public_domain}
+VOBIZ_WEBHOOK_SECRET=$vobiz_webhook_secret
+VOBIZ_INBOUND_ROUTE_TOKEN=$vobiz_route_token
+OTEL_SERVICE_NAME=chiefvoice-api
+ENV
+chmod 600 /opt/chiefvoice/api.env
+unset database_password credentials_key post_call_key recording_key backup_key vobiz_webhook_secret vobiz_route_token object_access_id object_secret
+
+cat >/usr/local/bin/chiefvoice-deploy <<'DEPLOY'
+#!/bin/bash
+set -euo pipefail
+image="$${1:?usage: chiefvoice-deploy IMAGE FUNCTION_URL}"
+function_url="$${2:?usage: chiefvoice-deploy IMAGE FUNCTION_URL}"
+cd /opt/chiefvoice
+exec 9>/var/lock/chiefvoice-deploy.lock
+flock 9
+umask 077
+sed -i "s|^POST_CALL_GCP_FUNCTION_URL=.*|POST_CALL_GCP_FUNCTION_URL=$${function_url}|" api.env
+export API_IMAGE="$${image}"
+docker compose -f compose.yaml pull postgres api caddy
+docker compose -f compose.yaml up -d postgres
+for attempt in $(seq 1 60); do
+  if docker compose -f compose.yaml exec -T postgres pg_isready -U chiefvoice -d chiefvoice >/dev/null 2>&1; then break; fi
+  if [ "$${attempt}" -eq 60 ]; then echo "PostgreSQL readiness timed out" >&2; exit 1; fi
+  sleep 5
+done
+docker compose -f compose.yaml run --rm --no-deps api alembic upgrade head
+docker compose -f compose.yaml up -d api caddy
+DEPLOY
+chmod 700 /usr/local/bin/chiefvoice-deploy
+
+cat >/usr/local/bin/chiefvoice-backup-restore-check <<'RESTORE'
+#!/bin/bash
+set -euo pipefail
+if [ "$${EUID}" -ne 0 ]; then echo "run with sudo" >&2; exit 2; fi
+target_db="$${1:-chiefvoice_restore_check}"
+if [[ ! "$${target_db}" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,62}$ ]]; then echo "invalid disposable database name" >&2; exit 2; fi
+cd /opt/chiefvoice
+set -a
+. ./.env
+set +a
+docker compose -f compose.yaml exec -T postgres createdb -U chiefvoice "$${target_db}"
+target_url="postgresql+asyncpg://chiefvoice:$DB_PASSWORD@postgres:5432/$${target_db}"
+trap 'docker compose -f /opt/chiefvoice/compose.yaml exec -T postgres dropdb -U chiefvoice --if-exists "$${target_db}"' EXIT
+docker compose -f compose.yaml exec -T -e RESTORE_TARGET_DATABASE_URL="$${target_url}" api python scripts/verify_postgres_backup_restore.py
+RESTORE
+chmod 700 /usr/local/bin/chiefvoice-backup-restore-check
+
+cd /opt/chiefvoice
+docker compose -f compose.yaml up -d postgres
+echo "Chiefvoice PostgreSQL is bootstrapped. Deploy the API through Cloud Build to run migrations and expose HTTPS."

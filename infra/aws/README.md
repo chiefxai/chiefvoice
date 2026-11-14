@@ -1,12 +1,14 @@
-# AWS VM deployment (primary)
+# AWS VM deployment (active topology)
 
-This root runs the API and PostgreSQL together on one EC2 VM. Post-call jobs are queued in SQS and processed by an image-based Lambda. Recordings and backups use a private S3 bucket. PostgreSQL data lives on the VM's encrypted EBS root volume; there is no RDS instance in this design.
+This root runs the API and PostgreSQL together on one EC2 VM. SQS queues post-call work for an image-based Lambda in a private subnet. Recordings and encrypted PostgreSQL backups use a private S3 bucket. The database lives on the VM's encrypted EBS volume; there is no RDS instance in this active topology.
 
-Provide an Ubuntu 24.04 AMI ID, prebuilt API and Lambda images, a globally unique bucket name, and an admin-only SSH CIDR. The VM security group exposes HTTP/HTTPS and SSH only from that CIDR. A NAT gateway gives the private Lambda subnet access to Vertex and external APIs; it has ongoing hourly and data charges. PostgreSQL port 5432 is allowed only from the Lambda security group.
+## Prerequisites
 
-The VM bootstrap starts PostgreSQL and the API as Docker Compose services. The database volume persists on EBS, but this starter root does not yet configure automated PostgreSQL backups or TLS termination. Add a backup schedule and HTTPS reverse proxy/certificate before production use. Terraform state includes generated database credentials and bootstrap content, so use encrypted, access-restricted remote state.
+- Supply an Ubuntu 24.04 AMI, prebuilt API and Lambda image URIs, globally unique S3 bucket name, restricted SSH CIDR and public DNS name. Point `public_domain` to the `backend_public_ip` Elastic IP before the first public deployment. Caddy terminates TLS and provider callback URLs use HTTPS.
+- Configure OIDC issuer, audience and JWKS URL. Vertex project creation also requires a Google service-account JSON secret in AWS Secrets Manager. Give the account the configured GCP folder/org and billing-account permissions. The VM mounts the JSON as a root-readable file; the Lambda retrieves the same secret by ARN.
+- Keep Terraform state encrypted and access restricted: it contains Secrets Manager secret versions for the DB password, Fernet keys and Vobiz secrets, plus bootstrap configuration. EC2 retrieves runtime values through its role and writes them to root-only files; user data carries secret ARNs, not those values.
 
-Set `POST_CALL_EXECUTION_BACKEND=sqs` and `POST_CALL_SQS_QUEUE_URL` in the API environment. Lambda receives one SQS message at a time; failed records are retried and eventually sent to the dead-letter queue. The Lambda container must parse SQS `Records` events and have access to the same database and post-call encryption key.
+## Apply
 
 ```sh
 terraform init -backend-config=backend.hcl
@@ -14,4 +16,14 @@ terraform plan -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 ```
 
-`../scalable-infra/aws` retains the earlier ECS/Fargate plus RDS layout for future use.
+The VM role pulls ECR images and accesses the S3 bucket and SQS queue. PostgreSQL port 5432 is allowed only from the Lambda security group. Caddy is the only public application entry point (ports 80/443); SSH is restricted by `ssh_allowed_cidr`. The Elastic IP is stable for DNS.
+
+The first boot starts PostgreSQL, waits for its health check, runs `alembic upgrade head` from the configured API image, then starts API and Caddy. `chiefvoice-deploy IMAGE_URI` repeats the migration before replacing API; do not deploy concurrently because the instance is intentionally a single deployment target. The API's queue dispatcher sends SQS messages and Lambda receives one at a time with a dead-letter queue after bounded retries.
+
+## PostgreSQL backups and restore check
+
+The API creates a daily service-scoped `pg_dump` backup, encrypts it with the dedicated `BACKUP_ENCRYPTION_KEY`, writes it to S3 and expires objects after 30 days. It requires PostgreSQL 16 client tools, installed in the image. EBS snapshots are not a substitute for encrypted, off-instance backups.
+
+Run `sudo chiefvoice-backup-restore-check` on the VM to create a disposable database, verify and restore the newest backup into it, and remove the scratch database when the check exits. Confirm the `restore_verified` log line and inspect the restored schema/data before relying on the backup. Never target the production database.
+
+`../scalable-infra/aws` retains the previous ECS/Fargate and RDS topology; it is not part of the active deployment.
