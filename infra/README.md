@@ -4,7 +4,7 @@ The primary Terraform roots use one VM for the API and PostgreSQL, with provider
 
 - `infra/aws` provisions EC2 + local PostgreSQL, Lambda + SQS, and S3.
 - `infra/gcp` provisions Compute Engine + local PostgreSQL, a Cloud Function target + Cloud Tasks, and Cloud Storage via its S3-compatible HMAC endpoint.
-- `infra/aws-managed` and `infra/gcp-managed` retain the earlier ECS/Cloud Run + managed PostgreSQL designs as secondary references.
+- `infra/scalable-infra/aws` and `infra/scalable-infra/gcp` retain the earlier ECS/Cloud Run + managed PostgreSQL designs for future scaling options.
 
 Create the state backend before initializing either root: a private, versioned GCS bucket for `infra/gcp`, and a private, versioned S3 bucket plus DynamoDB lock table for `infra/aws`. The roots declare the matching remote backend. Use separate state paths, restrict state readers, and never commit state, plan files, or real `terraform.tfvars` files. Both roots generate database and encryption secrets, and provider state may include HMAC and secret versions; encrypt and tightly restrict state access.
 

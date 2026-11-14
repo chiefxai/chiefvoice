@@ -12,4 +12,4 @@ terraform plan -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 ```
 
-`../gcp-managed` retains the earlier Cloud Run plus Cloud SQL layout as a secondary reference.
+`../scalable-infra/gcp` retains the earlier Cloud Run plus Cloud SQL layout for future use.

@@ -14,4 +14,4 @@ terraform plan -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 ```
 
-`../aws-managed` retains the earlier ECS/Fargate plus RDS layout as a secondary reference.
+`../scalable-infra/aws` retains the earlier ECS/Fargate plus RDS layout for future use.
