@@ -190,6 +190,16 @@ class VobizAdapter:
         )
         if integration is None:
             raise HTTPException(status_code=404, detail="Inbound number is not configured")
+        routed_number = next(
+            (
+                number
+                for number in integration.phone_numbers
+                if number.number == callee and number.inbound_enabled
+            ),
+            None,
+        )
+        if routed_number is None:
+            raise HTTPException(status_code=404, detail="Inbound number is not configured")
         auth_token = integration.credentials.get("auth_token", "")
         nonce = self._verified_callback_nonce(request, auth_token, "/webhooks/vobiz/inbound")
         if not auth_token or nonce is None:
@@ -205,7 +215,9 @@ class VobizAdapter:
             caller=caller,
             callee=callee,
             provider_call_id=call_id,
-            bot_config_id=_optional_config_id(integration.settings.get("default_agent_id")),
+            bot_config_id=_optional_config_id(
+                routed_number.agent_id or integration.settings.get("default_agent_id")
+            ),
         )
 
     @staticmethod

@@ -4,9 +4,9 @@ from fastapi import APIRouter, HTTPException, Request, Security, status
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from sqlalchemy.exc import IntegrityError
 
-from chiefvoice.identity.auth import Principal, require_scope
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
 from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
+from chiefvoice.identity.auth import Principal, require_scope
 
 router = APIRouter(prefix="/v1/integrations", tags=["integrations"])
 SUPPORTED_PROVIDERS = frozenset({"vobiz", "telecmi", "piopiy", "twilio"})
@@ -16,6 +16,7 @@ class PhoneNumberBody(BaseModel):
     number: str = Field(min_length=5, max_length=64)
     inbound_enabled: bool = True
     outbound_enabled: bool = True
+    agent_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("number")
     @classmethod
@@ -32,7 +33,9 @@ class ProviderIntegrationBody(BaseModel):
 def _store(request: Request) -> SqlProviderIntegrationStore:
     store = getattr(request.app.state, "provider_integration_store", None)
     if store is None:
-        raise HTTPException(status_code=503, detail="Provider integration storage is not configured")
+        raise HTTPException(
+            status_code=503, detail="Provider integration storage is not configured"
+        )
     return store
 
 
@@ -56,7 +59,12 @@ async def get_integration(
         "credentials_configured": sorted(integration.credentials.keys()),
         "settings": integration.settings,
         "phone_numbers": [
-            {"number": n.number, "inbound_enabled": n.inbound_enabled, "outbound_enabled": n.outbound_enabled}
+            {
+                "number": n.number,
+                "inbound_enabled": n.inbound_enabled,
+                "outbound_enabled": n.outbound_enabled,
+                "agent_id": n.agent_id,
+            }
             for n in integration.phone_numbers
         ],
     }
@@ -70,13 +78,40 @@ async def put_integration(
     principal: Annotated[Principal, Security(require_scope("integrations:write"))],
 ):
     _validate_provider(provider)
-    numbers = tuple(ProviderPhoneNumber(n.number, n.inbound_enabled, n.outbound_enabled) for n in body.phone_numbers)
+    numbers = tuple(
+        ProviderPhoneNumber(n.number, n.inbound_enabled, n.outbound_enabled, n.agent_id)
+        for n in body.phone_numbers
+    )
     if len({n.number for n in numbers}) != len(numbers):
         raise HTTPException(status_code=422, detail="Phone numbers must be unique")
+    requested_agent_ids = {number.agent_id for number in numbers if number.agent_id}
+    default_agent_id = body.settings.get("default_agent_id")
+    if default_agent_id is not None:
+        if not isinstance(default_agent_id, str) or not default_agent_id.strip():
+            raise HTTPException(
+                status_code=422, detail="default_agent_id must be a nonempty string"
+            )
+        requested_agent_ids.add(default_agent_id)
+    if requested_agent_ids:
+        profile_directory = getattr(request.app.state, "agent_profile_directory", None)
+        if profile_directory is None:
+            raise HTTPException(status_code=503, detail="Agent profile storage is not configured")
+        for agent_id in requested_agent_ids:
+            if await profile_directory.get(principal.tenant_id, agent_id) is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Agent profile '{agent_id}' does not belong to this customer "
+                        "or is unavailable"
+                    ),
+                )
     credentials = {key: value.get_secret_value() for key, value in body.credentials.items()}
     if provider == "vobiz":
         if not credentials.get("auth_id") or not credentials.get("auth_token"):
-            raise HTTPException(status_code=422, detail="Vobiz requires auth_id and auth_token credentials")
+            raise HTTPException(
+                status_code=422,
+                detail="Vobiz requires auth_id and auth_token credentials",
+            )
         default_caller_id = body.settings.get("default_caller_id")
         if not isinstance(default_caller_id, str) or default_caller_id not in {
             n.number for n in numbers if n.outbound_enabled
@@ -96,7 +131,10 @@ async def put_integration(
             )
         )
     except IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="A phone number is already assigned for this provider") from exc
+        raise HTTPException(
+            status_code=409,
+            detail="A phone number is already assigned for this provider",
+        ) from exc
     return {"status": "configured", "provider": provider}
 
 

@@ -7,17 +7,24 @@ from urllib.parse import urlencode
 import pytest
 from fastapi import HTTPException, Request
 
+from chiefvoice.channels.integrations import ProviderPhoneNumber
 from chiefvoice.channels.vobiz.adapter import VobizAdapter
 
 
 class _IntegrationStore:
+    def __init__(self, *, number_agent_id="agent-for-number"):
+        self.number_agent_id = number_agent_id
+
     async def get_for_inbound_number(self, provider, number):
         assert provider == "vobiz"
         assert number == "+15555550123"
         return SimpleNamespace(
             tenant_id="tenant-a",
             credentials={"auth_token": "account-token"},
-            settings={},
+            settings={"default_agent_id": "integration-default-agent"},
+            phone_numbers=(
+                ProviderPhoneNumber("+15555550123", agent_id=self.number_agent_id),
+            ),
         )
 
 
@@ -80,10 +87,27 @@ async def test_vobiz_inbound_accepts_a_signed_nonce_once(monkeypatch):
     call = await adapter.parse_inbound(_request(settings))
     assert call.tenant_id == "tenant-a"
     assert call.provider_call_id == "call-123"
+    assert call.bot_config_id == "agent-for-number"
 
     with pytest.raises(HTTPException, match="Replayed Vobiz callback") as exc:
         await adapter.parse_inbound(_request(settings))
     assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_vobiz_inbound_uses_integration_default_when_number_has_no_agent(monkeypatch):
+    settings = SimpleNamespace(
+        vobiz_public_url="https://voice.example.test",
+        vobiz_inbound_route_token="route-token",
+        vobiz_webhook_secret="platform-secret",
+        vobiz_sample_rate=8000,
+        vobiz_encoding="audio/x-mulaw",
+    )
+    monkeypatch.setattr("chiefvoice.channels.vobiz.adapter.settings", settings)
+    adapter = VobizAdapter(_IntegrationStore(number_agent_id=None), _NonceStore())
+
+    call = await adapter.parse_inbound(_request(settings))
+    assert call.bot_config_id == "integration-default-agent"
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from chiefvoice.identity.auth import OidcTokenVerifier
 from chiefvoice.identity.api_key_routes import router as api_key_router
 from chiefvoice.identity.api_keys import SqlApiKeyDirectory
 from chiefvoice.accounts.routes import router as accounts_router
+from chiefvoice.accounts.admin_routes import router as admin_customers_router
 from chiefvoice.accounts.store import SqlAccountStore
 from chiefvoice.agents.call.configs.routes import router as agent_profiles_router
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
@@ -561,6 +562,7 @@ def create_app(
     instrument_app(application)
     application.include_router(calls_router)
     application.include_router(accounts_router)
+    application.include_router(admin_customers_router)
     application.include_router(vobiz_router)
     application.include_router(integrations_router)
     application.include_router(api_key_router)

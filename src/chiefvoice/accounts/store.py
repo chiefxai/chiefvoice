@@ -68,6 +68,31 @@ class SqlAccountStore:
                 created_at=created_at,
             )
 
+    async def list(self, *, limit: int = 100, offset: int = 0) -> list[TenantAccount]:
+        if not 1 <= limit <= 500 or offset < 0:
+            raise ValueError("Account list pagination is out of range")
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(TenantAccountRow)
+                .order_by(TenantAccountRow.created_at.desc(), TenantAccountRow.tenant_id)
+                .limit(limit)
+                .offset(offset)
+            )
+            return [
+                TenantAccount(
+                    tenant_id=row.tenant_id,
+                    display_name=row.display_name,
+                    billing_mode=BillingMode(row.billing_mode),
+                    created_by=row.created_by,
+                    created_at=(
+                        row.created_at.replace(tzinfo=UTC)
+                        if row.created_at.tzinfo is None
+                        else row.created_at
+                    ),
+                )
+                for row in rows
+            ]
+
     async def get_billing_mode(self, tenant_id: str) -> BillingMode | None:
         account = await self.get(tenant_id)
         return account.billing_mode if account is not None else None

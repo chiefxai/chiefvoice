@@ -6,6 +6,7 @@ This root runs the API and PostgreSQL together on one EC2 VM. SQS queues post-ca
 
 - Supply an Ubuntu 24.04 AMI, prebuilt API and Lambda image URIs, globally unique S3 bucket name, restricted SSH CIDR and public DNS name. Point `public_domain` to the `backend_public_ip` Elastic IP before the first public deployment. Caddy terminates TLS and provider callback URLs use HTTPS.
 - Configure OIDC issuer, audience and JWKS URL. Vertex project creation also requires a Google service-account JSON secret in AWS Secrets Manager. Give the account the configured GCP folder/org and billing-account permissions. The VM mounts the JSON as a root-readable file; the Lambda retrieves the same secret by ARN.
+- Set `platform_admin_subjects` to the trusted OIDC `sub` values for platform operators. Provisioning endpoints additionally require `platform:customers:write` or `platform:customers:read` token scopes; an empty allowlist disables customer administration.
 - Keep Terraform state encrypted and access restricted: it contains Secrets Manager secret versions for the DB password, Fernet keys and Vobiz secrets, plus bootstrap configuration. EC2 retrieves runtime values through its role and writes them to root-only files; user data carries secret ARNs, not those values.
 
 ## Apply

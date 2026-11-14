@@ -257,6 +257,7 @@ resource "aws_instance" "backend" {
     oidc_issuer = var.oidc_issuer
     oidc_audience = var.oidc_audience
     oidc_jwks_url = var.oidc_jwks_url
+    platform_admin_subjects = join(",", var.platform_admin_subjects)
     vertex_location = var.vertex_location
     vertex_model = var.vertex_model
     post_call_model = var.post_call_model

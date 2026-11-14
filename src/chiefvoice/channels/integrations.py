@@ -7,6 +7,7 @@ class ProviderPhoneNumber:
     number: str
     inbound_enabled: bool = True
     outbound_enabled: bool = True
+    agent_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

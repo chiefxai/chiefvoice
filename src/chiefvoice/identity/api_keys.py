@@ -13,7 +13,9 @@ from sqlalchemy import DateTime, Index, String, Text, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from chiefvoice.accounts.store import Base
+from chiefvoice.accounts.models import TenantAccount
+from chiefvoice.accounts.store import Base, TenantAccountRow
+from chiefvoice.billing import BillingMode
 from chiefvoice.core.db_schema import verify_schema_revision
 
 API_KEY_PREFIX = "cv_live_"
@@ -55,6 +57,16 @@ class ApiKeyDirectory(Protocol):
     ) -> tuple[str, ApiKeySummary]: ...
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
     async def revoke(self, tenant_id: str, key_id: str) -> bool: ...
+    async def provision_customer(
+        self,
+        *,
+        display_name: str,
+        billing_mode: BillingMode,
+        created_by: str,
+        key_name: str,
+        scopes: tuple[str, ...],
+        expires_at: datetime | None,
+    ) -> tuple[TenantAccount, str, ApiKeySummary]: ...
 
 
 class ApiKeyRow(Base):
@@ -138,9 +150,59 @@ class SqlApiKeyDirectory:
             expires_at=expires_at,
         )
         async with self._sessions.begin() as session:
+            account = await session.get(TenantAccountRow, tenant_id)
+            if account is None:
+                raise LookupError("Customer account does not exist")
             session.add(row)
             await session.flush()
         return token, _to_summary(row)
+
+    async def provision_customer(
+        self,
+        *,
+        display_name: str,
+        billing_mode: BillingMode,
+        created_by: str,
+        key_name: str,
+        scopes: tuple[str, ...],
+        expires_at: datetime | None,
+    ) -> tuple[TenantAccount, str, ApiKeySummary]:
+        """Atomically create a stable customer tenant and its first API credential."""
+        from uuid import uuid4
+
+        tenant_id = str(uuid4())
+        key_id = secrets.token_hex(12)
+        token = f"{API_KEY_PREFIX}{key_id}.{secrets.token_urlsafe(32)}"
+        now = datetime.now(UTC)
+        account_row = TenantAccountRow(
+            tenant_id=tenant_id,
+            display_name=display_name,
+            billing_mode=billing_mode.value,
+            created_by=created_by,
+            created_at=now,
+        )
+        key_row = ApiKeyRow(
+            id=key_id,
+            tenant_id=tenant_id,
+            name=key_name,
+            secret_hash=_digest(token),
+            scopes_json=json.dumps(sorted(set(scopes)), separators=(",", ":")),
+            created_by=created_by,
+            created_at=now,
+            expires_at=expires_at,
+        )
+        async with self._sessions.begin() as session:
+            session.add(account_row)
+            session.add(key_row)
+            await session.flush()
+        account = TenantAccount(
+            tenant_id=tenant_id,
+            display_name=display_name,
+            billing_mode=billing_mode,
+            created_by=created_by,
+            created_at=now,
+        )
+        return account, token, _to_summary(key_row)
 
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]:
         async with self._sessions() as session:

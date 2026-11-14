@@ -6,6 +6,7 @@ public_domain                    = "voice.example.com"
 oidc_issuer                      = "https://identity.example.com/"
 oidc_audience                    = "chiefvoice-api"
 oidc_jwks_url                    = "https://identity.example.com/.well-known/jwks.json"
+platform_admin_subjects          = ["replace-with-oidc-subject"]
 tenant_project_parent            = "folders/123456789012"
 tenant_billing_account_id        = "012345-6789AB-CDEF01"
 budget_api_project_id            = "your-gcp-project"

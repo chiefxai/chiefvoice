@@ -30,6 +30,11 @@ variable "public_domain" {
 variable "oidc_issuer" { type = string }
 variable "oidc_audience" { type = string }
 variable "oidc_jwks_url" { type = string }
+variable "platform_admin_subjects" {
+  type        = list(string)
+  default     = []
+  description = "OIDC subject IDs allowed to provision and manage customer accounts."
+}
 variable "vertex_location" { type = string
   default = "us-central1"
 }

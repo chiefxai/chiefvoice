@@ -33,6 +33,7 @@ class PhoneNumberRow(Base):
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False)
     inbound_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     outbound_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     __table_args__ = (
         ForeignKeyConstraint(
             ["provider", "tenant_id"],
@@ -66,7 +67,9 @@ class SqlProviderIntegrationStore:
             )
             return self._to_integration(row) if row else None
 
-    async def get_for_inbound_number(self, provider: str, number: str) -> ProviderIntegration | None:
+    async def get_for_inbound_number(
+        self, provider: str, number: str
+    ) -> ProviderIntegration | None:
         async with self._sessions() as session:
             row = await session.scalar(
                 select(IntegrationRow)
@@ -99,6 +102,7 @@ class SqlProviderIntegrationStore:
                     number=item.number,
                     inbound_enabled=item.inbound_enabled,
                     outbound_enabled=item.outbound_enabled,
+                    agent_id=item.agent_id,
                 )
                 for item in integration.phone_numbers
             )
@@ -117,7 +121,7 @@ class SqlProviderIntegrationStore:
             credentials=credentials,
             settings=json.loads(row.settings_json),
             phone_numbers=tuple(
-                ProviderPhoneNumber(p.number, p.inbound_enabled, p.outbound_enabled)
+                ProviderPhoneNumber(p.number, p.inbound_enabled, p.outbound_enabled, p.agent_id)
                 for p in row.phone_numbers
             ),
         )

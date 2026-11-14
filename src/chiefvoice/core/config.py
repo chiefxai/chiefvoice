@@ -48,6 +48,11 @@ class Settings:
         for algorithm in os.getenv("OIDC_ALGORITHMS", "RS256").split(",")
         if algorithm.strip()
     )
+    platform_admin_subjects: tuple[str, ...] = tuple(
+        subject.strip()
+        for subject in os.getenv("PLATFORM_ADMIN_SUBJECTS", "").split(",")
+        if subject.strip()
+    )
     database_url: str | None = os.getenv("DATABASE_URL") or None
     credentials_encryption_key: str | None = os.getenv("CREDENTIALS_ENCRYPTION_KEY") or None
     realtime_provider: str = os.getenv("REALTIME_AGENT_PROVIDER", "vertex").strip().lower()

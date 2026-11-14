@@ -368,6 +368,7 @@ resource "google_compute_instance" "backend" {
     oidc_issuer = var.oidc_issuer
     oidc_audience = var.oidc_audience
     oidc_jwks_url = var.oidc_jwks_url
+    platform_admin_subjects = join(",", var.platform_admin_subjects)
     artifact_registry_host = "${var.region}-docker.pkg.dev"
   })
   labels = var.labels

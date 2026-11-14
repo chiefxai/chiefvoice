@@ -14,6 +14,7 @@ from chiefvoice.agents.post_call.queue import SqlPostCallQueue
 from chiefvoice.billing import BillingMode
 from chiefvoice.billing.store import SqlBillingDirectory
 from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
+from chiefvoice.identity.api_keys import SqlApiKeyDirectory
 from chiefvoice.sessions import Direction
 
 
@@ -90,4 +91,57 @@ async def test_postgres_tenant_scoping_billing_and_post_call_outbox():
         await queue.close()
         await vobiz_nonces.close()
         await billing.close()
+        await account_store.close()
+
+
+@pytest.mark.asyncio
+async def test_customer_provisioning_and_api_key_rotation_share_stable_tenant():
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        pytest.skip("Set DATABASE_URL to run PostgreSQL integration tests")
+
+    api_keys = SqlApiKeyDirectory(database_url)
+    account_store = SqlAccountStore(database_url)
+    try:
+        await api_keys.initialize()
+        await account_store.initialize()
+        account, initial_key, initial_record = await api_keys.provision_customer(
+            display_name="Provisioned integration customer",
+            billing_mode=BillingMode.PREPAID,
+            created_by="platform-admin-test",
+            key_name="primary",
+            scopes=("calls:read", "calls:write"),
+            expires_at=None,
+        )
+        assert await account_store.get(account.tenant_id) == account
+        first_identity = await api_keys.authenticate(initial_key)
+        assert first_identity is not None
+        assert first_identity.tenant_id == account.tenant_id
+        assert first_identity.key_id == initial_record.key_id
+
+        rotated_key, rotated_record = await api_keys.create(
+            tenant_id=account.tenant_id,
+            name="rotation",
+            scopes=("calls:read", "calls:write"),
+            created_by="platform-admin-test",
+            expires_at=None,
+        )
+        rotated_identity = await api_keys.authenticate(rotated_key)
+        assert rotated_identity is not None
+        assert rotated_identity.tenant_id == account.tenant_id
+        assert rotated_identity.key_id == rotated_record.key_id
+        assert await api_keys.revoke(account.tenant_id, initial_record.key_id)
+        assert await api_keys.authenticate(initial_key) is None
+        assert await api_keys.authenticate(rotated_key) is not None
+
+        with pytest.raises(LookupError, match="Customer account does not exist"):
+            await api_keys.create(
+                tenant_id="missing-customer",
+                name="orphan",
+                scopes=("calls:read",),
+                created_by="platform-admin-test",
+                expires_at=None,
+            )
+    finally:
+        await api_keys.close()
         await account_store.close()
