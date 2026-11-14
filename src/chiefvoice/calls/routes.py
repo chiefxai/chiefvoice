@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
+from chiefvoice.agents.post_call.replay import ReplayConflict, ReplayNotFound
 from chiefvoice.calls.coordinator import CallCoordinator, OutboundCallCommand
 from chiefvoice.identity.auth import Principal, require_scope
 from chiefvoice.observability.setup import call_start_event
@@ -187,6 +188,26 @@ async def get_post_call_result(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post-call result not found")
     return result
+
+
+@router.post("/v1/calls/{session_id}/post-call/retry", status_code=status.HTTP_202_ACCEPTED, tags=["calls"])
+async def retry_post_call_analysis(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("calls:write"))],
+):
+    replay_service = getattr(request.app.state, "post_call_replay_service", None)
+    if replay_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Post-call replay is not configured",
+        )
+    try:
+        return await replay_service.retry_analysis(principal.tenant_id, session_id)
+    except ReplayNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ReplayConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/webhooks/{provider}/calls", tags=["provider webhooks"])

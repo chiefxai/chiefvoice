@@ -87,6 +87,24 @@
       "targets": [{"expr": "sum by (task, result) (increase(chiefvoice_data_lifecycle_runs_total{job=~\"$job\"}[1h]))", "legendFormat": "{{task}} {{result}}", "refId": "A"}],
       "title": "Retention and backup runs",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "id": 9,
+      "targets": [{"expr": "max by (status) (chiefvoice_post_call_queue_jobs{job=~\"$job\"})", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "Post-call queue by status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "id": 10,
+      "targets": [{"expr": "max(chiefvoice_post_call_queue_oldest_queued_age_seconds{job=~\"$job\"})", "legendFormat": "oldest queued job", "refId": "A"}],
+      "title": "Oldest queued post-call job",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

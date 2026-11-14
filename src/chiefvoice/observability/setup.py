@@ -11,7 +11,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from prometheus_client import Counter, Histogram, make_asgi_app
+from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 
 from chiefvoice.core.config import settings
 
@@ -70,6 +70,20 @@ POST_CALL_JOBS = Counter(
     "chiefvoice_post_call_jobs_total",
     "Post-call analysis jobs by lifecycle event",
     ["event"],
+)
+POST_CALL_ENQUEUE_FALLBACKS = Counter(
+    "chiefvoice_post_call_enqueue_fallback_total",
+    "Completed call jobs staged outside Postgres after an enqueue failure",
+    ["event"],
+)
+POST_CALL_QUEUE_JOBS = Gauge(
+    "chiefvoice_post_call_queue_jobs",
+    "Current post-call jobs by durable database status",
+    ["status"],
+)
+POST_CALL_QUEUE_OLDEST_AGE = Gauge(
+    "chiefvoice_post_call_queue_oldest_queued_age_seconds",
+    "Age of the oldest queued post-call job in seconds",
 )
 POST_CALL_WEBHOOKS = Counter(
     "chiefvoice_post_call_webhook_deliveries_total",
@@ -138,8 +152,36 @@ def post_call_missing_transcript(channel: str, provider: str) -> None:
 
 
 def post_call_job_event(event: str) -> None:
-    if event in {"enqueued", "completed", "retrying", "failed", "dispatched", "dispatch_failed"}:
+    if event in {
+        "enqueued",
+        "completed",
+        "retrying",
+        "failed",
+        "dispatched",
+        "dispatch_failed",
+        "worker_iteration_failed",
+        "dispatcher_iteration_failed",
+    }:
         POST_CALL_JOBS.labels(event).inc()
+
+
+def post_call_enqueue_fallback_event(event: str) -> None:
+    if event in {
+        "saved",
+        "failed",
+        "unavailable",
+        "reconciled",
+        "reconcile_failed",
+        "scan_failed",
+    }:
+        POST_CALL_ENQUEUE_FALLBACKS.labels(event).inc()
+
+
+def set_post_call_queue_metrics(counts: dict[str, int], oldest_queued_age_seconds: float) -> None:
+    """Set tenant-free gauges from an aggregate query over the durable job table."""
+    for status in ("queued", "processing", "failed"):
+        POST_CALL_QUEUE_JOBS.labels(status).set(counts.get(status, 0))
+    POST_CALL_QUEUE_OLDEST_AGE.set(max(0.0, oldest_queued_age_seconds))
 
 
 def post_call_webhook_event(event: str) -> None:

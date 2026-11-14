@@ -16,7 +16,20 @@ from typing import Protocol
 
 from cryptography.fernet import Fernet
 import httpx
-from sqlalchemy import DateTime, Index, Integer, MetaData, String, Text, delete, or_, select, update
+from sqlalchemy import (
+    DateTime,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Text,
+    delete,
+    exists,
+    func,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -24,7 +37,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent, PostCallResult
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
 from chiefvoice.data_lifecycle.retention import RetentionClass
-from chiefvoice.observability.setup import post_call_job_event, post_call_webhook_event
+from chiefvoice.observability.setup import (
+    post_call_job_event,
+    post_call_webhook_event,
+    set_post_call_queue_metrics,
+)
 
 logger = logging.getLogger(__name__)
 MAX_WEBHOOK_BODY_BYTES = 64 * 1024
@@ -229,12 +246,41 @@ class SqlPostCallQueue:
         self.poll_interval = poll_interval
         self.lease_duration = lease_duration
         self.max_attempts = max_attempts
+        self._last_metrics_refresh = 0.0
 
     async def initialize(self) -> None:
         await verify_schema_revision(self._engine)
 
     async def close(self) -> None:
         await self._engine.dispose()
+
+    async def refresh_queue_metrics_if_due(self, *, refresh_interval: float = 15.0) -> None:
+        """Refresh tenant-free backlog gauges from Postgres at a bounded interval."""
+        now_monotonic = time.monotonic()
+        if now_monotonic - self._last_metrics_refresh < refresh_interval:
+            return
+        now = datetime.now(UTC)
+        async with self._sessions() as session:
+            rows = await session.execute(
+                select(
+                    PostCallJobRow.status,
+                    func.count(),
+                    func.min(PostCallJobRow.created_at),
+                )
+                .where(PostCallJobRow.status.in_(("queued", "processing", "failed")))
+                .group_by(PostCallJobRow.status)
+            )
+            counts: dict[str, int] = {}
+            oldest_queued_at = None
+            for status, count, oldest_at in rows:
+                counts[status] = count
+                if status == "queued":
+                    oldest_queued_at = oldest_at
+        oldest_age = (
+            max(0.0, (now - oldest_queued_at).total_seconds()) if oldest_queued_at else 0.0
+        )
+        set_post_call_queue_metrics(counts, oldest_age)
+        self._last_metrics_refresh = now_monotonic
 
     async def enqueue(self, call: CompletedCall) -> bool:
         if not call.transcript or not call.transcript.strip():
@@ -313,25 +359,31 @@ class SqlPostCallQueue:
             }
 
     async def purge_expired(self, tenant_id, cutoff, batch_size: int) -> int:
-        """Delete expired transcript/result rows and their undelivered webhook event.
+        """Delete expired terminal jobs after pending analysis and webhook work completes.
 
         A tenant-wide transcript policy legal hold is enforced by `RetentionRunner`
-        before this target is called. Active, leased analysis jobs are skipped.
+        before this target is called. Queued/processing jobs and jobs with queued or
+        processing webhook deliveries are never purged, even when past the cutoff.
+        Failed analysis and terminal webhook delivery records remain until their
+        configured retention cutoff, after which their transcript/result is removed.
         """
         if not tenant_id or cutoff.tzinfo is None or cutoff.utcoffset() is None:
             raise ValueError("Tenant and timezone-aware cutoff are required")
         if batch_size < 1:
             raise ValueError("Purge batch size must be positive")
-        now = datetime.now(UTC)
         async with self._sessions.begin() as session:
             result = await session.scalars(
                 select(PostCallJobRow.session_id)
                 .where(
                     PostCallJobRow.tenant_id == tenant_id,
                     PostCallJobRow.ended_at <= cutoff,
-                    or_(
-                        PostCallJobRow.status != "processing",
-                        PostCallJobRow.lease_expires_at <= now,
+                    PostCallJobRow.status.in_(("completed", "failed")),
+                    ~exists(
+                        select(PostCallWebhookDeliveryRow.event_id).where(
+                            PostCallWebhookDeliveryRow.tenant_id == tenant_id,
+                            PostCallWebhookDeliveryRow.session_id == PostCallJobRow.session_id,
+                            PostCallWebhookDeliveryRow.status.in_(("queued", "processing")),
+                        )
                     ),
                 )
                 .order_by(PostCallJobRow.ended_at)
@@ -359,10 +411,12 @@ class SqlPostCallQueue:
         """Poll durable jobs until cancelled; safe for multiple workers via SKIP LOCKED."""
         while True:
             try:
+                await self.refresh_queue_metrics_if_due()
                 analysis_worked = await self.process_one(agent)
                 delivery_worked = await self.process_delivery_one()
                 worked = analysis_worked or delivery_worked
             except Exception as exc:
+                post_call_job_event("worker_iteration_failed")
                 logger.error(
                     "post_call_worker_iteration_failed",
                     extra={"error_type": type(exc).__name__},
@@ -376,6 +430,7 @@ class SqlPostCallQueue:
         """Publish durable job IDs to an async compute target; PostgreSQL remains authoritative."""
         while True:
             try:
+                await self.refresh_queue_metrics_if_due()
                 worked = await self.dispatch_one(invoker, redispatch_after=redispatch_after)
                 delivery_worked = await self.process_delivery_one()
                 if not worked and not delivery_worked:
@@ -383,6 +438,7 @@ class SqlPostCallQueue:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                post_call_job_event("dispatcher_iteration_failed")
                 logger.error("post_call_dispatcher_iteration_failed", extra={"error_type": type(exc).__name__})
                 await asyncio.sleep(self.poll_interval)
 

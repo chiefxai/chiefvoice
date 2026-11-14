@@ -10,11 +10,13 @@ from fastapi import HTTPException, Request, Response
 
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.post_call.base import CompletedCall
+from chiefvoice.agents.post_call.fallback_spool import PostCallFallbackSpool
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
 from chiefvoice.billing import SubscriptionAuthorizer
 from chiefvoice.channels.base import ChannelAdapter, InboundCall, OutboundCall
 from chiefvoice.observability.setup import (
     call_duration_limit_event,
+    post_call_enqueue_fallback_event,
     post_call_missing_transcript,
     session_ended,
     session_started,
@@ -52,6 +54,7 @@ class CallCoordinator:
         post_call_required: bool = True,
         post_call_available: bool = False,
         agent_profile_directory: AgentProfileDirectory | None = None,
+        post_call_fallback_spool: PostCallFallbackSpool | None = None,
     ):
         self.adapters = adapters
         self.subscriptions = subscriptions
@@ -59,6 +62,7 @@ class CallCoordinator:
         self.post_call_required = post_call_required
         self.post_call_available = post_call_available
         self.agent_profile_directory = agent_profile_directory
+        self.post_call_fallback_spool = post_call_fallback_spool
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
         self._require_post_call_ready()
@@ -261,7 +265,6 @@ class CallCoordinator:
             session.metadata["post_call_enqueued"] = True
             session.metadata.pop("post_call_transcript", None)
         except Exception as exc:
-            # Do not let a post-call queue outage interfere with call teardown.
             logger.error(
                 "post_call_enqueue_failed",
                 extra={
@@ -270,6 +273,25 @@ class CallCoordinator:
                     "error_type": type(exc).__name__,
                 },
             )
+            if self.post_call_fallback_spool is None:
+                post_call_enqueue_fallback_event("unavailable")
+                return
+            try:
+                await self.post_call_fallback_spool.store(call)
+            except Exception as spool_exc:
+                post_call_enqueue_fallback_event("failed")
+                logger.error(
+                    "post_call_fallback_spool_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "tenant_id": session.tenant_id,
+                        "error_type": type(spool_exc).__name__,
+                    },
+                )
+                return
+            post_call_enqueue_fallback_event("saved")
+            session.metadata["post_call_enqueued"] = True
+            session.metadata.pop("post_call_transcript", None)
 
     def _require_post_call_ready(self) -> None:
         if self.post_call_required and not self.post_call_available:

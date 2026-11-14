@@ -37,6 +37,56 @@ groups:
           summary: A post-call job exhausted its retries
           description: At least one post-call analysis job reached its terminal failed state in the last ten minutes.
 
+      - alert: ChiefvoicePostCallLambdaDispatchFailing
+        expr: increase(chiefvoice_post_call_jobs_total{event="dispatch_failed"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: chiefvoice
+        annotations:
+          summary: Post-call jobs cannot be dispatched to Lambda
+          description: The API could not get Lambda to accept one or more durable post-call job events. Jobs remain in PostgreSQL and should retry; investigate IAM, throttling, or AWS connectivity.
+
+      - alert: ChiefvoicePostCallQueueStalled
+        expr: max(chiefvoice_post_call_queue_oldest_queued_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: Post-call jobs are waiting too long to start
+          description: The oldest queued analysis job has been waiting more than five minutes. Check API dispatcher health, Lambda permissions/throttling, and database connectivity.
+
+      - alert: ChiefvoicePostCallWorkerIterationFailing
+        expr: increase(chiefvoice_post_call_jobs_total{event=~"worker_iteration_failed|dispatcher_iteration_failed"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: chiefvoice
+        annotations:
+          summary: Post-call worker cannot poll or process its queue
+          description: The worker loop is encountering persistent database or infrastructure errors. Inspect API logs and Postgres connectivity.
+
+      - alert: ChiefvoicePostCallEnqueueFallbackFailed
+        expr: increase(chiefvoice_post_call_enqueue_fallback_total{event=~"failed|unavailable|reconcile_failed|scan_failed"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: chiefvoice
+        annotations:
+          summary: A completed call could not be saved for post-call processing
+          description: The primary Postgres enqueue failed and the durable fallback was unavailable or failed. Recover the call transcript from provider recording/session data if possible.
+
+      - alert: ChiefvoicePostCallJobsPermanentlyFailed
+        expr: max(chiefvoice_post_call_queue_jobs{status="failed"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: Post-call jobs need review or replay
+          description: One or more post-call jobs are in a terminal failed state. Inspect the call status and use the tenant-scoped replay workflow if appropriate.
+
       - alert: ChiefvoicePostCallWebhookDeliveriesExhausted
         expr: increase(chiefvoice_post_call_webhook_deliveries_total{event="failed"}[10m]) > 0
         for: 2m

@@ -24,6 +24,9 @@ from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
 from chiefvoice.agents.post_call.lambda_dispatch import LambdaAsyncInvoker
+from chiefvoice.agents.post_call.fallback_spool import S3PostCallFallbackSpool
+from chiefvoice.agents.post_call.recovery import run_spool_reconciler
+from chiefvoice.agents.post_call.replay import SqlPostCallReplayService
 from chiefvoice.agents.post_call.queue import PostCallDispatcher, SqlPostCallQueue
 from chiefvoice.agents.post_call.queue import SqlPostCallWebhookDirectory
 from chiefvoice.agents.post_call.webhook_routes import router as post_call_webhook_router
@@ -70,6 +73,8 @@ async def lifespan(_app: FastAPI):
     post_call_dispatcher = getattr(_app.state, "post_call_dispatcher", None)
     post_call_agent = getattr(_app.state, "post_call_agent", None)
     post_call_lambda_invoker = getattr(_app.state, "post_call_lambda_invoker", None)
+    post_call_replay_service = getattr(_app.state, "post_call_replay_service", None)
+    post_call_recovery_spool = getattr(_app.state, "post_call_recovery_spool", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
     recording_store = getattr(_app.state, "recording_store", None)
     backup_provider = getattr(_app.state, "backup_provider", None)
@@ -92,6 +97,8 @@ async def lifespan(_app: FastAPI):
             await agent_profile_directory.initialize()
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.initialize()
+        if post_call_replay_service is not None:
+            await post_call_replay_service.initialize()
         for check_storage in storage_checks:
             await check_storage()
         _app.state.object_storage_ready = True
@@ -103,6 +110,10 @@ async def lifespan(_app: FastAPI):
                 )))
             elif post_call_agent is not None:
                 worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent)))
+        if post_call_dispatcher is not None and post_call_recovery_spool is not None:
+            worker_tasks.append(asyncio.create_task(
+                run_spool_reconciler(post_call_recovery_spool, post_call_dispatcher)
+            ))
         retention_runner = getattr(_app.state, "retention_runner", None)
         if retention_runner is not None:
             worker_tasks.append(asyncio.create_task(
@@ -127,6 +138,10 @@ async def lifespan(_app: FastAPI):
                 await worker_task
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.close()
+        if post_call_replay_service is not None:
+            await post_call_replay_service.close()
+        if post_call_recovery_spool is not None:
+            await post_call_recovery_spool.close()
         if billing_directory is not None:
             await billing_directory.close()
         if backup_execution_lock is not None:
@@ -215,6 +230,12 @@ def create_app(
             poll_interval=settings.post_call_dispatch_interval_seconds,
         )
     application.state.post_call_dispatcher = post_call_dispatcher
+    post_call_replay_service = (
+        SqlPostCallReplayService(settings.database_url)
+        if settings.database_url and settings.post_call_encryption_key
+        else None
+    )
+    application.state.post_call_replay_service = post_call_replay_service
     application.state.post_call_required = post_call_required
     if agent_profile_directory is None and settings.database_url:
         agent_profile_directory = SqlAgentProfileDirectory(settings.database_url)
@@ -222,7 +243,21 @@ def create_app(
     object_storage_checks: list[Callable[[], Awaitable[None]]] = []
     if recording_store is not None and hasattr(recording_store, "check_storage"):
         object_storage_checks.append(recording_store.check_storage)
+    post_call_recovery_spool = None
+    if (
+        post_call_required
+        and post_call_dispatcher is not None
+        and settings.database_url
+        and settings.post_call_encryption_key
+        and settings.object_storage_bucket
+    ):
+        post_call_recovery_spool = S3PostCallFallbackSpool(
+            settings.object_storage_bucket,
+            settings.post_call_encryption_key,
+        )
+        object_storage_checks.append(post_call_recovery_spool.check_storage)
     application.state.recording_store = recording_store
+    application.state.post_call_recovery_spool = post_call_recovery_spool
     if voice_pipeline_factory is None and settings.realtime_provider == "vertex":
         if settings.vertex_project_id and settings.vertex_location:
             vertex_provider = VertexGeminiLiveProvider(
@@ -360,6 +395,7 @@ def create_app(
             post_call_required=post_call_required,
             post_call_available=(post_call_agent is not None and post_call_dispatcher is not None),
             agent_profile_directory=agent_profile_directory,
+            post_call_fallback_spool=post_call_recovery_spool,
         )
         if subscription_authorizer is not None
         else None

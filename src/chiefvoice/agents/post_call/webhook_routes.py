@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, Security, status
 from pydantic import BaseModel, Field
 
 from chiefvoice.agents.post_call.queue import PostCallWebhookDirectory
+from chiefvoice.agents.post_call.replay import ReplayConflict, ReplayNotFound
 from chiefvoice.identity.auth import Principal, require_scope
 
 router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
@@ -70,3 +71,23 @@ async def delete_post_call_webhook(
 ):
     if not await _directory(request).delete(principal.tenant_id):
         raise HTTPException(status_code=404, detail="Post-call webhook is not configured")
+
+
+@router.post("/post-call/deliveries/{session_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_post_call_webhook_delivery(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("webhooks:write"))],
+):
+    replay_service = getattr(request.app.state, "post_call_replay_service", None)
+    if replay_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Post-call replay is not configured",
+        )
+    try:
+        return await replay_service.retry_webhook(principal.tenant_id, session_id)
+    except ReplayNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ReplayConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
