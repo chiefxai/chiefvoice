@@ -7,7 +7,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from sqlalchemy import DateTime, Integer, MetaData, String, Text, or_, select
+from sqlalchemy import DateTime, Index, Integer, MetaData, String, Text, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -28,6 +28,14 @@ class VertexProjectBase(DeclarativeBase):
 
 class TenantVertexProjectRow(VertexProjectBase):
     __tablename__ = "tenant_vertex_projects"
+    __table_args__ = (
+        Index(
+            "ix_tenant_vertex_projects_status_next_attempt_at_lease_expires_at",
+            "status",
+            "next_attempt_at",
+            "lease_expires_at",
+        ),
+    )
 
     tenant_id: Mapped[str] = mapped_column(String(200), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
