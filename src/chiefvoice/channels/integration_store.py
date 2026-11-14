@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from cryptography.fernet import Fernet
-from sqlalchemy import Boolean, ForeignKeyConstraint, MetaData, String, Text, select
+from sqlalchemy import Boolean, ForeignKeyConstraint, MetaData, String, Text, delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, selectinload
 
@@ -117,8 +117,13 @@ class SqlProviderIntegrationStore:
             ).decode()
             row.settings_json = json.dumps(integration.settings)
             await session.flush()
-            row.phone_numbers.clear()
-            row.phone_numbers.extend(
+            await session.execute(
+                delete(PhoneNumberRow).where(
+                    PhoneNumberRow.provider == integration.provider,
+                    PhoneNumberRow.tenant_id == integration.tenant_id,
+                )
+            )
+            session.add_all(
                 PhoneNumberRow(
                     provider=integration.provider,
                     tenant_id=integration.tenant_id,
