@@ -426,7 +426,7 @@ class SqlPostCallQueue:
             if not worked:
                 await asyncio.sleep(self.poll_interval)
 
-    async def run_lambda_dispatcher(self, invoker, *, redispatch_after: timedelta) -> None:
+    async def run_async_dispatcher(self, invoker, *, redispatch_after: timedelta) -> None:
         """Publish durable job IDs to an async compute target; PostgreSQL remains authoritative."""
         while True:
             try:
@@ -441,6 +441,10 @@ class SqlPostCallQueue:
                 post_call_job_event("dispatcher_iteration_failed")
                 logger.error("post_call_dispatcher_iteration_failed", extra={"error_type": type(exc).__name__})
                 await asyncio.sleep(self.poll_interval)
+
+    async def run_lambda_dispatcher(self, invoker, *, redispatch_after: timedelta) -> None:
+        """Compatibility wrapper for deployments using the AWS Lambda adapter."""
+        await self.run_async_dispatcher(invoker, redispatch_after=redispatch_after)
 
     async def dispatch_one(self, invoker, *, redispatch_after: timedelta) -> bool:
         """Send one eligible job ID. Old unclaimed jobs are resent after the recovery window."""
@@ -487,7 +491,7 @@ class SqlPostCallQueue:
                     )
                 )
             logger.error(
-                "post_call_lambda_dispatch_failed",
+                "post_call_async_dispatch_failed",
                 extra={"session_id": job_id, "error_type": type(exc).__name__},
             )
             post_call_job_event("dispatch_failed")

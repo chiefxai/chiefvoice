@@ -11,6 +11,10 @@ substitutions:
   _POST_CALL_ENCRYPTION_KEY_SECRET: chiefvoice-post-call-encryption-key
   _VOBIZ_WEBHOOK_SECRET: chiefvoice-vobiz-webhook-secret
   _VOBIZ_ROUTE_TOKEN_SECRET: chiefvoice-vobiz-route-token
+  _POST_CALL_EXECUTION_BACKEND: in_process
+  _POST_CALL_GCP_FUNCTION_NAME: chiefvoice-post-call
+  _POST_CALL_FUNCTION_SERVICE_ACCOUNT: CHANGE_ME
+  _POST_CALL_FUNCTION_MAX_INSTANCES: "10"
   _GCP_PROJECT_PARENT: CHANGE_ME
   _GCP_BILLING_ACCOUNT_ID: CHANGE_ME
   _GCP_BUDGET_API_PROJECT_ID: CHANGE_ME
@@ -76,30 +80,71 @@ steps:
       - --wait
       - --quiet
 
+  - id: deploy-post-call-gcp-function
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        if [ "${_POST_CALL_EXECUTION_BACKEND}" = "gcp_function" ]; then
+          bash deploy/gcp/post-call-function/prepare_source.sh /workspace/.post-call-function-source
+          gcloud functions deploy ${_POST_CALL_GCP_FUNCTION_NAME} \
+            --gen2 \
+            --runtime=python312 \
+            --region=${_REGION} \
+            --source=/workspace/.post-call-function-source \
+            --entry-point=handler \
+            --trigger-http \
+            --no-allow-unauthenticated \
+            --service-account=${_POST_CALL_FUNCTION_SERVICE_ACCOUNT} \
+            --timeout=240s \
+            --memory=1Gi \
+            --max-instances=${_POST_CALL_FUNCTION_MAX_INSTANCES} \
+            --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=true,VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_MODEL=gemini-2.5-flash \
+            --set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,POST_CALL_ENCRYPTION_KEY=${_POST_CALL_ENCRYPTION_KEY_SECRET}:latest \
+            --quiet
+          gcloud run services update ${_POST_CALL_GCP_FUNCTION_NAME} \
+            --region=${_REGION} \
+            --set-cloudsql-instances=${_CLOUD_SQL_INSTANCE} \
+            --quiet
+          gcloud run services add-iam-policy-binding ${_POST_CALL_GCP_FUNCTION_NAME} \
+            --region=${_REGION} \
+            --member=serviceAccount:${_RUNTIME_SERVICE_ACCOUNT} \
+            --role=roles/run.invoker \
+            --quiet
+          gcloud functions describe ${_POST_CALL_GCP_FUNCTION_NAME} \
+            --gen2 --region=${_REGION} --format='value(serviceConfig.uri)' \
+            > /workspace/post-call-gcp-function-url
+        else
+          : > /workspace/post-call-gcp-function-url
+        fi
+
   - id: deploy-cloud-run-service
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - deploy
-      - ${_SERVICE_NAME}
-      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:${SHORT_SHA}
-      - --region=${_REGION}
-      - --platform=managed
-      - --service-account=${_RUNTIME_SERVICE_ACCOUNT}
-      - --set-cloudsql-instances=${_CLOUD_SQL_INSTANCE}
-      - --allow-unauthenticated
-      - --port=8080
-      - --cpu=${_CPU}
-      - --memory=${_MEMORY}
-      - --concurrency=${_CONCURRENCY}
-      - --timeout=${_TIMEOUT}
-      - --min=${_MIN_INSTANCES}
-      - --max=${_MAX_INSTANCES}
-      - --no-cpu-throttling
-      - --set-env-vars=APP_ENV=production,LOG_LEVEL=INFO,REALTIME_AGENT_PROVIDER=vertex,VERTEX_PROJECT_ISOLATION_ENABLED=true,VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_AGENT_PROVIDER=langchain_vertex,POST_CALL_EXECUTION_BACKEND=in_process,GCP_PROJECT_PARENT=${_GCP_PROJECT_PARENT},GCP_BILLING_ACCOUNT_ID=${_GCP_BILLING_ACCOUNT_ID},GCP_RUNTIME_SERVICE_ACCOUNT=${_RUNTIME_SERVICE_ACCOUNT},GCP_BUDGET_API_PROJECT_ID=${_GCP_BUDGET_API_PROJECT_ID},GCP_VERTEX_MONTHLY_SPEND_CAP=${_GCP_VERTEX_MONTHLY_SPEND_CAP},OIDC_ISSUER=${_OIDC_ISSUER},OIDC_AUDIENCE=${_OIDC_AUDIENCE},OIDC_JWKS_URL=${_OIDC_JWKS_URL},OTEL_SERVICE_NAME=chiefvoice-api
-      - --set-secrets=CREDENTIALS_ENCRYPTION_KEY=${_CREDENTIALS_ENCRYPTION_KEY_SECRET}:latest,POST_CALL_ENCRYPTION_KEY=${_POST_CALL_ENCRYPTION_KEY_SECRET}:latest,VOBIZ_WEBHOOK_SECRET=${_VOBIZ_WEBHOOK_SECRET}:latest,VOBIZ_INBOUND_ROUTE_TOKEN=${_VOBIZ_ROUTE_TOKEN_SECRET}:latest
-      - --quiet
+      - -ceu
+      - |
+        function_url="$(cat /workspace/post-call-gcp-function-url)"
+        env_vars="APP_ENV=production,LOG_LEVEL=INFO,REALTIME_AGENT_PROVIDER=vertex,VERTEX_PROJECT_ISOLATION_ENABLED=true,VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_AGENT_PROVIDER=langchain_vertex,POST_CALL_EXECUTION_BACKEND=${_POST_CALL_EXECUTION_BACKEND},POST_CALL_GCP_FUNCTION_URL=$${function_url},GCP_PROJECT_PARENT=${_GCP_PROJECT_PARENT},GCP_BILLING_ACCOUNT_ID=${_GCP_BILLING_ACCOUNT_ID},GCP_RUNTIME_SERVICE_ACCOUNT=${_RUNTIME_SERVICE_ACCOUNT},GCP_POST_CALL_SERVICE_ACCOUNT=${_POST_CALL_FUNCTION_SERVICE_ACCOUNT},GCP_BUDGET_API_PROJECT_ID=${_GCP_BUDGET_API_PROJECT_ID},GCP_VERTEX_MONTHLY_SPEND_CAP=${_GCP_VERTEX_MONTHLY_SPEND_CAP},OIDC_ISSUER=${_OIDC_ISSUER},OIDC_AUDIENCE=${_OIDC_AUDIENCE},OIDC_JWKS_URL=${_OIDC_JWKS_URL},OTEL_SERVICE_NAME=chiefvoice-api"
+        gcloud run deploy ${_SERVICE_NAME} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:${SHORT_SHA} \
+          --region=${_REGION} \
+          --platform=managed \
+          --service-account=${_RUNTIME_SERVICE_ACCOUNT} \
+          --set-cloudsql-instances=${_CLOUD_SQL_INSTANCE} \
+          --allow-unauthenticated \
+          --port=8080 \
+          --cpu=${_CPU} \
+          --memory=${_MEMORY} \
+          --concurrency=${_CONCURRENCY} \
+          --timeout=${_TIMEOUT} \
+          --min=${_MIN_INSTANCES} \
+          --max=${_MAX_INSTANCES} \
+          --no-cpu-throttling \
+          --set-env-vars="$${env_vars}" \
+          --set-secrets=CREDENTIALS_ENCRYPTION_KEY=${_CREDENTIALS_ENCRYPTION_KEY_SECRET}:latest,POST_CALL_ENCRYPTION_KEY=${_POST_CALL_ENCRYPTION_KEY_SECRET}:latest,VOBIZ_WEBHOOK_SECRET=${_VOBIZ_WEBHOOK_SECRET}:latest,VOBIZ_INBOUND_ROUTE_TOKEN=${_VOBIZ_ROUTE_TOKEN_SECRET}:latest \
+          --quiet
 
 images:
   - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:${SHORT_SHA}

@@ -173,11 +173,10 @@ class SqlTenantVertexProjectDirectory:
             row.next_attempt_at = None
             row.updated_at = now
             job = (row.tenant_id, row.project_id, row.display_name, row.attempts)
-        timer = VERTEX_PROJECT_PROVISIONING_DURATION.time()
         try:
-            budget_name = await asyncio.to_thread(provisioner.provision, *job[:3])
+            with VERTEX_PROJECT_PROVISIONING_DURATION.time():
+                budget_name = await asyncio.to_thread(provisioner.provision, *job[:3])
         except Exception as exc:
-            timer.observe_duration()
             VERTEX_PROJECT_PROVISIONING.labels("failed").inc()
             retry_at = datetime.now(UTC) + timedelta(seconds=min(2**job[3], 900))
             new_status = "pending" if job[3] < self.max_attempts else "failed"
@@ -196,7 +195,6 @@ class SqlTenantVertexProjectDirectory:
             )
             return True
         else:
-            timer.observe_duration()
             VERTEX_PROJECT_PROVISIONING.labels("ready").inc()
         async with self._sessions.begin() as session:
             row = await session.get(TenantVertexProjectRow, job[0])

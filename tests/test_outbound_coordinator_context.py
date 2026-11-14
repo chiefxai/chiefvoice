@@ -28,12 +28,18 @@ class _Subscriptions:
         pass
 
 
+class _AgentProfiles:
+    async def get(self, tenant_id, profile_id):
+        return object()
+
+
 async def test_outbound_context_survives_coordinator_to_channel_adapter():
     adapter = _Adapter()
     coordinator = CallCoordinator(
         {"vobiz": adapter},
         _Subscriptions(),
         post_call_required=False,
+        agent_profile_directory=_AgentProfiles(),
     )
     output_schema = {
         "type": "object",

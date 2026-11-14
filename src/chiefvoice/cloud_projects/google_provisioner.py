@@ -24,12 +24,16 @@ class GoogleCloudTenantProjectProvisioner:
         parent: str,
         billing_account_id: str,
         runtime_service_account: str,
+        additional_runtime_service_accounts: tuple[str, ...] = (),
         budget_api_project_id: str,
         monthly_vertex_spend_cap: str,
     ):
         self.parent = parent.strip("/")
         self.billing_account_id = billing_account_id.removeprefix("billingAccounts/")
         self.runtime_service_account = runtime_service_account
+        self.runtime_service_accounts = tuple(
+            dict.fromkeys((runtime_service_account, *additional_runtime_service_accounts))
+        )
         self.budget_api_project_id = budget_api_project_id
         try:
             self.spend_cap = Decimal(monthly_vertex_spend_cap)
@@ -116,14 +120,18 @@ class GoogleCloudTenantProjectProvisioner:
         policy_url = f"{CRM}/projects/{project_id}:getIamPolicy"
         policy_response = self._request("POST", policy_url, json={"options": {"requestedPolicyVersion": 3}})
         policy = policy_response.json()
-        member = f"serviceAccount:{self.runtime_service_account}"
         bindings = policy.setdefault("bindings", [])
         binding = next((item for item in bindings if item.get("role") == "roles/aiplatform.user"), None)
         if binding is None:
             binding = {"role": "roles/aiplatform.user", "members": []}
             bindings.append(binding)
-        if member not in binding["members"]:
-            binding["members"].append(member)
+        changed = False
+        for service_account in self.runtime_service_accounts:
+            member = f"serviceAccount:{service_account}"
+            if member not in binding["members"]:
+                binding["members"].append(member)
+                changed = True
+        if changed:
             self._request(
                 "POST",
                 f"{CRM}/projects/{project_id}:setIamPolicy",

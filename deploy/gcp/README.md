@@ -17,6 +17,10 @@ Create a runtime service account and set `_RUNTIME_SERVICE_ACCOUNT` to its email
 
 Create a separate migration service account and set `_MIGRATION_SERVICE_ACCOUNT` to its email. Give it `roles/cloudsql.client` and Secret Manager Secret Accessor only on the database URL secret. The Cloud Build trigger identity needs Artifact Registry Writer on the hosting project, Cloud Run Admin, and Service Account User on both runtime and migration service accounts. Keep the builder identity separate from both runtime identities.
 
+For the Cloud Functions post-call backend, create a separate function service account and set `_POST_CALL_FUNCTION_SERVICE_ACCOUNT` to its email. Grant it `roles/cloudsql.client`, Secret Manager Secret Accessor on the database URL and post-call key, and `roles/aiplatform.user` on each tenant project (the provisioner grants the Vertex role when `GCP_POST_CALL_SERVICE_ACCOUNT` is set). Grant the API runtime identity `roles/run.invoker` on the function. The Cloud Build trigger identity needs permission to deploy gen2 functions and Service Account User on the function service account.
+
+When project isolation is disabled, grant the function service account `roles/aiplatform.user` on the configured `VERTEX_PROJECT_ID` yourself. The function is a separate runtime identity from the API and must be allowed to access Vertex AI directly.
+
 Create these Secret Manager secrets and grant the runtime service account access:
 
 | Secret ID (default) | Contents |
@@ -27,7 +31,7 @@ Create these Secret Manager secrets and grant the runtime service account access
 | `chiefvoice-vobiz-webhook-secret` | Vobiz signature secret |
 | `chiefvoice-vobiz-route-token` | Random inbound route token |
 
-Configure a Cloud Build trigger substitution for every deployment-specific value in `cloudbuild.yaml`, especially `_RUNTIME_SERVICE_ACCOUNT`, `_MIGRATION_SERVICE_ACCOUNT`, `_CLOUD_SQL_INSTANCE`, `_GCP_PROJECT_PARENT`, `_GCP_BILLING_ACCOUNT_ID`, `_GCP_BUDGET_API_PROJECT_ID`, `_GCP_VERTEX_MONTHLY_SPEND_CAP`, `_OIDC_ISSUER`, `_OIDC_AUDIENCE`, and `_OIDC_JWKS_URL`. Change the default placeholder values before creating the trigger. The API is publicly reachable so Vobiz can send call webhooks; application routes still enforce OIDC/API-key auth or provider signature/route-token validation.
+Configure a Cloud Build trigger substitution for every deployment-specific value in `cloudbuild.yaml`, especially `_RUNTIME_SERVICE_ACCOUNT`, `_MIGRATION_SERVICE_ACCOUNT`, `_CLOUD_SQL_INSTANCE`, `_GCP_PROJECT_PARENT`, `_GCP_BILLING_ACCOUNT_ID`, `_GCP_BUDGET_API_PROJECT_ID`, `_GCP_VERTEX_MONTHLY_SPEND_CAP`, `_OIDC_ISSUER`, `_OIDC_AUDIENCE`, and `_OIDC_JWKS_URL`. For Cloud Functions execution, also set `_POST_CALL_EXECUTION_BACKEND=gcp_function` and `_POST_CALL_FUNCTION_SERVICE_ACCOUNT`. Change the default placeholder values before creating the trigger. The API is publicly reachable so Vobiz can send call webhooks; application routes still enforce OIDC/API-key auth or provider signature/route-token validation.
 
 ## Runtime behavior
 

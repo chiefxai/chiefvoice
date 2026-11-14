@@ -24,6 +24,7 @@ from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
 from chiefvoice.agents.post_call.lambda_dispatch import LambdaAsyncInvoker
+from chiefvoice.agents.post_call.gcp_function_dispatch import GoogleCloudFunctionInvoker
 from chiefvoice.agents.post_call.fallback_spool import S3PostCallFallbackSpool
 from chiefvoice.agents.post_call.recovery import run_spool_reconciler
 from chiefvoice.agents.post_call.replay import SqlPostCallReplayService
@@ -75,7 +76,7 @@ async def lifespan(_app: FastAPI):
     agent_profile_directory = getattr(_app.state, "agent_profile_directory", None)
     post_call_dispatcher = getattr(_app.state, "post_call_dispatcher", None)
     post_call_agent = getattr(_app.state, "post_call_agent", None)
-    post_call_lambda_invoker = getattr(_app.state, "post_call_lambda_invoker", None)
+    post_call_async_invoker = getattr(_app.state, "post_call_async_invoker", None)
     post_call_replay_service = getattr(_app.state, "post_call_replay_service", None)
     post_call_recovery_spool = getattr(_app.state, "post_call_recovery_spool", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
@@ -113,9 +114,9 @@ async def lifespan(_app: FastAPI):
             await check_storage()
         _app.state.object_storage_ready = True
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
-            if post_call_lambda_invoker is not None:
-                worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_lambda_dispatcher(
-                    post_call_lambda_invoker,
+            if post_call_async_invoker is not None:
+                worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_async_dispatcher(
+                    post_call_async_invoker,
                     redispatch_after=timedelta(seconds=settings.post_call_redispatch_after_seconds),
                 )))
             elif post_call_agent is not None:
@@ -210,10 +211,18 @@ def create_app(
         if missing:
             raise ValueError("Vertex project isolation requires: " + ", ".join(missing))
         vertex_project_directory = SqlTenantVertexProjectDirectory(settings.database_url)
+        additional_vertex_identities = ()
+        if settings.post_call_execution_backend == "gcp_function":
+            if not settings.gcp_post_call_service_account:
+                raise ValueError(
+                    "GCP_POST_CALL_SERVICE_ACCOUNT is required for the GCP function backend"
+                )
+            additional_vertex_identities = (settings.gcp_post_call_service_account,)
         vertex_project_provisioner = GoogleCloudTenantProjectProvisioner(
             parent=settings.gcp_project_parent,
             billing_account_id=settings.gcp_billing_account_id,
             runtime_service_account=settings.gcp_runtime_service_account,
+            additional_runtime_service_accounts=additional_vertex_identities,
             budget_api_project_id=settings.gcp_budget_api_project_id,
             monthly_vertex_spend_cap=settings.gcp_vertex_monthly_spend_cap,
         )
@@ -239,9 +248,11 @@ def create_app(
                 credentials_path=settings.vertex_credentials_path,
             )
     application.state.post_call_agent = post_call_agent
-    if settings.post_call_execution_backend not in {"in_process", "lambda"}:
-        raise ValueError("POST_CALL_EXECUTION_BACKEND must be 'in_process' or 'lambda'")
-    post_call_lambda_invoker = None
+    if settings.post_call_execution_backend not in {"in_process", "lambda", "gcp_function"}:
+        raise ValueError(
+            "POST_CALL_EXECUTION_BACKEND must be 'in_process', 'lambda', or 'gcp_function'"
+        )
+    post_call_async_invoker = None
     if settings.post_call_execution_backend == "lambda":
         if not settings.post_call_lambda_function_name:
             raise ValueError("POST_CALL_LAMBDA_FUNCTION_NAME is required for Lambda execution")
@@ -257,17 +268,35 @@ def create_app(
                 "a Vertex project/location, "
                 "DATABASE_URL, and POST_CALL_ENCRYPTION_KEY"
             )
-        post_call_lambda_invoker = LambdaAsyncInvoker(
+        post_call_async_invoker = LambdaAsyncInvoker(
             settings.post_call_lambda_function_name,
             settings.post_call_lambda_region,
         )
-    application.state.post_call_lambda_invoker = post_call_lambda_invoker
+    elif settings.post_call_execution_backend == "gcp_function":
+        if not settings.post_call_gcp_function_url:
+            raise ValueError("POST_CALL_GCP_FUNCTION_URL is required for the GCP function backend")
+        if (
+            settings.post_call_agent_provider != "langchain_vertex"
+            or (not settings.vertex_project_id and not settings.vertex_project_isolation_enabled)
+            or not settings.vertex_location
+            or not settings.database_url
+            or not settings.post_call_encryption_key
+        ):
+            raise ValueError(
+                "GCP function post-call execution requires LangChain Vertex, Vertex project "
+                "isolation or project/location, DATABASE_URL, and POST_CALL_ENCRYPTION_KEY"
+            )
+        post_call_async_invoker = GoogleCloudFunctionInvoker(settings.post_call_gcp_function_url)
+    application.state.post_call_async_invoker = post_call_async_invoker
     application.state.vertex_project_directory = vertex_project_directory
     application.state.vertex_project_provisioner = vertex_project_provisioner
     post_call_required = settings.post_call_agent_provider != "disabled"
     if (
         post_call_dispatcher is None
-        and (post_call_agent is not None or settings.post_call_execution_backend == "lambda")
+        and (
+            post_call_agent is not None
+            or settings.post_call_execution_backend in {"lambda", "gcp_function"}
+        )
         and settings.database_url
         and settings.post_call_encryption_key
     ):
