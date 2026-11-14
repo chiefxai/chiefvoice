@@ -13,6 +13,8 @@ docker compose up --build
 
 Open <http://localhost:5173>. For local platform-admin access, open <http://localhost:9000/token>, copy the `access_token` value, and use **Connect API** in the console. This mock identity and token are for local development only; the issuer creates a fresh signing key whenever its container restarts, so fetch a new token after a restart. Live calls need real telephony and voice model credentials, which this local stack does not configure.
 
+Local Compose stores encrypted recordings in MinIO. Open <http://localhost:9003> for the MinIO console (`chiefvoice-local` / `chiefvoice-local-storage-password`); the S3 API is at <http://localhost:9002>.
+
 For separate development servers, start the API from the repository root using the instructions in the main README, then:
 
 ```sh

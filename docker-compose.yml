@@ -13,6 +13,54 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: chiefvoice-local
+      MINIO_ROOT_PASSWORD: chiefvoice-local-storage-password
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  minio-init:
+    image: chiefvoice-api
+    pull_policy: never
+    depends_on:
+      - minio
+    command:
+      - python
+      - -c
+      - |
+        import time
+        import boto3
+        from botocore.exceptions import ClientError, EndpointConnectionError
+        client = boto3.client(
+            "s3",
+            endpoint_url="http://minio:9000",
+            region_name="us-east-1",
+            aws_access_key_id="chiefvoice-local",
+            aws_secret_access_key="chiefvoice-local-storage-password",
+        )
+        for attempt in range(60):
+            try:
+                client.head_bucket(Bucket="chiefvoice-recordings")
+                break
+            except EndpointConnectionError:
+                time.sleep(2)
+            except ClientError as error:
+                code = error.response.get("Error", {}).get("Code")
+                if code in {"404", "NoSuchBucket", "NotFound"}:
+                    client.create_bucket(Bucket="chiefvoice-recordings")
+                    break
+                raise
+        else:
+            raise RuntimeError("MinIO did not become available")
+    restart: "no"
+
   migrate:
     build:
       context: .
@@ -35,10 +83,22 @@ services:
       OIDC_AUDIENCE: chiefvoice-local
       OIDC_JWKS_URL: http://dev-oidc:9000/jwks
       PLATFORM_ADMIN_SUBJECTS: local-dev-user
+      OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
+      OBJECT_STORAGE_REGION: us-east-1
+      OBJECT_STORAGE_BUCKET: chiefvoice-recordings
+      OBJECT_STORAGE_ACCESS_KEY_ID: chiefvoice-local
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: chiefvoice-local-storage-password
+      OBJECT_STORAGE_ADDRESSING_STYLE: path
+      OBJECT_STORAGE_PREFIX: chiefvoice
+      RECORDINGS_ENABLED: "true"
+      RECORDINGS_STORAGE_BACKEND: s3
+      RECORDINGS_ENCRYPTION_KEY: SMHLVOFrsltR9rWOLAshguCgf3UwTCwSSUF3MysKG0o=
     ports:
       - "8000:8080"
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
       dev-oidc:
         condition: service_started
@@ -73,3 +133,4 @@ services:
 
 volumes:
   postgres-data:
+  minio-data:
