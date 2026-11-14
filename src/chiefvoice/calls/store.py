@@ -111,10 +111,12 @@ class SqlCallSessionStore:
             if inserted.rowcount == 1:
                 return session, True, "starting"
             row = await db.scalar(
-                select(CallSessionRow).where(
+                select(CallSessionRow)
+                .where(
                     CallSessionRow.tenant_id == session.tenant_id,
                     CallSessionRow.idempotency_key == idempotency_key,
-                ).with_for_update()
+                )
+                .with_for_update()
             )
             if row is None:
                 # A random UUID collision is extraordinarily unlikely; surface it instead
@@ -151,25 +153,29 @@ class SqlCallSessionStore:
             }
         )
         async with self._sessions.begin() as db:
-            stmt = insert(CallSessionRow).values(
-                session_id=session.session_id,
-                tenant_id=session.tenant_id,
-                idempotency_key=None,
-                request_fingerprint=fingerprint,
-                status="starting",
-                provider_call_id=session.provider_call_id,
-                encrypted_session=self._encrypt_session(session),
-                encrypted_transcript=None,
-                transcript_characters=0,
-                transcript_persistence_failed=False,
-                started_at=session.started_at,
-                answered_at=None,
-                ended_at=None,
-                end_reason=None,
-                post_call_enqueued_at=None,
-                created_at=now,
-                updated_at=now,
-            ).on_conflict_do_nothing(index_elements=[CallSessionRow.session_id])
+            stmt = (
+                insert(CallSessionRow)
+                .values(
+                    session_id=session.session_id,
+                    tenant_id=session.tenant_id,
+                    idempotency_key=None,
+                    request_fingerprint=fingerprint,
+                    status="starting",
+                    provider_call_id=session.provider_call_id,
+                    encrypted_session=self._encrypt_session(session),
+                    encrypted_transcript=None,
+                    transcript_characters=0,
+                    transcript_persistence_failed=False,
+                    started_at=session.started_at,
+                    answered_at=None,
+                    ended_at=None,
+                    end_reason=None,
+                    post_call_enqueued_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=[CallSessionRow.session_id])
+            )
             inserted = await db.execute(stmt)
             if inserted.rowcount == 1:
                 return session, True, "starting"
@@ -247,9 +253,9 @@ class SqlCallSessionStore:
                 return
             current = ""
             if row.encrypted_transcript:
-                current = self._fernet.decrypt(
-                    row.encrypted_transcript.encode("ascii")
-                ).decode("utf-8")
+                current = self._fernet.decrypt(row.encrypted_transcript.encode("ascii")).decode(
+                    "utf-8"
+                )
             segment = f"{speaker}: {text.strip()}"
             if not segment:
                 return
@@ -318,7 +324,11 @@ class SqlCallSessionStore:
             )
             if row is None:
                 raise LookupError("Call session not found")
-            if not confirmed_started and row.status == "failed" and row.end_reason == "provider_confirmed_not_started":
+            if (
+                not confirmed_started
+                and row.status == "failed"
+                and row.end_reason == "provider_confirmed_not_started"
+            ):
                 # Lets an operator retry the idempotent billing release after an
                 # infrastructure interruption without changing the call decision.
                 return "confirmed_not_started"
@@ -359,9 +369,9 @@ class SqlCallSessionStore:
             calls = []
             for row in rows:
                 session = self._decrypt_session(row.encrypted_session or "")
-                transcript = self._fernet.decrypt(
-                    row.encrypted_transcript.encode("ascii")
-                ).decode("utf-8")
+                transcript = self._fernet.decrypt(row.encrypted_transcript.encode("ascii")).decode(
+                    "utf-8"
+                )
                 if not session.tenant_id or not transcript.strip():
                     continue
                 calls.append(
@@ -416,6 +426,22 @@ class SqlCallSessionStore:
                 "transcript_persistence_failed": row.transcript_persistence_failed,
                 "post_call_enqueued": row.post_call_enqueued_at is not None,
             }
+
+    async def matches_phone_binding(
+        self, tenant_id: str, session_id: str, provider: str, phone_number: str
+    ) -> bool:
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+            )
+            if row is None or not row.encrypted_session:
+                return False
+            session = self._decrypt_session(row.encrypted_session)
+            number = session.caller if session.direction is Direction.OUTBOUND else session.callee
+            return session.provider == provider and number == phone_number
 
     async def get_recording_uri(self, tenant_id: str, session_id: str) -> str | None:
         """Return a recording reference only for a call owned by this tenant."""
@@ -484,9 +510,7 @@ class SqlCallSessionStore:
             "recording_uri": session.metadata.get("recording_uri"),
             "started_at": session.started_at.isoformat(),
         }
-        encrypted = self._fernet.encrypt(
-            json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        )
+        encrypted = self._fernet.encrypt(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         return encrypted.decode("ascii")
 
     def _decrypt_session(self, encrypted: str) -> AcceptedSession:

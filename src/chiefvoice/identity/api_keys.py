@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
-from sqlalchemy import DateTime, Index, String, Text, select, update
+from sqlalchemy import CheckConstraint, DateTime, Index, String, Text, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,6 +28,8 @@ class ApiKeyIdentity:
     tenant_id: str
     subject: str
     scopes: frozenset[str]
+    assigned_provider: str | None = None
+    assigned_phone_number: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +44,8 @@ class ApiKeySummary:
     expires_at: datetime | None
     last_used_at: datetime | None
     revoked_at: datetime | None
+    assigned_provider: str | None = None
+    assigned_phone_number: str | None = None
 
 
 class ApiKeyDirectory(Protocol):
@@ -54,8 +58,11 @@ class ApiKeyDirectory(Protocol):
         scopes: tuple[str, ...],
         created_by: str,
         expires_at: datetime | None,
+        assigned_provider: str | None = None,
+        assigned_phone_number: str | None = None,
     ) -> tuple[str, ApiKeySummary]: ...
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
+    async def list_all(self) -> list[ApiKeySummary]: ...
     async def revoke(self, tenant_id: str, key_id: str) -> bool: ...
     async def provision_customer(
         self,
@@ -71,7 +78,13 @@ class ApiKeyDirectory(Protocol):
 
 class ApiKeyRow(Base):
     __tablename__ = "api_keys"
-    __table_args__ = (Index("ix_api_keys_tenant_id", "tenant_id"),)
+    __table_args__ = (
+        Index("ix_api_keys_tenant_id", "tenant_id"),
+        CheckConstraint(
+            "(assigned_provider IS NULL) = (assigned_phone_number IS NULL)",
+            name="api_key_phone_binding_pair",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -83,6 +96,8 @@ class ApiKeyRow(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    assigned_provider: Mapped[str | None] = mapped_column(String(40))
+    assigned_phone_number: Mapped[str | None] = mapped_column(String(64))
 
 
 class SqlApiKeyDirectory:
@@ -122,6 +137,8 @@ class SqlApiKeyDirectory:
                 tenant_id=row.tenant_id,
                 subject=f"api_key:{row.id}",
                 scopes=frozenset(json.loads(row.scopes_json)),
+                assigned_provider=row.assigned_provider,
+                assigned_phone_number=row.assigned_phone_number,
             )
 
     async def create(
@@ -132,7 +149,11 @@ class SqlApiKeyDirectory:
         scopes: tuple[str, ...],
         created_by: str,
         expires_at: datetime | None,
+        assigned_provider: str | None = None,
+        assigned_phone_number: str | None = None,
     ) -> tuple[str, ApiKeySummary]:
+        if (assigned_provider is None) != (assigned_phone_number is None):
+            raise ValueError("API key provider and phone number must be assigned together")
         key_id = secrets.token_hex(12)
         secret = secrets.token_urlsafe(32)
         token = f"{API_KEY_PREFIX}{key_id}.{secret}"
@@ -148,6 +169,8 @@ class SqlApiKeyDirectory:
             created_by=created_by,
             created_at=now,
             expires_at=expires_at,
+            assigned_provider=assigned_provider,
+            assigned_phone_number=assigned_phone_number,
         )
         async with self._sessions.begin() as session:
             account = await session.get(TenantAccountRow, tenant_id)
@@ -213,6 +236,11 @@ class SqlApiKeyDirectory:
             )
             return [_to_summary(row) for row in rows]
 
+    async def list_all(self) -> list[ApiKeySummary]:
+        async with self._sessions() as session:
+            rows = await session.scalars(select(ApiKeyRow).order_by(ApiKeyRow.created_at.desc()))
+            return [_to_summary(row) for row in rows]
+
     async def revoke(self, tenant_id: str, key_id: str) -> bool:
         async with self._sessions.begin() as session:
             result = await session.execute(
@@ -243,4 +271,6 @@ def _to_summary(row: ApiKeyRow) -> ApiKeySummary:
         expires_at=row.expires_at,
         last_used_at=row.last_used_at,
         revoked_at=row.revoked_at,
+        assigned_provider=row.assigned_provider,
+        assigned_phone_number=row.assigned_phone_number,
     )

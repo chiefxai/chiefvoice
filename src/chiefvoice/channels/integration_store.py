@@ -7,7 +7,11 @@ from sqlalchemy import Boolean, ForeignKeyConstraint, MetaData, String, Text, se
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, selectinload
 
-from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
+from chiefvoice.channels.integrations import (
+    ProviderIntegration,
+    ProviderPhoneNumber,
+    RegisteredPhoneNumber,
+)
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
 
 
@@ -82,6 +86,25 @@ class SqlProviderIntegrationStore:
                 .options(selectinload(IntegrationRow.phone_numbers))
             )
             return self._to_integration(row) if row else None
+
+    async def list_phone_numbers(self) -> list[RegisteredPhoneNumber]:
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(PhoneNumberRow).order_by(
+                    PhoneNumberRow.provider, PhoneNumberRow.number, PhoneNumberRow.tenant_id
+                )
+            )
+            return [
+                RegisteredPhoneNumber(
+                    provider=row.provider,
+                    tenant_id=row.tenant_id,
+                    number=row.number,
+                    inbound_enabled=row.inbound_enabled,
+                    outbound_enabled=row.outbound_enabled,
+                    agent_id=row.agent_id,
+                )
+                for row in rows
+            ]
 
     async def save(self, integration: ProviderIntegration) -> None:
         async with self._sessions.begin() as session:

@@ -6,7 +6,6 @@ from fastapi import HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError, PyJWKClient, PyJWKClientConnectionError, PyJWKClientError
 
-
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -17,6 +16,8 @@ class Principal:
     scopes: frozenset[str]
     auth_method: str = "oidc"
     api_key_id: str | None = None
+    assigned_provider: str | None = None
+    assigned_phone_number: str | None = None
 
 
 class OidcTokenVerifier:
@@ -58,7 +59,12 @@ class OidcTokenVerifier:
         tenant_id = payload.get(self.tenant_claim)
         raw_scopes = payload.get("scope", "")
         scopes = raw_scopes.split() if isinstance(raw_scopes, str) else []
-        if not isinstance(subject, str) or not subject or not isinstance(tenant_id, str) or not tenant_id:
+        if (
+            not isinstance(subject, str)
+            or not subject
+            or not isinstance(tenant_id, str)
+            or not tenant_id
+        ):
             raise HTTPException(status_code=401, detail="Token is missing subject or tenant claim")
         return Principal(subject=subject, tenant_id=tenant_id, scopes=frozenset(scopes))
 
@@ -104,6 +110,8 @@ async def current_principal(
             scopes=identity.scopes,
             auth_method="api_key",
             api_key_id=identity.key_id,
+            assigned_provider=identity.assigned_provider,
+            assigned_phone_number=identity.assigned_phone_number,
         )
     verifier: OidcTokenVerifier | None = getattr(request.app.state, "token_verifier", None)
     if verifier is None:

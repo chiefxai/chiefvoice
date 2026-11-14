@@ -11,6 +11,16 @@ class ProviderPhoneNumber:
 
 
 @dataclass(frozen=True, slots=True)
+class RegisteredPhoneNumber:
+    provider: str
+    tenant_id: str
+    number: str
+    inbound_enabled: bool
+    outbound_enabled: bool
+    agent_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderIntegration:
     provider: str
     tenant_id: str
@@ -21,8 +31,11 @@ class ProviderIntegration:
 
 class ProviderIntegrationStore(Protocol):
     async def get(self, provider: str, tenant_id: str) -> ProviderIntegration | None: ...
-    async def get_for_inbound_number(self, provider: str, number: str) -> ProviderIntegration | None: ...
+    async def get_for_inbound_number(
+        self, provider: str, number: str
+    ) -> ProviderIntegration | None: ...
     async def save(self, integration: ProviderIntegration) -> None: ...
     async def delete(self, provider: str, tenant_id: str) -> None: ...
+    async def list_phone_numbers(self) -> list[RegisteredPhoneNumber]: ...
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...

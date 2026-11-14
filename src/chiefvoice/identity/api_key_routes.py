@@ -1,5 +1,5 @@
-from datetime import UTC, datetime, timedelta
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
@@ -17,6 +17,8 @@ _MAX_KEY_LIFETIME = timedelta(days=365)
 class CreateApiKeyBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     scopes: list[str] = Field(min_length=1, max_length=50)
+    assigned_provider: str = Field(min_length=1, max_length=40)
+    assigned_phone_number: str = Field(min_length=5, max_length=64)
     expires_at: datetime | None = None
 
     @field_validator("name")
@@ -70,6 +72,15 @@ async def create_api_key(
     request: Request,
     principal: Annotated[Principal, Depends(_oidc_scope("api_keys:write"))],
 ):
+    integration_store = getattr(request.app.state, "provider_integration_store", None)
+    if integration_store is None:
+        raise HTTPException(status_code=503, detail="Phone number directory is not configured")
+    integration = await integration_store.get(body.assigned_provider, principal.tenant_id)
+    if integration is None or not any(
+        phone.number == body.assigned_phone_number and phone.outbound_enabled
+        for phone in integration.phone_numbers
+    ):
+        raise HTTPException(status_code=422, detail="Select an outbound-enabled phone number")
     requested_scopes = set(body.scopes)
     forbidden = requested_scopes & _NEVER_DELEGATE
     if forbidden:
@@ -99,6 +110,8 @@ async def create_api_key(
         scopes=tuple(sorted(requested_scopes)),
         created_by=principal.subject,
         expires_at=expires_at,
+        assigned_provider=body.assigned_provider,
+        assigned_phone_number=body.assigned_phone_number,
     )
     return {
         "id": key.key_id,
@@ -108,6 +121,8 @@ async def create_api_key(
         "scopes": key.scopes,
         "created_at": key.created_at.isoformat(),
         "expires_at": key.expires_at.isoformat() if key.expires_at else None,
+        "assigned_provider": key.assigned_provider,
+        "assigned_phone_number": key.assigned_phone_number,
         "message": "Copy this key now; it will not be shown again.",
     }
 
@@ -130,6 +145,8 @@ async def list_api_keys(
                 "expires_at": key.expires_at.isoformat() if key.expires_at else None,
                 "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
                 "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
+                "assigned_provider": key.assigned_provider,
+                "assigned_phone_number": key.assigned_phone_number,
             }
             for key in keys
         ]

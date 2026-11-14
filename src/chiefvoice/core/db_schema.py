@@ -2,7 +2,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-CURRENT_SCHEMA_REVISION = "0009_phone_number_agent_routing"
+CURRENT_SCHEMA_REVISION = "0010_api_key_phone_binding"
 CONSTRAINT_NAMING = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",

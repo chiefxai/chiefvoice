@@ -1,6 +1,6 @@
 # Chiefvoice Console
 
-React operations console for the Chiefvoice API. It uses Material UI, Axios, TanStack React Query, and React Hook Form.
+Platform console for the Chiefvoice API. It has two focused views: a cross-customer phone number inventory across providers, and API keys assigned to one outbound-enabled number. It uses Material UI, Axios, and TanStack React Query.
 
 ## Run locally
 
@@ -25,7 +25,7 @@ Open <http://localhost:5173>. Vite proxies `/v1`, `/healthz`, and `/readyz` to t
 
 Select **Connect API** and paste an OIDC access token (recommended for setup) or a tenant API key. The token is stored in this browser's local storage. The frontend does not issue tokens or provision identity-provider users. The token needs endpoint scopes such as `accounts:read`, `agents:read`, `calls:read`, `integrations:read`, and `billing:read`; write actions need their corresponding `:write` scopes. Configuring a billing plan specifically requires a trusted OIDC token with `billing:admin`.
 
-The **Customers** section is the platform operator view. It requires an OIDC principal whose subject is in `PLATFORM_ADMIN_SUBJECTS`, with `platform:customers:read` and `platform:customers:write` scopes. It can provision isolated customer accounts, issue one-time API keys, and rotate or revoke keys. Customer API keys are scoped credentials for a customer account; they are not separate accounts themselves. In local Compose, the mock token is a development-only platform admin for `local-demo-tenant`.
+The console requires an OIDC principal whose subject is in `PLATFORM_ADMIN_SUBJECTS`, with `platform:customers:read` and `platform:customers:write` scopes. The Numbers view lists registered customer numbers across providers. The API view issues one-time keys assigned to an outbound-enabled number, and can revoke them. Each issued key is limited to calls and call results for its assigned number. In local Compose, the mock token is a development-only platform admin for `local-demo-tenant`.
 
 ## Production API URL
 

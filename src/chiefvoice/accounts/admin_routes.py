@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from chiefvoice.accounts.models import AccountStore, TenantAccount
 from chiefvoice.billing import BillingMode
+from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
 from chiefvoice.core.config import settings
 from chiefvoice.identity.api_keys import ApiKeyDirectory, ApiKeySummary
 from chiefvoice.identity.auth import Principal, current_principal
@@ -88,6 +89,11 @@ class CreateCustomerApiKeyBody(BaseModel):
         return sorted(normalized)
 
 
+class CreatePhoneApiKeyBody(BaseModel):
+    provider: str = Field(min_length=1, max_length=40)
+    phone_number: str = Field(min_length=5, max_length=64)
+
+
 def _platform_admin(required_scope: str):
     async def dependency(
         principal: Annotated[Principal, Security(current_principal)],
@@ -96,9 +102,7 @@ def _platform_admin(required_scope: str):
             principal.auth_method != "oidc"
             or principal.subject not in settings.platform_admin_subjects
         ):
-            raise HTTPException(
-                status_code=403, detail="Platform administrator access is required"
-            )
+            raise HTTPException(status_code=403, detail="Platform administrator access is required")
         if required_scope not in principal.scopes:
             raise HTTPException(status_code=403, detail="Insufficient platform administrator scope")
         return principal
@@ -115,6 +119,13 @@ def _stores(request: Request) -> tuple[AccountStore, ApiKeyDirectory]:
             detail="Customer provisioning storage is not configured",
         )
     return account_store, api_key_directory
+
+
+def _integration_store(request: Request) -> SqlProviderIntegrationStore:
+    store = getattr(request.app.state, "provider_integration_store", None)
+    if store is None or not hasattr(store, "list_phone_numbers"):
+        raise HTTPException(status_code=503, detail="Phone number storage is not configured")
+    return store
 
 
 def _validate_expiration(expires_at: datetime | None) -> datetime | None:
@@ -151,6 +162,9 @@ def _key_json(key: ApiKeySummary) -> dict:
         "expires_at": key.expires_at.isoformat() if key.expires_at else None,
         "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
         "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
+        "customer_id": key.tenant_id,
+        "assigned_provider": key.assigned_provider,
+        "assigned_phone_number": key.assigned_phone_number,
     }
 
 
@@ -221,6 +235,121 @@ async def list_customers(
     account_store, _ = _stores(request)
     items = await account_store.list(limit=limit, offset=offset)
     return {"items": [_account_json(account) for account in items]}
+
+
+@router.get("/phone-numbers")
+async def list_platform_phone_numbers(
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
+):
+    del principal
+    account_store, _ = _stores(request)
+    records = await _integration_store(request).list_phone_numbers()
+    items = []
+    account_cache: dict[str, TenantAccount | None] = {}
+    for phone in records:
+        if phone.tenant_id not in account_cache:
+            account_cache[phone.tenant_id] = await account_store.get(phone.tenant_id)
+        account = account_cache[phone.tenant_id]
+        if account is None:
+            continue
+        items.append(
+            {
+                "provider": phone.provider,
+                "phone_number": phone.number,
+                "customer_id": phone.tenant_id,
+                "customer_name": account.display_name,
+                "inbound_enabled": phone.inbound_enabled,
+                "outbound_enabled": phone.outbound_enabled,
+                "agent_id": phone.agent_id,
+            }
+        )
+    return {"items": items}
+
+
+@router.get("/api-keys")
+async def list_platform_api_keys(
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
+):
+    del principal
+    account_store, api_key_directory = _stores(request)
+    items = []
+    for key in await api_key_directory.list_all():
+        account = await account_store.get(key.tenant_id)
+        if account is None:
+            continue
+        items.append({**_key_json(key), "customer_name": account.display_name})
+    return {"items": items}
+
+
+@router.post("/api-keys", status_code=status.HTTP_201_CREATED)
+async def issue_phone_api_key(
+    body: CreatePhoneApiKeyBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+):
+    account_store, api_key_directory = _stores(request)
+    phone = next(
+        (
+            item
+            for item in await _integration_store(request).list_phone_numbers()
+            if item.provider == body.provider
+            and item.number == body.phone_number
+            and item.outbound_enabled
+        ),
+        None,
+    )
+    if phone is None:
+        raise HTTPException(status_code=404, detail="Outbound-enabled phone number was not found")
+    account = await account_store.get(phone.tenant_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Phone number customer was not found")
+    expires_at = datetime.now(UTC) + MAX_API_KEY_LIFETIME
+    token, key = await api_key_directory.create(
+        tenant_id=phone.tenant_id,
+        name=f"API for {phone.number}",
+        scopes=tuple(DEFAULT_CUSTOMER_API_KEY_SCOPES),
+        created_by=principal.subject,
+        expires_at=expires_at,
+        assigned_provider=phone.provider,
+        assigned_phone_number=phone.number,
+    )
+    logger.info(
+        "phone_api_key_issued",
+        extra={
+            "actor_subject": principal.subject,
+            "tenant_id": phone.tenant_id,
+            "api_key_id": key.key_id,
+            "provider": phone.provider,
+            "phone_number": phone.number,
+        },
+    )
+    return {
+        "key": token,
+        "api_key_record": {**_key_json(key), "customer_name": account.display_name},
+        "message": "Copy this API key now; its secret will not be shown again.",
+    }
+
+
+@router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_platform_api_key(
+    key_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+):
+    _account_store, api_key_directory = _stores(request)
+    key = next((item for item in await api_key_directory.list_all() if item.key_id == key_id), None)
+    if key is None or not await api_key_directory.revoke(key.tenant_id, key.key_id):
+        raise HTTPException(status_code=404, detail="API key not found or already revoked")
+    logger.info(
+        "platform_api_key_revoked",
+        extra={
+            "actor_subject": principal.subject,
+            "tenant_id": key.tenant_id,
+            "api_key_id": key_id,
+        },
+    )
 
 
 @router.get("/{customer_id}/api-keys")

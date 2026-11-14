@@ -54,6 +54,15 @@ async def get_integration(
     integration = await _store(request).get(provider, principal.tenant_id)
     if integration is None:
         raise HTTPException(status_code=404, detail="Provider is not configured for this account")
+    phone_numbers = integration.phone_numbers
+    if principal.auth_method == "api_key" and principal.assigned_provider is not None:
+        if principal.assigned_provider != provider or not principal.assigned_phone_number:
+            raise HTTPException(
+                status_code=403, detail="This API key is assigned to another phone number"
+            )
+        phone_numbers = tuple(
+            number for number in phone_numbers if number.number == principal.assigned_phone_number
+        )
     return {
         "provider": integration.provider,
         "credentials_configured": sorted(integration.credentials.keys()),
@@ -65,7 +74,7 @@ async def get_integration(
                 "outbound_enabled": n.outbound_enabled,
                 "agent_id": n.agent_id,
             }
-            for n in integration.phone_numbers
+            for n in phone_numbers
         ],
     }
 

@@ -136,6 +136,15 @@ async def start_outbound_call(
     coordinator: Annotated[CallCoordinator, Depends(get_call_coordinator)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
+    if principal.auth_method == "api_key" and principal.assigned_provider is not None:
+        if not principal.assigned_phone_number or body.provider != principal.assigned_provider:
+            raise HTTPException(
+                status_code=403, detail="This API key is assigned to another phone number"
+            )
+        if body.caller_id and body.caller_id != principal.assigned_phone_number:
+            raise HTTPException(
+                status_code=403, detail="This API key cannot place calls from another number"
+            )
     if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 200):
         raise HTTPException(status_code=400, detail="Idempotency-Key must be 1 to 200 characters")
     if getattr(request.app.state, "voice_pipeline_factory", None) is None:
@@ -151,7 +160,7 @@ async def start_outbound_call(
                 channel=body.channel,
                 tenant_id=principal.tenant_id,
                 destination=body.destination,
-                caller_id=body.caller_id,
+                caller_id=principal.assigned_phone_number or body.caller_id,
                 bot_config_id=(
                     body.live_agent.agent_id
                     if body.live_agent and body.live_agent.agent_id
@@ -205,7 +214,20 @@ async def get_call_status(
     result = await store.get_status(principal.tenant_id, session_id)
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+    await _enforce_number_binding(store, principal, session_id)
     return result
+
+
+async def _enforce_number_binding(store: Any, principal: Principal, session_id: str) -> None:
+    if principal.auth_method != "api_key" or principal.assigned_provider is None:
+        return
+    if not principal.assigned_phone_number or not await store.matches_phone_binding(
+        principal.tenant_id,
+        session_id,
+        principal.assigned_provider,
+        principal.assigned_phone_number,
+    ):
+        raise HTTPException(status_code=404, detail="Call not found")
 
 
 @router.post("/v1/calls/{session_id}/reconcile", tags=["calls"])
@@ -250,12 +272,13 @@ async def get_call_recording(
     recording_uri = await call_store.get_recording_uri(principal.tenant_id, session_id)
     if recording_uri is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
+    await _enforce_number_binding(call_store, principal, session_id)
     try:
-        contents = await recording_store.read_wav(
-            principal.tenant_id, session_id, recording_uri
-        )
+        contents = await recording_store.read_wav(principal.tenant_id, session_id, recording_uri)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
+        ) from exc
     if contents is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
     return Response(
@@ -283,11 +306,19 @@ async def get_post_call_result(
         )
     result = await dispatcher.get_status(principal.tenant_id, session_id)
     if result is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post-call result not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Post-call result not found"
+        )
+    call_store = getattr(request.app.state, "call_session_store", None)
+    if call_store is None:
+        raise HTTPException(status_code=404, detail="Post-call result not found")
+    await _enforce_number_binding(call_store, principal, session_id)
     return result
 
 
-@router.post("/v1/calls/{session_id}/post-call/retry", status_code=status.HTTP_202_ACCEPTED, tags=["calls"])
+@router.post(
+    "/v1/calls/{session_id}/post-call/retry", status_code=status.HTTP_202_ACCEPTED, tags=["calls"]
+)
 async def retry_post_call_analysis(
     session_id: str,
     request: Request,
@@ -299,6 +330,10 @@ async def retry_post_call_analysis(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Post-call replay is not configured",
         )
+    call_store = getattr(request.app.state, "call_session_store", None)
+    if call_store is None:
+        raise HTTPException(status_code=404, detail="Post-call result not found")
+    await _enforce_number_binding(call_store, principal, session_id)
     try:
         return await replay_service.retry_analysis(principal.tenant_id, session_id)
     except ReplayNotFound as exc:
