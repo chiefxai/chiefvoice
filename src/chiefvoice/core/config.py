@@ -63,6 +63,11 @@ class Settings:
     post_call_agent_provider: str = os.getenv("POST_CALL_AGENT_PROVIDER", "langchain_vertex").strip().lower()
     post_call_model: str = os.getenv("POST_CALL_MODEL", "gemini-2.5-flash")
     post_call_encryption_key: str | None = os.getenv("POST_CALL_ENCRYPTION_KEY") or None
+    post_call_execution_backend: str = os.getenv("POST_CALL_EXECUTION_BACKEND", "in_process").strip().lower()
+    post_call_lambda_function_name: str | None = os.getenv("POST_CALL_LAMBDA_FUNCTION_NAME") or None
+    post_call_lambda_region: str | None = os.getenv("POST_CALL_LAMBDA_REGION") or None
+    post_call_dispatch_interval_seconds: float = float(os.getenv("POST_CALL_DISPATCH_INTERVAL_SECONDS", "1"))
+    post_call_redispatch_after_seconds: int = int(os.getenv("POST_CALL_REDISPATCH_AFTER_SECONDS", "120"))
     vobiz_public_url: str | None = os.getenv("VOBIZ_PUBLIC_URL") or None
     vobiz_inbound_route_token: str | None = os.getenv("VOBIZ_INBOUND_ROUTE_TOKEN") or None
     vobiz_webhook_secret: str | None = os.getenv("VOBIZ_WEBHOOK_SECRET") or None

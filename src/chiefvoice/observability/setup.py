@@ -138,7 +138,7 @@ def post_call_missing_transcript(channel: str, provider: str) -> None:
 
 
 def post_call_job_event(event: str) -> None:
-    if event in {"enqueued", "completed", "retrying", "failed"}:
+    if event in {"enqueued", "completed", "retrying", "failed", "dispatched", "dispatch_failed"}:
         POST_CALL_JOBS.labels(event).inc()
 
 

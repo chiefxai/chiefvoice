@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import json
+from datetime import timedelta
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextlib import suppress
@@ -22,6 +23,7 @@ from chiefvoice.agents.call.factory import create_realtime_pipeline_factory
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
+from chiefvoice.agents.post_call.lambda_dispatch import LambdaAsyncInvoker
 from chiefvoice.agents.post_call.queue import PostCallDispatcher, SqlPostCallQueue
 from chiefvoice.agents.post_call.queue import SqlPostCallWebhookDirectory
 from chiefvoice.agents.post_call.webhook_routes import router as post_call_webhook_router
@@ -67,6 +69,7 @@ async def lifespan(_app: FastAPI):
     agent_profile_directory = getattr(_app.state, "agent_profile_directory", None)
     post_call_dispatcher = getattr(_app.state, "post_call_dispatcher", None)
     post_call_agent = getattr(_app.state, "post_call_agent", None)
+    post_call_lambda_invoker = getattr(_app.state, "post_call_lambda_invoker", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
     recording_store = getattr(_app.state, "recording_store", None)
     backup_provider = getattr(_app.state, "backup_provider", None)
@@ -92,8 +95,14 @@ async def lifespan(_app: FastAPI):
         for check_storage in storage_checks:
             await check_storage()
         _app.state.object_storage_ready = True
-        if isinstance(post_call_dispatcher, SqlPostCallQueue) and post_call_agent is not None:
-            worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent)))
+        if isinstance(post_call_dispatcher, SqlPostCallQueue):
+            if post_call_lambda_invoker is not None:
+                worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_lambda_dispatcher(
+                    post_call_lambda_invoker,
+                    redispatch_after=timedelta(seconds=settings.post_call_redispatch_after_seconds),
+                )))
+            elif post_call_agent is not None:
+                worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent)))
         retention_runner = getattr(_app.state, "retention_runner", None)
         if retention_runner is not None:
             worker_tasks.append(asyncio.create_task(
@@ -171,15 +180,39 @@ def create_app(
             credentials_path=settings.vertex_credentials_path,
         )
     application.state.post_call_agent = post_call_agent
+    if settings.post_call_execution_backend not in {"in_process", "lambda"}:
+        raise ValueError("POST_CALL_EXECUTION_BACKEND must be 'in_process' or 'lambda'")
+    post_call_lambda_invoker = None
+    if settings.post_call_execution_backend == "lambda":
+        if not settings.post_call_lambda_function_name:
+            raise ValueError("POST_CALL_LAMBDA_FUNCTION_NAME is required for Lambda execution")
+        if (
+            settings.post_call_agent_provider != "langchain_vertex"
+            or not settings.vertex_project_id
+            or not settings.vertex_location
+            or not settings.database_url
+            or not settings.post_call_encryption_key
+        ):
+            raise ValueError(
+                "Lambda post-call execution requires LangChain Vertex, Vertex project/location, "
+                "DATABASE_URL, and POST_CALL_ENCRYPTION_KEY"
+            )
+        post_call_lambda_invoker = LambdaAsyncInvoker(
+            settings.post_call_lambda_function_name,
+            settings.post_call_lambda_region,
+        )
+    application.state.post_call_lambda_invoker = post_call_lambda_invoker
     post_call_required = settings.post_call_agent_provider != "disabled"
     if (
         post_call_dispatcher is None
-        and post_call_agent is not None
+        and (post_call_agent is not None or settings.post_call_execution_backend == "lambda")
         and settings.database_url
         and settings.post_call_encryption_key
     ):
         post_call_dispatcher = SqlPostCallQueue(
-            settings.database_url, settings.post_call_encryption_key
+            settings.database_url,
+            settings.post_call_encryption_key,
+            poll_interval=settings.post_call_dispatch_interval_seconds,
         )
     application.state.post_call_dispatcher = post_call_dispatcher
     application.state.post_call_required = post_call_required

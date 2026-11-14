@@ -47,6 +47,9 @@ class PostCallJobRow(Base):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_dispatch_error_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_error_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
     encrypted_result: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -369,13 +372,81 @@ class SqlPostCallQueue:
             if not worked:
                 await asyncio.sleep(self.poll_interval)
 
-    async def process_one(self, agent: PostCallAgent) -> bool:
+    async def run_lambda_dispatcher(self, invoker, *, redispatch_after: timedelta) -> None:
+        """Publish durable job IDs to an async compute target; PostgreSQL remains authoritative."""
+        while True:
+            try:
+                worked = await self.dispatch_one(invoker, redispatch_after=redispatch_after)
+                delivery_worked = await self.process_delivery_one()
+                if not worked and not delivery_worked:
+                    await asyncio.sleep(self.poll_interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("post_call_dispatcher_iteration_failed", extra={"error_type": type(exc).__name__})
+                await asyncio.sleep(self.poll_interval)
+
+    async def dispatch_one(self, invoker, *, redispatch_after: timedelta) -> bool:
+        """Send one eligible job ID. Old unclaimed jobs are resent after the recovery window."""
         now = datetime.now(UTC)
         async with self._sessions() as session:
             async with session.begin():
                 row = await session.scalar(
                     select(PostCallJobRow)
                     .where(
+                        or_(
+                            (PostCallJobRow.status == "queued")
+                            & (PostCallJobRow.next_attempt_at <= now),
+                            (PostCallJobRow.status == "processing")
+                            & (PostCallJobRow.lease_expires_at <= now),
+                        ),
+                        or_(PostCallJobRow.last_dispatched_at.is_(None),
+                            PostCallJobRow.last_dispatched_at <= now - redispatch_after),
+                    )
+                    .order_by(PostCallJobRow.created_at)
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+                if row is None:
+                    return False
+                job_id = row.session_id
+                row.last_dispatched_at = now
+                row.dispatch_attempts += 1
+                dispatch_attempt = row.dispatch_attempts
+                row.last_dispatch_error_type = None
+                row.updated_at = now
+        try:
+            await invoker.invoke(job_id)
+        except Exception as exc:
+            retry_at = datetime.now(UTC) + timedelta(seconds=min(2**dispatch_attempt, 300))
+            async with self._sessions.begin() as session:
+                await session.execute(
+                    update(PostCallJobRow)
+                    .where(PostCallJobRow.session_id == job_id, PostCallJobRow.status == "queued")
+                    .values(
+                        last_dispatched_at=None,
+                        last_dispatch_error_type=type(exc).__name__,
+                        next_attempt_at=retry_at,
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+            logger.error(
+                "post_call_lambda_dispatch_failed",
+                extra={"session_id": job_id, "error_type": type(exc).__name__},
+            )
+            post_call_job_event("dispatch_failed")
+            return True
+        post_call_job_event("dispatched")
+        return True
+
+    async def process_one(self, agent: PostCallAgent, session_id: str | None = None) -> bool:
+        now = datetime.now(UTC)
+        async with self._sessions() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(PostCallJobRow)
+                    .where(
+                        *((PostCallJobRow.session_id == session_id,) if session_id is not None else ()),
                         or_(
                             (PostCallJobRow.status == "queued")
                             & (PostCallJobRow.next_attempt_at <= now),
@@ -455,6 +526,7 @@ class SqlPostCallQueue:
                         next_attempt_at=retry_at if new_status == "queued" else None,
                         lease_expires_at=None,
                         last_error_type=type(exc).__name__,
+                        last_dispatched_at=None,
                         updated_at=datetime.now(UTC),
                     )
                 )
@@ -519,6 +591,10 @@ class SqlPostCallQueue:
         )
         post_call_job_event("completed")
         return True
+
+    async def process_job(self, session_id: str, agent: PostCallAgent) -> bool:
+        """Claim and process a specific Lambda event; duplicate/stale events safely no-op."""
+        return await self.process_one(agent, session_id=session_id)
 
     async def process_delivery_one(self) -> bool:
         now = datetime.now(UTC)
