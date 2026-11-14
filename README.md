@@ -184,4 +184,6 @@ Access logs are disabled in the local command because Vobiz answer and media URL
 
 ## Current scope
 
+For the container image, Cloud Build pipeline, Cloud Run service, and one-time GCP setup, see [GCP deployment](deploy/gcp/README.md).
+
 The Vobiz control/media adapter, tenant-scoped provider integration store, shared session and pipeline boundaries, Vertex AI realtime provider, recording hook, prepaid/postpaid usage ledgers, lifecycle workers, health endpoints, structured logs, metrics, and request traces are in place. This remains an integration foundation, not a hosted production service: configure real identity, database, Vobiz and Vertex credentials, subscription entitlements, provider pricing, secrets management, storage, and monitoring infrastructure before customer traffic. Inbound is scaffolded, while the current product focus is outbound. Other channels and realtime model providers can follow their respective adapter boundaries. See [ARCHITECTURE.md](ARCHITECTURE.md) for the boundaries and sequence.
