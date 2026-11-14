@@ -6,7 +6,6 @@ from fastapi import HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError, PyJWKClient, PyJWKClientConnectionError, PyJWKClientError
 
-from chiefvoice.core.config import settings
 
 bearer_scheme = HTTPBearer(auto_error=False)
 

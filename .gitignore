@@ -7,3 +7,9 @@ __pycache__/
 .ruff_cache/
 var/recordings/
 var/backups/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+backend.hcl

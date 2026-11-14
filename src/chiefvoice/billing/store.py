@@ -24,7 +24,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from chiefvoice.billing.models import BillingMode, VoiceEntitlement
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
-from chiefvoice.sessions import Direction
 
 logger = logging.getLogger(__name__)
 UNANSWERED_RESERVATION_GRACE = timedelta(seconds=90)

@@ -34,7 +34,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent, PostCallResult
+from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
 from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.observability.setup import (

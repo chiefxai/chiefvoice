@@ -2,6 +2,8 @@
 
 Provider-neutral real-time voice agent foundation using Pipecat.
 
+Provider deployment templates live in [`infra/`](infra/README.md). The GCP root provisions the infrastructure consumed by Cloud Build; the AWS root provisions ECS/Fargate, RDS, S3, and the post-call Lambda. Infrastructure templates are not a substitute for staging validation and require operator review before apply.
+
 ## Start locally
 
 Copy `.env.example` to `.env`, fill the settings you need, install [uv](https://docs.astral.sh/uv/), and run:
@@ -108,6 +110,8 @@ Create the authenticated tenant account with `POST /v1/accounts` and the `accoun
 ```json
 {"display_name": "Acme Support", "billing_mode": "prepaid"}
 ```
+
+An async Python SDK is available at `src/chiefvoice_sdk`. It starts outbound calls, configures the post-call callback, and can poll result status. Call creation is never automatically retried because duplicate dialing is possible after a network timeout. For production integrations, configure webhooks and treat event IDs idempotently; use polling as a fallback.
 
 ## Audio recordings
 

@@ -3,7 +3,7 @@ from typing import Any, Protocol, runtime_checkable
 from fastapi import Request, Response
 from pipecat.transports.base_transport import BaseTransport
 
-from chiefvoice.sessions import AcceptedSession, Direction
+from chiefvoice.sessions import AcceptedSession
 
 
 class InboundCall(Protocol):

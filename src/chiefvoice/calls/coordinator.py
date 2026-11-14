@@ -13,7 +13,7 @@ from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.fallback_spool import PostCallFallbackSpool
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
 from chiefvoice.billing import SubscriptionAuthorizer
-from chiefvoice.channels.base import ChannelAdapter, InboundCall, OutboundCall
+from chiefvoice.channels.base import ChannelAdapter, OutboundCall
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.observability.setup import (
     call_duration_limit_event,

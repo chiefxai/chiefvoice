@@ -1,12 +1,20 @@
 import asyncio
-import logging
+import json
 
 import functions_framework
 from flask import jsonify
 
 from chiefvoice.agents.post_call.lambda_handler import _process
 
-logger = logging.getLogger(__name__)
+def _log(severity: str, event_name: str, **fields: object) -> None:
+    """Emit structured Cloud Logging entries without call content or payload fields."""
+    print(
+        json.dumps(
+            {"severity": severity, "event": event_name, **fields},
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
 
 
 @functions_framework.http
@@ -21,9 +29,11 @@ def handler(request):
         or not event["job_id"]
     ):
         return jsonify({"error": "invalid_event"}), 400
+    _log("INFO", "post_call_function_started")
     try:
         result = asyncio.run(_process(event))
-    except Exception:
-        logger.exception("post_call_function_failed")
+    except Exception as exc:
+        _log("ERROR", "post_call_function_failed", error_type=type(exc).__name__)
         return jsonify({"error": "post_call_processing_failed"}), 500
+    _log("INFO", "post_call_function_finished", status=result["status"])
     return jsonify(result), 200

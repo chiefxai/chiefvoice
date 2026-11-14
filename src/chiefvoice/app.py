@@ -223,6 +223,8 @@ def create_app(
             billing_account_id=settings.gcp_billing_account_id,
             runtime_service_account=settings.gcp_runtime_service_account,
             additional_runtime_service_accounts=additional_vertex_identities,
+            credentials_json=settings.vertex_credentials_json,
+            credentials_path=settings.vertex_credentials_path,
             budget_api_project_id=settings.gcp_budget_api_project_id,
             monthly_vertex_spend_cap=settings.gcp_vertex_monthly_spend_cap,
         )

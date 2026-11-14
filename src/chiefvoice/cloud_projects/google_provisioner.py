@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from decimal import Decimal, InvalidOperation
 
-from chiefvoice.core.config import settings
 
 logger = logging.getLogger(__name__)
 CRM = "https://cloudresourcemanager.googleapis.com/v1"
@@ -25,6 +25,8 @@ class GoogleCloudTenantProjectProvisioner:
         billing_account_id: str,
         runtime_service_account: str,
         additional_runtime_service_accounts: tuple[str, ...] = (),
+        credentials_json: str | None = None,
+        credentials_path: str | None = None,
         budget_api_project_id: str,
         monthly_vertex_spend_cap: str,
     ):
@@ -49,7 +51,21 @@ class GoogleCloudTenantProjectProvisioner:
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
 
-        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+        if credentials_json:
+            from google.oauth2 import service_account
+
+            credentials = service_account.Credentials.from_service_account_info(
+                json.loads(credentials_json), scopes=scopes
+            )
+        elif credentials_path:
+            from google.oauth2 import service_account
+
+            credentials = service_account.Credentials.from_service_account_file(
+                credentials_path, scopes=scopes
+            )
+        else:
+            credentials, _ = google.auth.default(scopes=scopes)
         self._session = AuthorizedSession(credentials)
 
     def provision(self, tenant_id: str, project_id: str, display_name: str) -> str:
