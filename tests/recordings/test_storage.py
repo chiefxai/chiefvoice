@@ -4,12 +4,13 @@ import os
 import wave
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from io import BytesIO
 
 import pytest
 from cryptography.fernet import Fernet
 
 from chiefvoice.data_lifecycle.retention import StaticRetentionPolicyDirectory
-from chiefvoice.recordings.storage import EncryptedLocalRecordingStore
+from chiefvoice.recordings.storage import EncryptedLocalRecordingStore, S3RecordingStore
 
 
 def test_recordings_are_encrypted_and_tenant_isolated(tmp_path: Path):
@@ -33,6 +34,65 @@ def test_recordings_are_encrypted_and_tenant_isolated(tmp_path: Path):
     assert b"tenant-alpha" not in encrypted_metadata
     assert audio_path.stat().st_mode & 0o777 == 0o600
     assert audio_path.parent.parent.name != "tenant-alpha"
+
+
+def test_encrypted_recording_read_is_bound_to_tenant_and_session(tmp_path: Path):
+    key = Fernet.generate_key().decode("ascii")
+    store = EncryptedLocalRecordingStore(tmp_path, key)
+    uri = asyncio.run(store.save_wav("tenant-alpha", "session-a", b"\x00\x00", 8000, 1))
+
+    assert uri is not None
+    audio = asyncio.run(store.read_wav("tenant-alpha", "session-a", uri))
+    assert audio is not None
+    with wave.open(io.BytesIO(audio), "rb") as wav:
+        assert wav.readframes(1) == b"\x00\x00"
+    assert asyncio.run(store.read_wav("tenant-beta", "session-a", uri)) is None
+    assert asyncio.run(store.read_wav("tenant-alpha", "session-b", uri)) is None
+    assert asyncio.run(store.read_wav("tenant-alpha", "session-a", str(tmp_path / "other"))) is None
+
+
+def test_plain_local_recording_read_is_confined_to_tenant_directory(tmp_path: Path):
+    from chiefvoice.recordings.storage import LocalRecordingStore
+
+    store = LocalRecordingStore(tmp_path)
+    uri = asyncio.run(store.save_wav("tenant-alpha", "session-a", b"\x00\x00", 8000, 1))
+
+    assert uri is not None
+    assert asyncio.run(store.read_wav("tenant-alpha", "session-a", uri)) is not None
+    assert asyncio.run(store.read_wav("tenant-beta", "session-a", uri)) is None
+    assert asyncio.run(store.read_wav("tenant-alpha", "session-b", uri)) is None
+
+
+class _MemoryS3:
+    def __init__(self):
+        self.objects = {}
+
+    def put_object(self, *, Bucket, Key, Body, **_kwargs):
+        self.objects[(Bucket, Key)] = bytes(Body)
+
+    def get_object(self, *, Bucket, Key):
+        body = self.objects[(Bucket, Key)]
+        return {"Body": BytesIO(body), "ContentLength": len(body)}
+
+    def delete_objects(self, *, Bucket, Delete):
+        for item in Delete["Objects"]:
+            self.objects.pop((Bucket, item["Key"]), None)
+        return {"Deleted": Delete["Objects"]}
+
+
+def test_s3_recording_read_checks_tenant_and_session():
+    client = _MemoryS3()
+    store = S3RecordingStore("recordings-bucket", Fernet.generate_key().decode(), client=client)
+    uri = asyncio.run(store.save_wav("tenant-alpha", "session-a", b"\x00\x00", 8000, 1))
+
+    assert uri is not None
+    data = asyncio.run(store.read_wav("tenant-alpha", "session-a", uri))
+    assert data is not None
+    with wave.open(io.BytesIO(data), "rb") as wav:
+        assert wav.readframes(1) == b"\x00\x00"
+    assert asyncio.run(store.read_wav("tenant-beta", "session-a", uri)) is None
+    assert asyncio.run(store.read_wav("tenant-alpha", "session-b", uri)) is None
+    assert asyncio.run(store.read_wav("tenant-alpha", "session-a", "https://evil.example/audio")) is None
 
 
 def test_retention_respects_recording_legal_hold(tmp_path: Path):

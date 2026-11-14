@@ -35,6 +35,7 @@ from chiefvoice.agents.post_call.queue import PostCallDispatcher, SqlPostCallQue
 from chiefvoice.agents.post_call.queue import SqlPostCallWebhookDirectory
 from chiefvoice.agents.post_call.webhook_routes import router as post_call_webhook_router
 from chiefvoice.calls.coordinator import CallCoordinator
+from chiefvoice.calls.recovery import run_outbound_start_reconciler
 from chiefvoice.calls.store import SqlCallSessionStore
 from chiefvoice.channels.base import ChannelAdapter
 from chiefvoice.core.config import settings
@@ -47,6 +48,7 @@ from chiefvoice.billing import BillingPolicyRegistry, PostpaidBillingPolicy, Pre
 from chiefvoice.billing.routes import router as billing_router
 from chiefvoice.billing.store import SqlBillingDirectory
 from chiefvoice.channels.vobiz.adapter import VobizAdapter
+from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
 from chiefvoice.channels.vobiz.routes import router as vobiz_router
 from chiefvoice.channels.integration_routes import router as integrations_router
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
@@ -84,6 +86,7 @@ async def lifespan(_app: FastAPI):
     post_call_replay_service = getattr(_app.state, "post_call_replay_service", None)
     post_call_recovery_spool = getattr(_app.state, "post_call_recovery_spool", None)
     call_session_store = getattr(_app.state, "call_session_store", None)
+    vobiz_callback_nonce_store = getattr(_app.state, "vobiz_callback_nonce_store", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
     recording_store = getattr(_app.state, "recording_store", None)
     backup_provider = getattr(_app.state, "backup_provider", None)
@@ -98,6 +101,15 @@ async def lifespan(_app: FastAPI):
             await account_store.initialize()
         if call_session_store is not None:
             await call_session_store.initialize()
+            worker_tasks.append(asyncio.create_task(
+                run_outbound_start_reconciler(
+                    call_session_store,
+                    older_than_seconds=settings.outbound_start_reconciliation_after_seconds,
+                    interval_seconds=settings.outbound_start_reconciliation_interval_seconds,
+                )
+            ))
+        if vobiz_callback_nonce_store is not None:
+            await vobiz_callback_nonce_store.initialize()
         if billing_directory is not None:
             await billing_directory.initialize()
         if integration_store is not None:
@@ -194,6 +206,8 @@ async def lifespan(_app: FastAPI):
             await account_store.close()
         if call_session_store is not None:
             await call_session_store.close()
+        if vobiz_callback_nonce_store is not None:
+            await vobiz_callback_nonce_store.close()
         if vertex_project_directory is not None:
             await vertex_project_directory.close()
         logger.info("application_stopped", extra={"event": "application_stopped"})
@@ -426,6 +440,11 @@ def create_app(
         if settings.database_url and settings.credentials_encryption_key
         else None
     )
+    vobiz_callback_nonce_store = (
+        SqlVobizCallbackNonceStore(settings.database_url)
+        if settings.database_url
+        else None
+    )
     retention_policies = StaticRetentionPolicyDirectory.from_json(settings.retention_policies_json)
     retention_runner = None
     if retention_policies.policies:
@@ -494,11 +513,12 @@ def create_app(
         backup_execution_lock = PostgresBackupRunLock(settings.database_url)
     vobiz_adapter = adapters.get("vobiz")
     if vobiz_adapter is None and settings.vobiz_webhook_secret and provider_integration_store is not None:
-        vobiz_adapter = VobizAdapter(provider_integration_store)
+        vobiz_adapter = VobizAdapter(provider_integration_store, vobiz_callback_nonce_store)
         adapters["vobiz"] = vobiz_adapter
     application.state.provider_integration_store = provider_integration_store
     application.state.account_store = account_store
     application.state.call_session_store = call_session_store
+    application.state.vobiz_callback_nonce_store = vobiz_callback_nonce_store
     application.state.billing_directory = billing_directory
     application.state.api_key_directory = api_key_directory
     application.state.post_call_webhook_directory = post_call_webhook_directory

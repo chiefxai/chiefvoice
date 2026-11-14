@@ -10,6 +10,7 @@ import wave
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -22,6 +23,7 @@ from chiefvoice.sessions import AcceptedSession
 from chiefvoice.storage.s3 import create_s3_compatible_client, object_key
 
 logger = logging.getLogger(__name__)
+MAX_RECORDING_DOWNLOAD_BYTES = 128 * 1024 * 1024
 
 
 class RecordingStore(Protocol):
@@ -33,6 +35,8 @@ class RecordingStore(Protocol):
         sample_rate: int,
         channels: int,
     ) -> str | None: ...
+
+    async def read_wav(self, tenant_id: str, session_id: str, recording_uri: str) -> bytes | None: ...
 
 
 class LocalRecordingStore:
@@ -80,6 +84,30 @@ class LocalRecordingStore:
         return await asyncio.to_thread(
             _purge_plain_recordings, tenant_directory, cutoff, batch_size
         )
+
+    async def read_wav(self, tenant_id: str, session_id: str, recording_uri: str) -> bytes | None:
+        return await asyncio.to_thread(
+            self._read_wav_sync, tenant_id, session_id, recording_uri
+        )
+
+    def _read_wav_sync(self, tenant_id: str, session_id: str, recording_uri: str) -> bytes | None:
+        tenant_directory = self.directory / _tenant_digest(tenant_id)
+        try:
+            candidate = Path(recording_uri)
+            if tenant_directory.is_symlink():
+                return None
+            tenant_root = tenant_directory.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+            if resolved.parent != tenant_root or candidate.is_symlink():
+                return None
+            expected_prefix = _safe_record_id(session_id) + "_"
+            if not resolved.name.startswith(expected_prefix) or resolved.suffix != ".wav":
+                return None
+            if not resolved.is_file() or resolved.stat().st_size > MAX_RECORDING_DOWNLOAD_BYTES:
+                raise ValueError("Recording exceeds the download size limit")
+            return resolved.read_bytes()
+        except FileNotFoundError:
+            return None
 
 
 class EncryptedLocalRecordingStore:
@@ -154,6 +182,39 @@ class EncryptedLocalRecordingStore:
         return await asyncio.to_thread(
             self._delete_recording_sync, tenant_directory, tenant_id, recording_id
         )
+
+    async def read_wav(self, tenant_id: str, session_id: str, recording_uri: str) -> bytes | None:
+        return await asyncio.to_thread(
+            self._read_wav_sync, tenant_id, session_id, recording_uri
+        )
+
+    def _read_wav_sync(self, tenant_id: str, session_id: str, recording_uri: str) -> bytes | None:
+        tenant_directory = self.directory / _tenant_digest(tenant_id)
+        try:
+            path = Path(recording_uri)
+            if tenant_directory.is_symlink() or path.name != "audio.fernet" or path.is_symlink():
+                return None
+            record_id = path.parent.name
+            record_directory = _record_directory(tenant_directory, record_id)
+            if record_directory is None or path.parent.resolve(strict=True) != record_directory.resolve(strict=True):
+                return None
+            metadata = self._read_metadata(record_directory)
+            if (
+                metadata is None
+                or metadata.get("tenant_id") != tenant_id
+                or metadata.get("session_id") != session_id
+            ):
+                return None
+            audio_path = record_directory / "audio.fernet"
+            if audio_path.is_symlink() or audio_path.stat().st_size > MAX_RECORDING_DOWNLOAD_BYTES:
+                raise ValueError("Recording exceeds the download size limit")
+            encrypted_audio = audio_path.read_bytes()
+            return self._fernet.decrypt(encrypted_audio)
+        except FileNotFoundError:
+            return None
+        except InvalidToken:
+            logger.error("recording_audio_unreadable")
+            return None
 
     def _purge_expired_sync(
         self, tenant_directory: Path, tenant_id: str, cutoff: datetime, batch_size: int
@@ -412,6 +473,47 @@ class S3RecordingStore:
             return False
         await self._delete_record_prefix(record_prefix)
         return True
+
+    async def read_wav(self, tenant_id: str, session_id: str, recording_uri: str) -> bytes | None:
+        parsed = urlsplit(recording_uri)
+        if parsed.scheme != "s3" or parsed.netloc != self.bucket or parsed.query or parsed.fragment:
+            return None
+        key = parsed.path.lstrip("/")
+        tenant_prefix = object_key(self.prefix, _tenant_digest(tenant_id)) + "/"
+        if not key.startswith(tenant_prefix) or not key.endswith("/audio.fernet"):
+            return None
+        record_id = key[len(tenant_prefix) : -len("/audio.fernet")]
+        record_prefix = self._record_prefix_for_id(tenant_id, record_id)
+        if record_prefix is None or key != f"{record_prefix}/audio.fernet":
+            return None
+        metadata = await self._read_metadata(f"{record_prefix}/metadata.fernet")
+        if (
+            metadata is None
+            or metadata.get("tenant_id") != tenant_id
+            or metadata.get("session_id") != session_id
+        ):
+            return None
+        try:
+            response = await asyncio.to_thread(
+                self._client.get_object, Bucket=self.bucket, Key=key
+            )
+        except Exception as exc:
+            if _is_missing_object(exc):
+                return None
+            raise
+        body = response["Body"]
+        try:
+            if response.get("ContentLength", 0) > MAX_RECORDING_DOWNLOAD_BYTES:
+                raise ValueError("Recording exceeds the download size limit")
+            encrypted_audio = await asyncio.to_thread(body.read, MAX_RECORDING_DOWNLOAD_BYTES + 1)
+            if len(encrypted_audio) > MAX_RECORDING_DOWNLOAD_BYTES:
+                raise ValueError("Recording exceeds the download size limit")
+            return self._fernet.decrypt(encrypted_audio)
+        except InvalidToken:
+            logger.error("recording_audio_unreadable")
+            return None
+        finally:
+            await asyncio.to_thread(body.close)
 
     def _record_prefix_for_id(self, tenant_id: str, recording_id: str) -> str | None:
         if not tenant_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", recording_id or ""):

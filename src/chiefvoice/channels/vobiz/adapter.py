@@ -25,8 +25,9 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
-from chiefvoice.channels.base import InboundCall, OutboundCall
+from chiefvoice.channels.base import AmbiguousCallStart, InboundCall, OutboundCall
 from chiefvoice.channels.integrations import ProviderIntegrationStore
+from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
 from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession, Direction
 
@@ -54,8 +55,13 @@ class VobizAdapter:
     name = "vobiz"
     provider = "vobiz"
 
-    def __init__(self, integration_store: ProviderIntegrationStore):
+    def __init__(
+        self,
+        integration_store: ProviderIntegrationStore,
+        nonce_store: SqlVobizCallbackNonceStore | None = None,
+    ):
         self.integration_store = integration_store
+        self.nonce_store = nonce_store
         if not settings.vobiz_webhook_secret:
             raise ValueError("VOBIZ_WEBHOOK_SECRET is required")
         if settings.vobiz_public_url and not settings.vobiz_public_url.startswith("https://"):
@@ -123,20 +129,40 @@ class VobizAdapter:
                 )
             response.raise_for_status()
             result = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500:
+                raise HTTPException(
+                    status_code=502, detail="Vobiz rejected the call request"
+                ) from exc
             logger.error(
-                "vobiz_outbound_request_failed",
+                "vobiz_outbound_request_ambiguous",
                 extra={
                     "session_id": session.session_id,
                     "provider": self.provider,
                     "error_type": type(exc).__name__,
                 },
             )
-            raise HTTPException(status_code=502, detail="Vobiz could not start the call") from exc
+            raise AmbiguousCallStart(
+                "Vobiz returned a server error after receiving the call request"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.error(
+                "vobiz_outbound_request_ambiguous",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise AmbiguousCallStart(
+                "Vobiz call request outcome could not be confirmed"
+            ) from exc
 
+        if not isinstance(result, dict):
+            raise AmbiguousCallStart("Vobiz returned an unrecognized call response")
         call_id = result.get("request_uuid") or result.get("call_uuid")
         if not isinstance(call_id, str) or not call_id:
-            raise HTTPException(status_code=502, detail="Vobiz response did not include a call ID")
+            raise AmbiguousCallStart("Vobiz response did not include a call ID")
         session.provider_call_id = call_id
         logger.info(
             "vobiz_call_queued",
@@ -165,10 +191,13 @@ class VobizAdapter:
         if integration is None:
             raise HTTPException(status_code=404, detail="Inbound number is not configured")
         auth_token = integration.credentials.get("auth_token", "")
-        if not auth_token or not self._valid_callback_signature(
-            request, auth_token, "/webhooks/vobiz/inbound"
-        ):
+        nonce = self._verified_callback_nonce(request, auth_token, "/webhooks/vobiz/inbound")
+        if not auth_token or nonce is None:
             raise HTTPException(status_code=403, detail="Invalid Vobiz callback signature")
+        if self.nonce_store is None:
+            raise HTTPException(status_code=503, detail="Callback replay protection is unavailable")
+        if not await self.nonce_store.consume(integration.tenant_id, nonce):
+            raise HTTPException(status_code=403, detail="Replayed Vobiz callback")
         return VobizInboundCall(
             provider=self.provider,
             channel="phone",
@@ -181,6 +210,10 @@ class VobizAdapter:
 
     @staticmethod
     def _valid_callback_signature(request: Request, auth_token: str, path: str) -> bool:
+        return VobizAdapter._verified_callback_nonce(request, auth_token, path) is not None
+
+    @staticmethod
+    def _verified_callback_nonce(request: Request, auth_token: str, path: str) -> str | None:
         """Validate Vobiz's V3 (preferred) or V2 callback HMAC.
 
         Vobiz signs the configured callback URL without its query string and a
@@ -208,8 +241,8 @@ class VobizAdapter:
                 ).digest()
             ).decode()
             if hmac.compare_digest(signature, expected):
-                return True
-        return False
+                return nonce
+        return None
 
     async def accept_inbound(
         self, call: InboundCall, session: AcceptedSession

@@ -6,6 +6,10 @@ from pipecat.transports.base_transport import BaseTransport
 from chiefvoice.sessions import AcceptedSession
 
 
+class AmbiguousCallStart(RuntimeError):
+    """Provider request may have placed a call, but no call ID was confirmed."""
+
+
 class InboundCall(Protocol):
     """Provider-verified call data, including a tenant resolved from provider config."""
 

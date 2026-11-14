@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
@@ -104,6 +105,19 @@ class OutboundCallBody(BaseModel):
         return self
 
 
+class OutboundStartReconciliation(BaseModel):
+    confirmed_started: bool
+    provider_call_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_resolution(self):
+        if self.confirmed_started and not self.provider_call_id:
+            raise ValueError("provider_call_id is required when the provider confirms the call")
+        if not self.confirmed_started and self.provider_call_id is not None:
+            raise ValueError("provider_call_id must be omitted when the provider confirms no call")
+        return self
+
+
 def get_call_coordinator(request: Request) -> CallCoordinator:
     coordinator: CallCoordinator | None = getattr(request.app.state, "call_coordinator", None)
     if coordinator is None:
@@ -192,6 +206,67 @@ async def get_call_status(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
     return result
+
+
+@router.post("/v1/calls/{session_id}/reconcile", tags=["calls"])
+async def reconcile_outbound_call_start(
+    session_id: str,
+    body: OutboundStartReconciliation,
+    principal: Annotated[Principal, Security(require_scope("calls:reconcile"))],
+    coordinator: Annotated[CallCoordinator, Depends(get_call_coordinator)],
+):
+    outcome = await coordinator.resolve_outbound_start(
+        principal.tenant_id,
+        session_id,
+        confirmed_started=body.confirmed_started,
+        provider_call_id=body.provider_call_id,
+    )
+    return {
+        "session_id": session_id,
+        "status": "initiated" if outcome == "confirmed_started" else "failed",
+        "outcome": outcome,
+    }
+
+
+@router.get("/v1/calls/{session_id}/recording", tags=["calls"])
+async def get_call_recording(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("calls:read"))],
+):
+    """Stream a tenant-owned recording without exposing its private storage location."""
+    call_store = getattr(request.app.state, "call_session_store", None)
+    recording_store = getattr(request.app.state, "recording_store", None)
+    if call_store is None or not hasattr(call_store, "get_recording_uri"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Call status storage is not configured",
+        )
+    if recording_store is None or not hasattr(recording_store, "read_wav"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Recording storage is not configured",
+        )
+    recording_uri = await call_store.get_recording_uri(principal.tenant_id, session_id)
+    if recording_uri is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
+    try:
+        contents = await recording_store.read_wav(
+            principal.tenant_id, session_id, recording_uri
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    if contents is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
+    return Response(
+        content=contents,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": 'attachment; filename="recording.wav"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/v1/calls/{session_id}/post-call", tags=["calls"])

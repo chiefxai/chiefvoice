@@ -14,7 +14,7 @@ from chiefvoice.agents.post_call.fallback_spool import PostCallFallbackSpool
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
 from chiefvoice.billing import SubscriptionAuthorizer
 from chiefvoice.calls.store import IdempotencyConflict, SqlCallSessionStore
-from chiefvoice.channels.base import ChannelAdapter, OutboundCall
+from chiefvoice.channels.base import AmbiguousCallStart, ChannelAdapter, OutboundCall
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.observability.setup import (
     call_duration_limit_event,
@@ -186,6 +186,27 @@ class CallCoordinator:
                 raise
         try:
             session = await adapter.initiate_outbound(call, session)
+        except AmbiguousCallStart as exc:
+            # Keep the prepaid/postpaid reservation in place: the provider may have
+            # accepted the request despite losing its response. The same idempotency
+            # key must return this session instead of risking a duplicate paid call.
+            if self.call_session_store is not None:
+                await self.call_session_store.update_state(
+                    session,
+                    status="reconciliation_required",
+                    end_reason="provider_start_outcome_ambiguous",
+                )
+            logger.error(
+                "outbound_call_requires_reconciliation",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            session.metadata["call_status"] = "reconciliation_required"
+            return session
         except BaseException:
             await self.subscriptions.release_voice(command.tenant_id, session.session_id)
             if self.call_session_store is not None:
@@ -237,11 +258,43 @@ class CallCoordinator:
                 else str(uuid4())
             ),
         )
+        if self.call_session_store is not None:
+            if not inbound.provider_call_id:
+                return await adapter.reject_inbound(
+                    inbound, "Provider call ID is required for durable inbound call handling"
+                )
+            try:
+                session, created, stored_status = await self.call_session_store.register_inbound(
+                    session
+                )
+            except IdempotencyConflict as exc:
+                logger.warning(
+                    "inbound_call_idempotency_conflict",
+                    extra={"provider": provider, "error_type": type(exc).__name__},
+                )
+                return await adapter.reject_inbound(inbound, "Inbound call could not be verified")
+            if not created and stored_status in {"completed", "failed"}:
+                return await adapter.reject_inbound(inbound, "This inbound call is already closed")
+            if not created and stored_status == "answered":
+                # Provider webhook retries should reuse the persisted call and its
+                # billing reservation rather than acquiring a second reservation.
+                session, response = await adapter.accept_inbound(inbound, session)
+                await self.call_session_store.update_state(
+                    session,
+                    status="answered",
+                    provider_call_id=session.provider_call_id,
+                    answered_at=session.started_at,
+                )
+                return response
         try:
             entitlement = await self.subscriptions.authorize_voice(
                 inbound.tenant_id, session.session_id, inbound.channel, Direction.INBOUND
             )
         except HTTPException as exc:
+            if self.call_session_store is not None:
+                await self.call_session_store.update_state(
+                    session, status="failed", end_reason="billing_authorization_failed"
+                )
             if exc.status_code in (402, 403):
                 return await adapter.reject_inbound(inbound, str(exc.detail))
             raise
@@ -257,7 +310,18 @@ class CallCoordinator:
             session, response = await adapter.accept_inbound(inbound, session)
         except BaseException:
             await self.subscriptions.release_voice(inbound.tenant_id, session.session_id)
+            if self.call_session_store is not None:
+                await self.call_session_store.update_state(
+                    session, status="failed", end_reason="provider_accept_failed"
+                )
             raise
+        if self.call_session_store is not None:
+            await self.call_session_store.update_state(
+                session,
+                status="answered",
+                provider_call_id=session.provider_call_id,
+                answered_at=session.started_at,
+            )
         session_started(session.channel, session.provider)
         return response
 
@@ -268,6 +332,33 @@ class CallCoordinator:
             raise HTTPException(status_code=503, detail="Tenant Vertex project storage is not configured")
         if await self.vertex_project_directory.get_ready_project_id(tenant_id) is None:
             raise HTTPException(status_code=503, detail="Tenant Vertex project is not ready")
+
+    async def resolve_outbound_start(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        confirmed_started: bool,
+        provider_call_id: str | None = None,
+    ) -> str:
+        if self.call_session_store is None:
+            raise HTTPException(status_code=503, detail="Call status storage is not configured")
+        try:
+            outcome = await self.call_session_store.resolve_outbound_start(
+                tenant_id,
+                session_id,
+                confirmed_started=confirmed_started,
+                provider_call_id=provider_call_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="Call not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if outcome == "confirmed_not_started":
+            # Billing release is idempotent by session ID; the store accepts this
+            # same decision again if the process dies between these operations.
+            await self.subscriptions.release_voice(tenant_id, session_id)
+        return outcome
 
     async def mark_answered(self, session: AcceptedSession) -> datetime:
         if session.tenant_id is None:

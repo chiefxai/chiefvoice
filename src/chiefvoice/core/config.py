@@ -79,6 +79,12 @@ class Settings:
     post_call_cloud_tasks_queue: str | None = os.getenv("POST_CALL_CLOUD_TASKS_QUEUE") or None
     post_call_dispatch_interval_seconds: float = float(os.getenv("POST_CALL_DISPATCH_INTERVAL_SECONDS", "1"))
     post_call_redispatch_after_seconds: int = int(os.getenv("POST_CALL_REDISPATCH_AFTER_SECONDS", "120"))
+    outbound_start_reconciliation_after_seconds: int = int(
+        os.getenv("OUTBOUND_START_RECONCILIATION_AFTER_SECONDS", "120")
+    )
+    outbound_start_reconciliation_interval_seconds: int = int(
+        os.getenv("OUTBOUND_START_RECONCILIATION_INTERVAL_SECONDS", "30")
+    )
     vobiz_public_url: str | None = os.getenv("VOBIZ_PUBLIC_URL") or None
     vobiz_inbound_route_token: str | None = os.getenv("VOBIZ_INBOUND_ROUTE_TOKEN") or None
     vobiz_webhook_secret: str | None = os.getenv("VOBIZ_WEBHOOK_SECRET") or None

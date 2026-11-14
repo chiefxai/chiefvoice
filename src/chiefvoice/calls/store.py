@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from cryptography.fernet import Fernet
@@ -130,6 +130,66 @@ class SqlCallSessionStore:
                 )
             return self._decrypt_session(row.encrypted_session), False, row.status
 
+    async def register_inbound(self, session: AcceptedSession) -> tuple[AcceptedSession, bool, str]:
+        """Persist an inbound session once, keyed by its deterministic session ID.
+
+        Vobiz can retry an inbound webhook. The adapter derives session_id from the
+        provider and call ID, so the primary key makes those retries idempotent.
+        """
+        if session.direction is not Direction.INBOUND or not session.tenant_id:
+            raise ValueError("An inbound call session with a tenant is required")
+        now = datetime.now(UTC)
+        fingerprint = self.fingerprint(
+            {
+                "provider": session.provider,
+                "channel": session.channel,
+                "tenant_id": session.tenant_id,
+                "provider_call_id": session.provider_call_id,
+                "caller": session.caller,
+                "callee": session.callee,
+                "bot_config_id": session.bot_config_id,
+            }
+        )
+        async with self._sessions.begin() as db:
+            stmt = insert(CallSessionRow).values(
+                session_id=session.session_id,
+                tenant_id=session.tenant_id,
+                idempotency_key=None,
+                request_fingerprint=fingerprint,
+                status="starting",
+                provider_call_id=session.provider_call_id,
+                encrypted_session=self._encrypt_session(session),
+                encrypted_transcript=None,
+                transcript_characters=0,
+                transcript_persistence_failed=False,
+                started_at=session.started_at,
+                answered_at=None,
+                ended_at=None,
+                end_reason=None,
+                post_call_enqueued_at=None,
+                created_at=now,
+                updated_at=now,
+            ).on_conflict_do_nothing(index_elements=[CallSessionRow.session_id])
+            inserted = await db.execute(stmt)
+            if inserted.rowcount == 1:
+                return session, True, "starting"
+            row = await db.scalar(
+                select(CallSessionRow)
+                .where(CallSessionRow.session_id == session.session_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise RuntimeError("Could not persist the inbound call session")
+            if row.tenant_id != session.tenant_id or row.request_fingerprint != fingerprint:
+                raise IdempotencyConflict(
+                    "Provider call ID is already associated with a different inbound call"
+                )
+            if row.encrypted_session is None:
+                raise IdempotencyConflict(
+                    "This inbound call has expired from retained call details"
+                )
+            return self._decrypt_session(row.encrypted_session), False, row.status
+
     async def update_state(
         self,
         session: AcceptedSession,
@@ -212,6 +272,76 @@ class SqlCallSessionStore:
                 .values(post_call_enqueued_at=datetime.now(UTC), updated_at=datetime.now(UTC))
             )
 
+    async def flag_stale_outbound_starts(self, older_than: timedelta, limit: int = 100) -> int:
+        """Mark uncertain provider submissions for operator reconciliation, never retry them."""
+        if older_than.total_seconds() <= 0 or limit < 1:
+            raise ValueError("A positive age and batch limit are required")
+        cutoff = datetime.now(UTC) - older_than
+        async with self._sessions.begin() as db:
+            rows = await db.scalars(
+                select(CallSessionRow)
+                .where(
+                    CallSessionRow.status == "starting",
+                    CallSessionRow.updated_at <= cutoff,
+                )
+                .order_by(CallSessionRow.updated_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            stale = list(rows)
+            for row in stale:
+                row.status = "reconciliation_required"
+                row.end_reason = "provider_start_outcome_ambiguous"
+                row.updated_at = datetime.now(UTC)
+            return len(stale)
+
+    async def resolve_outbound_start(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        confirmed_started: bool,
+        provider_call_id: str | None = None,
+    ) -> str:
+        """Record an operator-confirmed provider outcome without ever redialing."""
+        if confirmed_started and (not provider_call_id or len(provider_call_id) > 256):
+            raise ValueError("A valid provider call ID is required for a started call")
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as db:
+            row = await db.scalar(
+                select(CallSessionRow)
+                .where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise LookupError("Call session not found")
+            if not confirmed_started and row.status == "failed" and row.end_reason == "provider_confirmed_not_started":
+                # Lets an operator retry the idempotent billing release after an
+                # infrastructure interruption without changing the call decision.
+                return "confirmed_not_started"
+            if row.status != "reconciliation_required":
+                raise ValueError("Call is not awaiting provider-start reconciliation")
+            if confirmed_started:
+                session = self._decrypt_session(row.encrypted_session or "")
+                session.provider_call_id = provider_call_id
+                row.provider_call_id = provider_call_id
+                row.encrypted_session = self._encrypt_session(session)
+                row.status = "initiated"
+                row.end_reason = "provider_confirmed_started"
+                row.updated_at = now
+                return "confirmed_started"
+            row.status = "failed"
+            row.end_reason = "provider_confirmed_not_started"
+            row.ended_at = now
+            row.encrypted_session = None
+            row.encrypted_transcript = None
+            row.transcript_characters = 0
+            row.updated_at = now
+            return "confirmed_not_started"
+
     async def pending_post_call(self, limit: int = 100) -> list[CompletedCall]:
         async with self._sessions() as db:
             rows = await db.scalars(
@@ -286,6 +416,21 @@ class SqlCallSessionStore:
                 "transcript_persistence_failed": row.transcript_persistence_failed,
                 "post_call_enqueued": row.post_call_enqueued_at is not None,
             }
+
+    async def get_recording_uri(self, tenant_id: str, session_id: str) -> str | None:
+        """Return a recording reference only for a call owned by this tenant."""
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+            )
+            if row is None or not row.encrypted_session:
+                return None
+            session = self._decrypt_session(row.encrypted_session)
+            recording_uri = session.metadata.get("recording_uri")
+            return recording_uri if isinstance(recording_uri, str) else None
 
     async def purge_expired(self, tenant_id: str, cutoff: datetime, batch_size: int) -> int:
         """Purge transcript/context after terminal processing; keep idempotency tombstones."""

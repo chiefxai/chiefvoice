@@ -13,6 +13,7 @@ from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.queue import SqlPostCallQueue
 from chiefvoice.billing import BillingMode
 from chiefvoice.billing.store import SqlBillingDirectory
+from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
 from chiefvoice.sessions import Direction
 
 
@@ -25,6 +26,7 @@ async def test_postgres_tenant_scoping_billing_and_post_call_outbox():
     account_store = SqlAccountStore(database_url)
     billing = SqlBillingDirectory(database_url)
     queue = SqlPostCallQueue(database_url, Fernet.generate_key().decode("ascii"))
+    vobiz_nonces = SqlVobizCallbackNonceStore(database_url)
     tenant_id = f"integration-{uuid4()}"
     other_tenant_id = f"integration-{uuid4()}"
     session_id = str(uuid4())
@@ -32,6 +34,10 @@ async def test_postgres_tenant_scoping_billing_and_post_call_outbox():
         await account_store.initialize()
         await billing.initialize()
         await queue.initialize()
+        await vobiz_nonces.initialize()
+        assert await vobiz_nonces.consume(tenant_id, "unique-provider-nonce")
+        assert not await vobiz_nonces.consume(tenant_id, "unique-provider-nonce")
+        assert await vobiz_nonces.consume(other_tenant_id, "unique-provider-nonce")
 
         assert await account_store.create(
             new_tenant_account(tenant_id, "Integration tenant", BillingMode.PREPAID, "ci")
@@ -82,5 +88,6 @@ async def test_postgres_tenant_scoping_billing_and_post_call_outbox():
         assert await queue.get_status(other_tenant_id, call.session_id) is None
     finally:
         await queue.close()
+        await vobiz_nonces.close()
         await billing.close()
         await account_store.close()
