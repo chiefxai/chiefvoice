@@ -33,7 +33,7 @@ def _read_secret(secret_arn: str) -> str:
     return value
 
 
-async def _process(event: Mapping[str, object]) -> dict[str, str]:
+async def _process(event: Mapping[str, object]) -> dict[str, object]:
     job_id = event.get("job_id")
     if event.get("schema_version") != 1 or not isinstance(job_id, str) or not job_id:
         raise ValueError("Unsupported or malformed post-call job event")
@@ -92,7 +92,24 @@ async def _process(event: Mapping[str, object]) -> dict[str, str]:
         await queue.close()
 
 
-def handler(event: Mapping[str, object], context: object) -> dict[str, str]:
-    """Synchronous AWS Lambda runtime entrypoint; a duplicate event is harmless."""
+def handler(event: Mapping[str, object], context: object) -> dict[str, object]:
+    """Process a direct event or SQS batch; SQS retries failed records and DLQs poison jobs."""
     del context
+    records = event.get("Records")
+    if isinstance(records, list):
+        failed: list[dict[str, str]] = []
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            message_id = record.get("messageId")
+            body = record.get("body")
+            try:
+                if not isinstance(body, str):
+                    raise ValueError("Malformed SQS body")
+                payload = __import__("json").loads(body)
+                asyncio.run(_process(payload))
+            except Exception:
+                if isinstance(message_id, str):
+                    failed.append({"itemIdentifier": message_id})
+        return {"batchItemFailures": failed}
     return asyncio.run(_process(event))

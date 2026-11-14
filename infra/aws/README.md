@@ -1,23 +1,17 @@
-# AWS infrastructure root
+# AWS VM deployment (primary)
 
-This root provisions a public HTTPS ALB forwarding to private ECS/Fargate tasks, private RDS PostgreSQL with encryption and automated backups, an encrypted private S3 bucket, Secrets Manager values, and an image-based post-call Lambda. API and worker access to PostgreSQL is limited by security-group references. ECS tasks use task roles for object storage and Lambda invocation; secrets are injected through ECS or fetched by the Lambda role at runtime.
+This root runs the API and PostgreSQL together on one EC2 VM. Post-call jobs are queued in SQS and processed by an image-based Lambda. Recordings and backups use a private S3 bucket. PostgreSQL data lives on the VM's encrypted EBS root volume; there is no RDS instance in this design.
 
-Use an existing VPC with at least two public and two private subnets in separate availability zones. Private subnet egress must reach ECR, CloudWatch, Secrets Manager, and Vertex AI. Use a VPC endpoint/NAT design appropriate for your account and data policy. Provide an ACM certificate in the ALB region. Push both application images before applying. Build the Lambda image for `linux/arm64` to match the configured Lambda architecture.
+Provide an Ubuntu 24.04 AMI ID, prebuilt API and Lambda images, a globally unique bucket name, and an admin-only SSH CIDR. The VM security group exposes HTTP/HTTPS and SSH only from that CIDR. A NAT gateway gives the private Lambda subnet access to Vertex and external APIs; it has ongoing hourly and data charges. PostgreSQL port 5432 is allowed only from the Lambda security group.
 
-Terraform creates the database password, encryption keys, and Vobiz secrets and writes them to Secrets Manager. Its state therefore contains secrets. Configure a remote encrypted and locked backend before applying. The generated Google service-account credential is expected to be supplied separately through `vertex_credentials_secret_arn`; never place its content in a `.tfvars` file.
+The VM bootstrap starts PostgreSQL and the API as Docker Compose services. The database volume persists on EBS, but this starter root does not yet configure automated PostgreSQL backups or TLS termination. Add a backup schedule and HTTPS reverse proxy/certificate before production use. Terraform state includes generated database credentials and bootstrap content, so use encrypted, access-restricted remote state.
 
-The API service starts with `api_desired_count = 0` so it cannot boot against an unmigrated database. After the first apply, run the one-off migration task with the generated task definition in the existing private subnets and the API security group, wait for exit code 0, then apply again with `api_desired_count = 2` (or your chosen capacity). For example:
+Set `POST_CALL_EXECUTION_BACKEND=sqs` and `POST_CALL_SQS_QUEUE_URL` in the API environment. Lambda receives one SQS message at a time; failed records are retried and eventually sent to the dead-letter queue. The Lambda container must parse SQS `Records` events and have access to the same database and post-call encryption key.
 
 ```sh
-aws ecs run-task \
-  --cluster "$(terraform output -raw ecs_cluster_name)" \
-  --task-definition "$(terraform output -raw migration_task_definition_arn)" \
-  --launch-type FARGATE \
-  --network-configuration 'awsvpcConfiguration={subnets=[subnet-private-a,subnet-private-b],securityGroups=['"$(terraform output -raw api_security_group_id)"'],assignPublicIp=DISABLED}'
+terraform init -backend-config=backend.hcl
+terraform plan -var-file=terraform.tfvars
+terraform apply -var-file=terraform.tfvars
 ```
 
-Wait for the returned task ARN with `aws ecs wait tasks-stopped`, then inspect its container `exitCode` using `aws ecs describe-tasks`. Apply again with the API count only after exit code 0. Repeat the migration task before each API rollout that changes the schema. Keep the same order as the GCP Cloud Build release: migrate successfully, then roll out API workers.
-
-The template caps Lambda concurrency to protect database connections. Set the cap against RDS `max_connections`, ECS task count, and the queue dispatch/recovery behavior. The API image requires outbound access to Google Vertex and tenant project provisioning APIs. Grant the GCP identity in `gcp_runtime_service_account` the required organization/folder, billing, Service Usage, IAM, and budget roles outside AWS.
-
-The target group health check uses `/readyz`. Make sure the OIDC provider values and Vobiz callback URL are configured before accepting customer traffic. Schema migrations are still a deployment step; run `alembic upgrade head` once against the new database before starting the API and Lambda worker.
+`../aws-managed` retains the earlier ECS/Fargate plus RDS layout as a secondary reference.

@@ -1,0 +1,39 @@
+#!/bin/bash
+set -euo pipefail
+apt-get update
+apt-get install -y docker.io
+systemctl enable --now docker
+mkdir -p /opt/chiefvoice
+cat >/opt/chiefvoice/compose.yaml <<'EOF'
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chiefvoice
+      POSTGRES_USER: chiefvoice
+      POSTGRES_PASSWORD: ${database_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  api:
+    image: ${api_image_uri}
+    restart: unless-stopped
+    depends_on: [postgres]
+    ports: ["80:8080"]
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://chiefvoice:${database_password}@postgres:5432/chiefvoice
+      OBJECT_STORAGE_BUCKET: ${object_bucket}
+      OBJECT_STORAGE_REGION: auto
+      OBJECT_STORAGE_ENDPOINT_URL: https://storage.googleapis.com
+      OBJECT_STORAGE_ADDRESSING_STYLE: path
+      OBJECT_STORAGE_ACCESS_KEY_ID: ${object_access_id}
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: ${object_secret}
+      POST_CALL_EXECUTION_BACKEND: gcp_cloud_tasks
+      POST_CALL_CLOUD_TASKS_QUEUE: ${tasks_queue}
+      POST_CALL_GCP_FUNCTION_URL: ${function_url}
+      GCP_CLOUD_TASKS_SERVICE_ACCOUNT: ${function_service_account}
+volumes:
+  postgres_data:
+EOF
+docker compose -f /opt/chiefvoice/compose.yaml up -d

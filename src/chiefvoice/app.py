@@ -5,6 +5,7 @@ from datetime import timedelta
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextlib import suppress
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -25,6 +26,8 @@ from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
 from chiefvoice.agents.post_call.lambda_dispatch import LambdaAsyncInvoker
 from chiefvoice.agents.post_call.gcp_function_dispatch import GoogleCloudFunctionInvoker
+from chiefvoice.agents.post_call.sqs_dispatch import SqsPostCallInvoker
+from chiefvoice.agents.post_call.cloud_tasks_dispatch import CloudTasksPostCallInvoker
 from chiefvoice.agents.post_call.fallback_spool import S3PostCallFallbackSpool
 from chiefvoice.agents.post_call.recovery import run_spool_reconciler
 from chiefvoice.agents.post_call.replay import SqlPostCallReplayService
@@ -250,11 +253,11 @@ def create_app(
                 credentials_path=settings.vertex_credentials_path,
             )
     application.state.post_call_agent = post_call_agent
-    if settings.post_call_execution_backend not in {"in_process", "lambda", "gcp_function"}:
+    if settings.post_call_execution_backend not in {"in_process", "lambda", "gcp_function", "sqs", "gcp_cloud_tasks"}:
         raise ValueError(
-            "POST_CALL_EXECUTION_BACKEND must be 'in_process', 'lambda', or 'gcp_function'"
+            "POST_CALL_EXECUTION_BACKEND must be in_process, lambda, gcp_function, sqs, or gcp_cloud_tasks"
         )
-    post_call_async_invoker = None
+    post_call_async_invoker: Any = None
     if settings.post_call_execution_backend == "lambda":
         if not settings.post_call_lambda_function_name:
             raise ValueError("POST_CALL_LAMBDA_FUNCTION_NAME is required for Lambda execution")
@@ -289,6 +292,20 @@ def create_app(
                 "isolation or project/location, DATABASE_URL, and POST_CALL_ENCRYPTION_KEY"
             )
         post_call_async_invoker = GoogleCloudFunctionInvoker(settings.post_call_gcp_function_url)
+    elif settings.post_call_execution_backend == "sqs":
+        if not settings.post_call_sqs_queue_url:
+            raise ValueError("POST_CALL_SQS_QUEUE_URL is required for the SQS backend")
+        post_call_async_invoker = SqsPostCallInvoker(settings.post_call_sqs_queue_url)
+    elif settings.post_call_execution_backend == "gcp_cloud_tasks":
+        if not settings.post_call_gcp_function_url or not settings.post_call_cloud_tasks_queue:
+            raise ValueError("POST_CALL_GCP_FUNCTION_URL and POST_CALL_CLOUD_TASKS_QUEUE are required")
+        if not settings.gcp_cloud_tasks_service_account:
+            raise ValueError("GCP_CLOUD_TASKS_SERVICE_ACCOUNT is required")
+        post_call_async_invoker = CloudTasksPostCallInvoker(
+            settings.post_call_cloud_tasks_queue,
+            settings.post_call_gcp_function_url,
+            settings.gcp_cloud_tasks_service_account,
+        )
     application.state.post_call_async_invoker = post_call_async_invoker
     application.state.vertex_project_directory = vertex_project_directory
     application.state.vertex_project_provisioner = vertex_project_provisioner
@@ -297,7 +314,7 @@ def create_app(
         post_call_dispatcher is None
         and (
             post_call_agent is not None
-            or settings.post_call_execution_backend in {"lambda", "gcp_function"}
+            or settings.post_call_execution_backend in {"lambda", "gcp_function", "sqs", "gcp_cloud_tasks"}
         )
         and settings.database_url
         and settings.post_call_encryption_key

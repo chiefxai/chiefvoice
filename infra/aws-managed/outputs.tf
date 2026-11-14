@@ -1,0 +1,9 @@
+output "api_url" { value = "https://${aws_lb.api.dns_name}" }
+output "database_address" { value = aws_db_instance.postgres.address }
+output "database_url_secret_arn" { value = aws_secretsmanager_secret.database_url.arn }
+output "object_storage_bucket" { value = aws_s3_bucket.objects.bucket }
+output "post_call_lambda_name" { value = aws_lambda_function.post_call.function_name }
+output "post_call_lambda_arn" { value = aws_lambda_function.post_call.arn }
+output "ecs_cluster_name" { value = aws_ecs_cluster.api.name }
+output "api_security_group_id" { value = aws_security_group.api.id }
+output "migration_task_definition_arn" { value = aws_ecs_task_definition.migrations.arn }

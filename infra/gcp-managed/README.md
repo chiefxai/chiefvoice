@@ -1,0 +1,13 @@
+# GCP infrastructure root
+
+This root provisions the hosting-project resources consumed by `cloudbuild.yaml`. It creates PostgreSQL 16 with regional backups/PITR, Artifact Registry, a private uniform-access Cloud Storage bucket, application/migration/post-call identities, secrets, and required IAM. Cloud Build still owns service releases and migrations.
+
+Before applying, set up an encrypted remote Terraform backend and authenticate with Application Default Credentials. Provide a unique GCS bucket name. The database password and generated encryption/HMAC secrets enter Terraform state; protect state accordingly. The generated secret versions are exposed by Secret Manager, not printed as Terraform outputs.
+
+After `terraform apply`, use the `cloud_build_substitutions` output to configure your Cloud Build trigger. Set the post-call execution backend to `gcp_function` to enable the function deployment stage. Grant the Cloud Build trigger identity permission to deploy Cloud Run/Functions, use the three service accounts, and read the source repository.
+
+The API service account needs project creation and billing permissions for per-tenant Vertex projects. This root grants `roles/resourcemanager.projectCreator` on the selected parent and `roles/billing.user` plus `roles/billing.costsManager` on the configured billing account; the applying identity must already be authorized to grant those roles. The root enables the Cloud Billing Budgets API on the quota project and grants `roles/serviceusage.serviceUsageConsumer` there. A newly created project is owned by the creator identity, which enables Vertex AI and grants runtime access. Cloud Build deployment permissions and the human/apply identity's organization/billing authority remain operator-managed.
+
+The bucket's S3 interoperability endpoint is `https://storage.googleapis.com`; Terraform creates an HMAC key for the API service account and puts its credentials in Secret Manager. Use signing region `auto` with boto3 as in Google's [official S3 SDK example](https://cloud.google.com/storage/docs/samples/storage-s3-sdk-list-objects). Keep the HMAC secret protected and rotate it by creating a replacement key and secret version before disabling the old key.
+
+Cloud SQL is configured with encrypted connections, no authorized network ranges, and the Cloud SQL connector attachment used by Cloud Run. The generated database URL uses the `/cloudsql/<connection-name>` socket format. Terraform also enables deletion protection; removing the database requires a separate, deliberate change.

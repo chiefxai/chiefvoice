@@ -1,2 +1,2 @@
-bucket = "replace-with-private-versioned-terraform-state-bucket"
-prefix = "chiefvoice/production"
+bucket = "replace-with-terraform-state-bucket"
+prefix = "chiefvoice/prod"

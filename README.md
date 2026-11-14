@@ -2,7 +2,7 @@
 
 Provider-neutral real-time voice agent foundation using Pipecat.
 
-Provider deployment templates live in [`infra/`](infra/README.md). The GCP root provisions the infrastructure consumed by Cloud Build; the AWS root provisions ECS/Fargate, RDS, S3, and the post-call Lambda. Infrastructure templates are not a substitute for staging validation and require operator review before apply.
+Provider deployment templates live in [`infra/`](infra/README.md). The primary AWS/GCP roots use a single VM for the API and PostgreSQL, provider-native post-call queues and functions, and S3-compatible object storage. Earlier managed-service layouts remain in `infra/aws-managed` and `infra/gcp-managed` as secondary references.
 
 ## Start locally
 

@@ -1,72 +1,40 @@
-variable "aws_region" { type = string
-  default = "us-east-1" }
-variable "vpc_id" { type = string }
-variable "public_subnet_ids" { type = list(string) }
-variable "private_subnet_ids" { type = list(string) }
-variable "certificate_arn" { type = string
-  description = "ACM certificate for the HTTPS load balancer." }
-variable "api_image_uri" { type = string
-  description = "API container image in ECR or another supported registry." }
-variable "post_call_lambda_image_uri" { type = string
-  description = "Post-call Lambda container image URI." }
-variable "oidc_issuer" { type = string }
-variable "oidc_audience" { type = string }
-variable "oidc_jwks_url" { type = string }
-variable "vobiz_public_url" {
+variable "aws_region" {
+  type    = string
+  default = "us-east-1"
+}
+variable "vm_ami_id" {
   type        = string
-  description = "HTTPS public base URL used to generate Vobiz callbacks, including the configured DNS name."
+  description = "Ubuntu 24.04 LTS AMI in the selected region."
 }
-variable "vertex_project_id" { type = string }
-variable "vertex_location" { type = string
-  default = "us-central1" }
-variable "gcp_project_parent" { type = string }
-variable "gcp_billing_account_id" { type = string }
-variable "gcp_runtime_service_account" { type = string }
-variable "gcp_budget_api_project_id" { type = string }
-variable "gcp_vertex_monthly_spend_cap" { type = string
-  default = "100" }
-variable "vertex_credentials_secret_arn" {
+variable "vm_instance_type" { type = string
+  default = "t3.large"
+}
+variable "vm_disk_gb" { type = number
+  default = 100
+}
+variable "ssh_allowed_cidr" {
   type        = string
-  default     = ""
-  description = "Optional Secrets Manager ARN containing the Google workload credential JSON. Prefer workload identity federation."
+  description = "Admin IP CIDR; use a narrow range."
 }
-variable "api_desired_count" { type = number
-  default = 0 }
-variable "api_max_capacity" { type = number
-  default = 10 }
-variable "lambda_reserved_concurrency" { type = number
-  default = 10 }
-variable "alarm_sns_topic_arn" {
+variable "ssh_key_name" { type = string
+  default = null
+}
+variable "api_image_uri" {
   type        = string
-  default     = ""
-  description = "Optional SNS topic for CloudWatch alarm notifications."
+  description = "Chiefvoice API image URI."
 }
-variable "database_instance_class" { type = string
-  default = "db.t4g.medium" }
-variable "database_multi_az" {
-  type        = bool
-  default     = true
-  description = "Use a standby database instance for availability; increases database cost."
-}
-variable "database_engine_version" {
+variable "post_call_lambda_image_uri" {
   type        = string
-  default     = null
-  description = "Optional pinned PostgreSQL minor version. Null uses the AWS account's current default."
+  description = "ARM64 Lambda image URI."
 }
-variable "database_storage_gb" { type = number
-  default = 50 }
-variable "database_name" { type = string
-  default = "chiefvoice" }
-variable "database_username" { type = string
-  default = "chiefvoice" }
 variable "object_storage_bucket_name" { type = string }
-variable "recordings_enabled" { type = bool
-  default = false }
-variable "retention_policies_json" { type = string
-  default = "[]" }
-variable "backup_policies_json" { type = string
-  default = "[]" }
+variable "database_name" { type = string
+  default = "chiefvoice"
+}
+variable "database_username" { type = string
+  default = "chiefvoice"
+}
 variable "tags" {
-  type = map(string)
+  type    = map(string)
   default = { Application = "chiefvoice", ManagedBy = "terraform" }
 }

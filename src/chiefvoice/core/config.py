@@ -65,6 +65,7 @@ class Settings:
     gcp_billing_account_id: str | None = os.getenv("GCP_BILLING_ACCOUNT_ID") or None
     gcp_runtime_service_account: str | None = os.getenv("GCP_RUNTIME_SERVICE_ACCOUNT") or None
     gcp_post_call_service_account: str | None = os.getenv("GCP_POST_CALL_SERVICE_ACCOUNT") or None
+    gcp_cloud_tasks_service_account: str | None = os.getenv("GCP_CLOUD_TASKS_SERVICE_ACCOUNT") or None
     gcp_budget_api_project_id: str | None = os.getenv("GCP_BUDGET_API_PROJECT_ID") or None
     gcp_vertex_monthly_spend_cap: str | None = os.getenv("GCP_VERTEX_MONTHLY_SPEND_CAP") or None
     post_call_agent_provider: str = os.getenv("POST_CALL_AGENT_PROVIDER", "langchain_vertex").strip().lower()
@@ -73,7 +74,9 @@ class Settings:
     post_call_execution_backend: str = os.getenv("POST_CALL_EXECUTION_BACKEND", "in_process").strip().lower()
     post_call_lambda_function_name: str | None = os.getenv("POST_CALL_LAMBDA_FUNCTION_NAME") or None
     post_call_lambda_region: str | None = os.getenv("POST_CALL_LAMBDA_REGION") or None
+    post_call_sqs_queue_url: str | None = os.getenv("POST_CALL_SQS_QUEUE_URL") or None
     post_call_gcp_function_url: str | None = os.getenv("POST_CALL_GCP_FUNCTION_URL") or None
+    post_call_cloud_tasks_queue: str | None = os.getenv("POST_CALL_CLOUD_TASKS_QUEUE") or None
     post_call_dispatch_interval_seconds: float = float(os.getenv("POST_CALL_DISPATCH_INTERVAL_SECONDS", "1"))
     post_call_redispatch_after_seconds: int = int(os.getenv("POST_CALL_REDISPATCH_AFTER_SECONDS", "120"))
     vobiz_public_url: str | None = os.getenv("VOBIZ_PUBLIC_URL") or None

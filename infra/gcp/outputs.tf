@@ -1,58 +1,7 @@
-output "database_connection_name" {
-  value = google_sql_database_instance.postgres.connection_name
-}
-
-output "database_secret_id" {
-  value = google_secret_manager_secret.runtime["chiefvoice-database-url"].secret_id
-}
-
-output "artifact_repository_url" {
-  value = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.app.repository_id}"
-}
-
-output "api_service_account" {
-  value = google_service_account.api.email
-}
-
-output "migration_service_account" {
-  value = google_service_account.migrations.email
-}
-
-output "post_call_function_service_account" {
-  value = google_service_account.post_call.email
-}
-
-output "object_storage_bucket" {
-  value = google_storage_bucket.objects.name
-}
-
-output "object_storage_endpoint" {
-  value = "https://storage.googleapis.com"
-}
-
-output "object_storage_signing_region" {
-  value = "auto"
-}
-
-output "cloud_build_substitutions" {
-  value = {
-    _OBJECT_STORAGE_BUCKET              = google_storage_bucket.objects.name
-    _CLOUD_SQL_INSTANCE                 = google_sql_database_instance.postgres.connection_name
-    _RUNTIME_SERVICE_ACCOUNT            = google_service_account.api.email
-    _MIGRATION_SERVICE_ACCOUNT          = google_service_account.migrations.email
-    _POST_CALL_FUNCTION_SERVICE_ACCOUNT = google_service_account.post_call.email
-    _DATABASE_URL_SECRET                = google_secret_manager_secret.runtime["chiefvoice-database-url"].secret_id
-    _CREDENTIALS_ENCRYPTION_KEY_SECRET  = google_secret_manager_secret.runtime["chiefvoice-credentials-encryption-key"].secret_id
-    _POST_CALL_ENCRYPTION_KEY_SECRET    = google_secret_manager_secret.runtime["chiefvoice-post-call-encryption-key"].secret_id
-    _VOBIZ_WEBHOOK_SECRET               = google_secret_manager_secret.runtime["chiefvoice-vobiz-webhook-secret"].secret_id
-    _VOBIZ_ROUTE_TOKEN_SECRET           = google_secret_manager_secret.runtime["chiefvoice-vobiz-route-token"].secret_id
-    _GCP_PROJECT_PARENT                 = var.tenant_project_parent
-    _GCP_BILLING_ACCOUNT_ID             = trimprefix(var.tenant_billing_account_id, "billingAccounts/")
-    _GCP_BUDGET_API_PROJECT_ID          = var.budget_api_project_id
-    _GCP_VERTEX_MONTHLY_SPEND_CAP       = var.vertex_monthly_spend_cap
-  }
-}
-
-output "secret_ids" {
-  value = { for key, secret in google_secret_manager_secret.runtime : key => secret.secret_id }
-}
+output "backend_external_ip" { value = google_compute_instance.backend.network_interface[0].access_config[0].nat_ip }
+output "post_call_tasks_queue" { value = google_cloud_tasks_queue.post_call.id }
+output "post_call_task_invoker_service_account" { value = google_service_account.task_invoker.email }
+output "functions_vpc_connector" { value = google_vpc_access_connector.functions.name }
+output "object_storage_bucket" { value = google_storage_bucket.objects.name }
+output "object_storage_endpoint" { value = "https://storage.googleapis.com" }
+output "object_storage_signing_region" { value = "auto" }
