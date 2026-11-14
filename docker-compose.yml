@@ -79,7 +79,7 @@ services:
     env_file: .env.docker
     environment:
       DATABASE_URL: postgresql+asyncpg://chiefvoice:local-only-password@db:5432/chiefvoice
-      OIDC_ISSUER: http://dev-oidc:9000
+      OIDC_ISSUER: http://localhost:9000
       OIDC_AUDIENCE: chiefvoice-local
       OIDC_JWKS_URL: http://dev-oidc:9000/jwks
       PLATFORM_ADMIN_SUBJECTS: local-dev-user
@@ -113,8 +113,11 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["python", "/app/scripts/dev_oidc.py"]
+    volumes:
+      - ./scripts/dev_oidc.py:/app/scripts/dev_oidc.py:ro
     environment:
       DEV_OIDC_PORT: "9000"
+      DEV_OIDC_ISSUER: http://localhost:9000
     ports:
       - "9000:9000"
     restart: unless-stopped
@@ -125,6 +128,8 @@ services:
       dockerfile: Dockerfile
     environment:
       VITE_API_PROXY_TARGET: http://api:8080
+      VITE_OIDC_AUTHORITY: http://localhost:9000
+      VITE_OIDC_CLIENT_ID: chiefvoice-console
     ports:
       - "5173:5173"
     depends_on:

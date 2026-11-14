@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import {
@@ -16,6 +16,8 @@ import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded'
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded'
 import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded'
+import LoginPage from './LoginPage'
+import { clearLoginCallbackFromUrl, currentUser, finishLogin, login, logout } from './auth'
 
 type Page = 'Numbers' | 'API'
 type RegisteredNumber = {
@@ -46,7 +48,7 @@ type IssuedApiKey = { key: string; api_key_record: PlatformApiKey }
 const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 const http = axios.create({ baseURL: API_BASE, timeout: 30000 })
 http.interceptors.request.use(config => {
-  const token = localStorage.getItem('chiefvoice.token')
+  const token = sessionStorage.getItem('chiefvoice.token')
   if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
@@ -66,13 +68,47 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const queryClient = useQueryClient()
   const [page, setPage] = useState<Page>('Numbers')
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [token, setToken] = useState(localStorage.getItem('chiefvoice.token') || '')
-  const [connectOpen, setConnectOpen] = useState(!localStorage.getItem('chiefvoice.token'))
+  const [token, setToken] = useState(sessionStorage.getItem('chiefvoice.token') || '')
+  const [authReady, setAuthReady] = useState(false)
+  const [signingIn, setSigningIn] = useState(false)
+  const [authError, setAuthError] = useState('')
   const [assignmentOpen, setAssignmentOpen] = useState(false)
   const [selectedNumber, setSelectedNumber] = useState('')
   const [oneTimeKey, setOneTimeKey] = useState<IssuedApiKey | null>(null)
   const [toast, setToast] = useState('')
   const connected = Boolean(token)
+
+  useEffect(() => {
+    let active = true
+    const initializeAuth = async () => {
+      const params = new URLSearchParams(window.location.search)
+      const isCallback = params.has('code') || params.has('error')
+      try {
+        const user = isCallback
+          ? await finishLogin()
+          : await currentUser()
+        if (isCallback) clearLoginCallbackFromUrl()
+        if (!user || user.expired || !user.access_token) {
+          sessionStorage.removeItem('chiefvoice.token')
+          if (active) setToken('')
+          return
+        }
+        sessionStorage.setItem('chiefvoice.token', user.access_token)
+        if (active) setToken(user.access_token)
+      } catch (error) {
+        if (isCallback) clearLoginCallbackFromUrl()
+        sessionStorage.removeItem('chiefvoice.token')
+        if (active) {
+          setToken('')
+          setAuthError(error instanceof Error ? error.message : 'OIDC sign-in failed. Please try again.')
+        }
+      } finally {
+        if (active) setAuthReady(true)
+      }
+    }
+    void initializeAuth()
+    return () => { active = false }
+  }, [])
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
   const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && page === 'API', retry: false })
   const issueMutation = useMutation({
@@ -97,20 +133,28 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const currentNumbers = numbersQuery.data || []
   const outboundNumbers = currentNumbers.filter(number => number.outbound_enabled)
   const selected = outboundNumbers.find(number => `${number.provider}|${number.phone_number}` === selectedNumber)
-  const connect = () => {
-    if (!token.trim()) return
-    localStorage.setItem('chiefvoice.token', token.trim())
-    setToken(token.trim())
-    setConnectOpen(false)
-    void queryClient.invalidateQueries()
+  const connect = async () => {
+    setSigningIn(true)
+    setAuthError('')
+    try {
+      await login()
+    } catch (error) {
+      setSigningIn(false)
+      setAuthError(error instanceof Error ? error.message : 'Could not start OIDC sign-in.')
+    }
   }
-  const disconnect = () => {
-    localStorage.removeItem('chiefvoice.token')
+  const disconnect = async () => {
+    await logout()
+    sessionStorage.removeItem('chiefvoice.token')
     setToken('')
-    setConnectOpen(true)
+    setAuthError('')
     void queryClient.clear()
   }
   const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'API'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { setPage(item); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : <KeyRoundedIcon />}>{item}</Button>)}</div></>
+
+  if (!authReady || !connected) {
+    return <LoginPage loading={!authReady} signingIn={signingIn} error={authError} onSignIn={() => { void connect() }} />
+  }
 
   return <div className={`app-shell ${mode === 'dark' ? 'theme-dark' : ''}`}>
     <aside className="sidebar">{navigation}</aside>
@@ -119,27 +163,17 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       <header className="topbar">
         <Stack direction="row" alignItems="center" gap={1}><IconButton className="mobile-menu" onClick={() => setDrawerOpen(true)}><MenuRoundedIcon /></IconButton><div className="eyebrow">Platform console</div></Stack>
         <div className="auth-bar">
-          <Chip size="small" icon={connected ? <CheckCircleRoundedIcon /> : <ErrorOutlineRoundedIcon />} label={connected ? 'API connected' : 'Not connected'} color={connected ? 'success' : 'default'} variant="outlined" sx={{ fontSize: 11, height: 27 }} />
+          <Chip size="small" icon={connected ? <CheckCircleRoundedIcon /> : <ErrorOutlineRoundedIcon />} label={connected ? 'Signed in' : 'Not connected'} color={connected ? 'success' : 'default'} variant="outlined" sx={{ fontSize: 11, height: 27 }} />
           <Tooltip title={`Switch to ${mode === 'light' ? 'dark' : 'light'} theme`}><IconButton size="small" onClick={onToggleTheme} aria-label="Toggle color theme">{mode === 'light' ? <DarkModeRoundedIcon fontSize="small" /> : <LightModeRoundedIcon fontSize="small" />}</IconButton></Tooltip>
-          {connected ? <Button size="small" onClick={disconnect} color="inherit">Disconnect</Button> : <Button size="small" variant="contained" onClick={() => setConnectOpen(true)}>Connect API</Button>}
+          <Button size="small" onClick={() => { void disconnect() }} color="inherit">Sign out</Button>
           <Avatar sx={{ width: 31, height: 31, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar>
         </div>
       </header>
       <div className="content">
-        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => setConnectOpen(true)} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} />}
-        {page === 'API' && <ApiPage connected={connected} onConnect={() => setConnectOpen(true)} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumber(''); setAssignmentOpen(true) }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
+        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} />}
+        {page === 'API' && <ApiPage connected={connected} onConnect={() => { void connect() }} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumber(''); setAssignmentOpen(true) }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
       </div>
     </main>
-
-    <Dialog open={connectOpen} onClose={() => setConnectOpen(false)} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Connect as platform administrator</DialogTitle>
-      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        <Alert severity="info" sx={{ fontSize: 12 }}>Use an allowlisted OIDC token with <code>platform:customers:read</code> and <code>platform:customers:write</code>. This token is for platform administration; customer API keys will be limited to the phone number selected when they are created.</Alert>
-        <TextField label="OIDC access token" value={token} onChange={event => setToken(event.target.value)} placeholder="Paste platform admin bearer token" fullWidth multiline minRows={2} autoFocus />
-        <TextField label="API URL" value={API_BASE || 'Same origin'} disabled fullWidth size="small" />
-      </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setConnectOpen(false)}>Cancel</Button><Button variant="contained" onClick={connect} disabled={!token.trim()}>Connect</Button></DialogActions>
-    </Dialog>
 
     <Dialog open={assignmentOpen} onClose={() => setAssignmentOpen(false)} maxWidth="sm" fullWidth>
       <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Create API for a phone number</DialogTitle>
@@ -186,6 +220,6 @@ function ApiPage({ connected, onConnect, numbers, keys, loading, error, onCreate
   </>
 }
 
-function ConnectPrompt({ onConnect }: { onConnect: () => void }) { return <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>Connect to the platform API</b><div style={{ fontSize: 12, marginTop: 6 }}>Use an allowlisted platform administrator OIDC token.</div><Button sx={{ mt: 1.5 }} variant="contained" onClick={onConnect}>Connect API</Button></div> }
+function ConnectPrompt({ onConnect }: { onConnect: () => void }) { return <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>Sign in to manage the platform</b><div style={{ fontSize: 12, marginTop: 6 }}>Use your allowlisted platform administrator identity.</div><Button sx={{ mt: 1.5 }} variant="contained" onClick={onConnect}>Sign in with OIDC</Button></div> }
 function StatusChip({ enabled, label }: { enabled: boolean; label?: string }) { return <Chip size="small" label={label || (enabled ? 'Enabled' : 'Disabled')} color={enabled ? 'success' : 'default'} variant={enabled ? 'filled' : 'outlined'} sx={{ fontSize: 10, height: 22 }} /> }
 function PageIntro({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: React.ReactNode }) { return <div style={{ display: 'flex', alignItems: 'end', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}><div><div className="eyebrow">{eyebrow}</div><Typography className="page-title" variant="h4">{title}</Typography><div className="page-subtitle">{subtitle}</div></div>{action}</div> }

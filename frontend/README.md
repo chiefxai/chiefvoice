@@ -11,7 +11,7 @@ cp .env.docker.example .env.docker
 docker compose up --build
 ```
 
-Open <http://localhost:5173>. For local platform-admin access, open <http://localhost:9000/token>, copy the `access_token` value, and use **Connect API** in the console. This mock identity and token are for local development only; the issuer creates a fresh signing key whenever its container restarts, so fetch a new token after a restart. Live calls need real telephony and voice model credentials, which this local stack does not configure.
+Open <http://localhost:5173> and select **Sign in with OIDC**. The local identity provider displays its own sign-in page; select **Continue as local admin** to enter the console. The browser uses the authorization-code flow with PKCE, and the access token is kept in session storage. The local identity provider and its administrator are for development only. Live calls need real telephony and voice model credentials, which this local stack does not configure.
 
 Local Compose stores encrypted recordings in MinIO. Open <http://localhost:9003> for the MinIO console (`chiefvoice-local` / `chiefvoice-local-storage-password`); the S3 API is at <http://localhost:9002>.
 
@@ -25,9 +25,9 @@ npm run dev
 
 Open <http://localhost:5173>. Vite proxies `/v1`, `/healthz`, and `/readyz` to the API at `http://127.0.0.1:8000`.
 
-Select **Connect API** and paste an OIDC access token (recommended for setup) or a tenant API key. The token is stored in this browser's local storage. The frontend does not issue tokens or provision identity-provider users. The token needs endpoint scopes such as `accounts:read`, `agents:read`, `calls:read`, `integrations:read`, and `billing:read`; write actions need their corresponding `:write` scopes. Configuring a billing plan specifically requires a trusted OIDC token with `billing:admin`.
+The console signs administrators in through OIDC. For a real identity provider, set `VITE_OIDC_AUTHORITY` to its issuer URL, `VITE_OIDC_CLIENT_ID` to a public SPA client registered for the console origin, and optionally `VITE_OIDC_REDIRECT_URI` and `VITE_OIDC_SCOPE`. Register the redirect URI (by default, `<console-origin>/`) as an allowed callback URL. The provider must issue the API access token with the configured backend audience, a `tenant_id` claim, and `platform:customers:read` / `platform:customers:write` scopes. Configure the backend's `OIDC_ISSUER`, `OIDC_AUDIENCE`, and `OIDC_JWKS_URL` for the same provider. The frontend never handles a client secret.
 
-The console requires an OIDC principal whose subject is in `PLATFORM_ADMIN_SUBJECTS`, with `platform:customers:read` and `platform:customers:write` scopes. The Numbers view lists registered customer numbers across providers. The API view issues one-time keys assigned to an outbound-enabled number, and can revoke them. Each issued key is limited to calls and call results for its assigned number. In local Compose, the mock token is a development-only platform admin for `local-demo-tenant`.
+The console requires an OIDC principal whose subject is in `PLATFORM_ADMIN_SUBJECTS`, with `platform:customers:read` and `platform:customers:write` scopes. The Numbers view lists registered customer numbers across providers. The API view issues one-time keys assigned to an outbound-enabled number, and can revoke them. Each issued key is limited to calls and call results for its assigned number. In local Compose, the mock identity signs in as a development-only platform admin for `local-demo-tenant`.
 
 ## Production API URL
 
