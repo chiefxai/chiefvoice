@@ -6,6 +6,9 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+
 from chiefvoice.observability.setup import data_lifecycle_run
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,56 @@ class BackupProvider(Protocol):
 
 class BackupPolicyDirectory(Protocol):
     async def list_policies(self) -> list[BackupPolicy]: ...
+
+
+class PostgresBackupRunLock:
+    """Use a PostgreSQL advisory lock so API replicas do not duplicate backups."""
+
+    _LOCK_ID = 4_848_285_570_314_083_666
+
+    def __init__(self, database_url: str):
+        self._engine = create_async_engine(database_url, pool_pre_ping=True)
+        self._connection: AsyncConnection | None = None
+
+    async def try_acquire(self) -> bool:
+        if self._connection is not None:
+            raise RuntimeError("Backup run lock is already held by this worker")
+        connection = await self._engine.connect()
+        try:
+            result = await connection.execute(
+                text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": self._LOCK_ID}
+            )
+            if not result.scalar_one():
+                await connection.close()
+                return False
+            await connection.commit()
+            self._connection = connection
+            return True
+        except BaseException:
+            await connection.invalidate()
+            await connection.close()
+            raise
+
+    async def release(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is None:
+            return
+        try:
+            result = await connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": self._LOCK_ID}
+            )
+            if not result.scalar_one():
+                raise RuntimeError("Backup advisory lock was not held by this connection")
+            await connection.commit()
+        except BaseException:
+            await connection.invalidate()
+            raise
+        finally:
+            await connection.close()
+
+    async def close(self) -> None:
+        await self.release()
+        await self._engine.dispose()
 
 
 class StaticBackupPolicyDirectory:
@@ -164,12 +217,22 @@ class BackupRunner:
         return artifacts
 
 
-async def run_backups_periodically(runner: BackupRunner, interval_seconds: int) -> None:
+async def run_backups_periodically(
+    runner: BackupRunner,
+    interval_seconds: int,
+    execution_lock: PostgresBackupRunLock | None = None,
+) -> None:
     """Run backup/verification/retention passes until the task is cancelled."""
     if interval_seconds < 60:
         raise ValueError("Backup runner interval must be at least 60 seconds")
     while True:
+        acquired = False
         try:
+            if execution_lock is not None:
+                acquired = await execution_lock.try_acquire()
+                if not acquired:
+                    await asyncio.sleep(interval_seconds)
+                    continue
             created = await runner.run_once(datetime.now(UTC))
             logger.info("backup_run_completed", extra={"created_count": len(created)})
             data_lifecycle_run("backup", "succeeded")
@@ -178,4 +241,11 @@ async def run_backups_periodically(runner: BackupRunner, interval_seconds: int) 
         except Exception as exc:
             data_lifecycle_run("backup", "failed")
             logger.error("backup_run_failed", extra={"error_type": type(exc).__name__})
+        finally:
+            if acquired and execution_lock is not None:
+                try:
+                    await execution_lock.release()
+                except Exception as exc:
+                    data_lifecycle_run("backup", "failed")
+                    logger.error("backup_worker_lock_release_failed", extra={"error_type": type(exc).__name__})
         await asyncio.sleep(interval_seconds)

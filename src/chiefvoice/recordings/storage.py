@@ -17,7 +17,9 @@ from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 
 from chiefvoice.core.config import settings
 from chiefvoice.data_lifecycle.retention import RetentionClass
+from chiefvoice.observability.setup import recording_storage_event
 from chiefvoice.sessions import AcceptedSession
+from chiefvoice.storage.s3 import create_s3_compatible_client, object_key
 
 logger = logging.getLogger(__name__)
 
@@ -250,19 +252,246 @@ class EncryptedLocalRecordingStore:
         return metadata if isinstance(metadata, dict) else None
 
 
+class S3RecordingStore:
+    """Client-side encrypted recording objects in an S3-compatible bucket."""
+
+    data_class = RetentionClass.RECORDING
+
+    def __init__(
+        self,
+        bucket: str,
+        encryption_key: str,
+        *,
+        client=None,
+        prefix: str = "recordings",
+    ):
+        if not bucket:
+            raise ValueError("S3 recording bucket must be configured")
+        self.bucket = bucket
+        self.prefix = prefix.strip("/") or "recordings"
+        self._client = client or create_s3_compatible_client()
+        self._fernet = Fernet(encryption_key.encode("ascii"))
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._client.close)
+
+    async def save_wav(
+        self,
+        tenant_id: str,
+        session_id: str,
+        audio: bytes,
+        sample_rate: int,
+        channels: int,
+    ) -> str | None:
+        if not audio or not tenant_id:
+            return None
+        if sample_rate < 1 or channels < 1:
+            raise ValueError("Recording sample rate and channel count must be positive")
+        tenant_digest = _tenant_digest(tenant_id)
+        record_id = f"{_safe_record_id(session_id)}_{uuid4().hex}"
+        record_prefix = object_key(self.prefix, tenant_digest, record_id)
+        audio_key = f"{record_prefix}/audio.fernet"
+        metadata_key = f"{record_prefix}/metadata.fernet"
+        created_at = datetime.now(UTC)
+        metadata = {
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "created_at": created_at.isoformat(),
+            "legal_hold": False,
+        }
+        encrypted_audio = self._fernet.encrypt(_make_wav(audio, sample_rate, channels))
+        encrypted_metadata = self._fernet.encrypt(
+            json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+        )
+        try:
+            await asyncio.to_thread(
+                self._client.put_object,
+                Bucket=self.bucket,
+                Key=metadata_key,
+                Body=encrypted_metadata,
+                ContentType="application/octet-stream",
+            )
+            await asyncio.to_thread(
+                self._client.put_object,
+                Bucket=self.bucket,
+                Key=audio_key,
+                Body=encrypted_audio,
+                ContentType="application/octet-stream",
+            )
+        except Exception:
+            try:
+                await asyncio.to_thread(
+                    self._client.delete_objects,
+                    Bucket=self.bucket,
+                    Delete={"Objects": [{"Key": audio_key}, {"Key": metadata_key}], "Quiet": True},
+                )
+            except Exception:
+                logger.error("recording_partial_upload_cleanup_failed")
+            raise
+        return f"s3://{self.bucket}/{audio_key}"
+
+    async def check_storage(self) -> None:
+        await asyncio.to_thread(
+            self._client.list_objects_v2,
+            Bucket=self.bucket,
+            Prefix=object_key(self.prefix) + "/",
+            MaxKeys=1,
+        )
+
+    async def purge_expired(self, tenant_id: str, cutoff: datetime, batch_size: int) -> int:
+        if not tenant_id or cutoff.tzinfo is None or cutoff.utcoffset() is None:
+            raise ValueError("Tenant and timezone-aware cutoff are required")
+        if batch_size < 1:
+            raise ValueError("Purge batch size must be positive")
+        tenant_prefix = object_key(self.prefix, _tenant_digest(tenant_id)) + "/"
+        deleted = 0
+        inspected = 0
+        token = None
+        while inspected < batch_size:
+            options = {"Bucket": self.bucket, "Prefix": tenant_prefix, "MaxKeys": 1000}
+            if token:
+                options["ContinuationToken"] = token
+            response = await asyncio.to_thread(self._client.list_objects_v2, **options)
+            for item in response.get("Contents", []):
+                key = item.get("Key", "")
+                if not key.endswith("/metadata.fernet"):
+                    continue
+                inspected += 1
+                record_prefix = key[: -len("/metadata.fernet")]
+                metadata = await self._read_metadata(key)
+                if metadata is None or metadata.get("tenant_id") != tenant_id:
+                    continue
+                if metadata.get("legal_hold") is True:
+                    continue
+                try:
+                    created_at = datetime.fromisoformat(metadata["created_at"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if created_at.tzinfo is None or created_at > cutoff:
+                    continue
+                await self._delete_record_prefix(record_prefix)
+                deleted += 1
+                if inspected >= batch_size:
+                    break
+            if not response.get("IsTruncated") or not response.get("NextContinuationToken"):
+                break
+            token = response["NextContinuationToken"]
+        return deleted
+
+    async def set_legal_hold(self, tenant_id: str, recording_id: str, held: bool) -> bool:
+        record_prefix = self._record_prefix_for_id(tenant_id, recording_id)
+        if record_prefix is None:
+            return False
+        metadata_key = f"{record_prefix}/metadata.fernet"
+        metadata = await self._read_metadata(metadata_key)
+        if metadata is None or metadata.get("tenant_id") != tenant_id:
+            return False
+        metadata["legal_hold"] = held is True
+        encrypted = self._fernet.encrypt(
+            json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+        )
+        await asyncio.to_thread(
+            self._client.put_object,
+            Bucket=self.bucket,
+            Key=metadata_key,
+            Body=encrypted,
+            ContentType="application/octet-stream",
+        )
+        return True
+
+    async def delete_recording(self, tenant_id: str, recording_id: str) -> bool:
+        record_prefix = self._record_prefix_for_id(tenant_id, recording_id)
+        if record_prefix is None:
+            return False
+        metadata = await self._read_metadata(f"{record_prefix}/metadata.fernet")
+        if (
+            metadata is None
+            or metadata.get("tenant_id") != tenant_id
+            or metadata.get("legal_hold") is True
+        ):
+            return False
+        await self._delete_record_prefix(record_prefix)
+        return True
+
+    def _record_prefix_for_id(self, tenant_id: str, recording_id: str) -> str | None:
+        if not tenant_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", recording_id or ""):
+            return None
+        return object_key(self.prefix, _tenant_digest(tenant_id), recording_id)
+
+    async def _read_metadata(self, key: str) -> dict | None:
+        try:
+            response = await asyncio.to_thread(
+                self._client.get_object, Bucket=self.bucket, Key=key
+            )
+        except Exception as exc:
+            if _is_missing_object(exc):
+                return None
+            raise
+        body = response["Body"]
+        try:
+            encrypted = await asyncio.to_thread(body.read)
+            metadata = json.loads(self._fernet.decrypt(encrypted).decode("utf-8"))
+        except (KeyError, InvalidToken, UnicodeDecodeError, json.JSONDecodeError):
+            logger.error("recording_metadata_unreadable")
+            return None
+        finally:
+            await asyncio.to_thread(body.close)
+        return metadata if isinstance(metadata, dict) else None
+
+    async def _delete_record_prefix(self, prefix: str) -> None:
+        response = await asyncio.to_thread(
+            self._client.delete_objects,
+            Bucket=self.bucket,
+            Delete={
+                "Objects": [
+                    {"Key": f"{prefix}/audio.fernet"},
+                    {"Key": f"{prefix}/metadata.fernet"},
+                ],
+                "Quiet": True,
+            },
+        )
+        if response.get("Errors"):
+            raise RuntimeError("S3-compatible storage could not delete a recording object")
+
+
+def _is_missing_object(exc: Exception) -> bool:
+    response = getattr(exc, "response", {})
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    return error.get("Code") in {"404", "NoSuchKey", "NotFound"}
+
+
 def create_recording_store() -> RecordingStore | None:
-    """Build the configured store, allowing plaintext files only for local development."""
+    """Build the configured S3 or local recording store."""
     if not settings.recordings_enabled:
         return None
+    backend = settings.recordings_storage_backend
     if settings.recordings_encryption_key:
+        if backend == "s3":
+            if not settings.object_storage_bucket:
+                raise RuntimeError("OBJECT_STORAGE_BUCKET is required for S3 recordings")
+            return S3RecordingStore(
+                settings.object_storage_bucket,
+                settings.recordings_encryption_key,
+                prefix="recordings",
+            )
+        if backend != "local":
+            raise ValueError("RECORDINGS_STORAGE_BACKEND must be 'local' or 's3'")
+        if settings.app_env.lower() != "local":
+            raise RuntimeError("Local recording storage is allowed only in local development")
         return EncryptedLocalRecordingStore(
             settings.recordings_dir, settings.recordings_encryption_key
         )
-    if settings.app_env.lower() == "local" and settings.recordings_allow_unencrypted_local:
+    if (
+        backend == "local"
+        and settings.app_env.lower() == "local"
+        and settings.recordings_allow_unencrypted_local
+    ):
         logger.warning("recordings_using_unencrypted_development_storage")
         return LocalRecordingStore(settings.recordings_dir)
+    if backend not in {"local", "s3"}:
+        raise ValueError("RECORDINGS_STORAGE_BACKEND must be 'local' or 's3'")
     raise RuntimeError(
-        "RECORDINGS_ENCRYPTION_KEY is required when recordings are enabled outside local development"
+        "RECORDINGS_ENCRYPTION_KEY is required for S3 recordings and for non-local environments"
     )
 
 
@@ -283,10 +512,23 @@ def attach_recording(
                 extra={"session_id": session.session_id, "provider": session.provider},
             )
             return
-        path = await store.save_wav(
-            session.tenant_id, session.session_id, audio, sample_rate, channels
-        )
+        try:
+            path = await store.save_wav(
+                session.tenant_id, session.session_id, audio, sample_rate, channels
+            )
+        except Exception as exc:
+            recording_storage_event("failed")
+            logger.error(
+                "recording_storage_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": session.provider,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
         if path:
+            recording_storage_event("saved")
             logger.info(
                 "recording_saved",
                 extra={

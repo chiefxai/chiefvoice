@@ -6,6 +6,18 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Settings:
     app_env: str = os.getenv("APP_ENV", "local")
+    object_storage_endpoint_url: str | None = os.getenv("OBJECT_STORAGE_ENDPOINT_URL") or None
+    object_storage_region: str = os.getenv("OBJECT_STORAGE_REGION", "us-east-1")
+    object_storage_bucket: str | None = os.getenv("OBJECT_STORAGE_BUCKET") or None
+    object_storage_access_key_id: str | None = os.getenv("OBJECT_STORAGE_ACCESS_KEY_ID") or None
+    object_storage_secret_access_key: str | None = os.getenv("OBJECT_STORAGE_SECRET_ACCESS_KEY") or None
+    object_storage_session_token: str | None = os.getenv("OBJECT_STORAGE_SESSION_TOKEN") or None
+    object_storage_addressing_style: str = os.getenv("OBJECT_STORAGE_ADDRESSING_STYLE", "path")
+    object_storage_prefix: str = os.getenv("OBJECT_STORAGE_PREFIX", "chiefvoice").strip("/")
+    recordings_storage_backend: str = os.getenv(
+        "RECORDINGS_STORAGE_BACKEND",
+        "local" if os.getenv("APP_ENV", "local").lower() == "local" else "s3",
+    ).strip().lower()
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
     recordings_enabled: bool = os.getenv("RECORDINGS_ENABLED", "false").lower() == "true"
     recordings_dir: Path = Path(os.getenv("RECORDINGS_DIR", "./var/recordings"))
@@ -17,6 +29,10 @@ class Settings:
     retention_interval_seconds: int = int(os.getenv("RETENTION_INTERVAL_SECONDS", "3600"))
     retention_policies_json: str = os.getenv("RETENTION_POLICIES_JSON", "[]")
     backup_directory: Path = Path(os.getenv("BACKUP_DIRECTORY", "./var/backups"))
+    backup_storage_backend: str = os.getenv(
+        "BACKUP_STORAGE_BACKEND",
+        "local" if os.getenv("APP_ENV", "local").lower() == "local" else "s3",
+    ).strip().lower()
     backup_encryption_key: str | None = os.getenv("BACKUP_ENCRYPTION_KEY") or None
     backup_policies_json: str = os.getenv("BACKUP_POLICIES_JSON", "[]")
     backup_interval_seconds: int = int(os.getenv("BACKUP_INTERVAL_SECONDS", "3600"))

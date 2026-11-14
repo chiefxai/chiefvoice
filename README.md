@@ -111,15 +111,28 @@ Create the authenticated tenant account with `POST /v1/accounts` and the `accoun
 
 ## Audio recordings
 
-Recordings are disabled by default. Enable them with `RECORDINGS_ENABLED=true`; recording still requires the per-session subscription/consent decision (`recording_allowed=True`). With `RECORDINGS_ENCRYPTION_KEY`, the default pipeline uses encrypted tenant-isolated local storage. Plain WAV files are allowed only in local development when `RECORDINGS_ALLOW_UNENCRYPTED_LOCAL=true`. The storage interface can be replaced with private object storage for production; the included filesystem backend is not replicated or offsite.
+Recordings are disabled by default. Enable them with `RECORDINGS_ENABLED=true`; recording still requires the per-session subscription/consent decision (`recording_allowed=True`). Local development defaults to `RECORDINGS_STORAGE_BACKEND=local`; non-local environments default to S3-compatible storage. S3 recording objects and their metadata are client-side encrypted with `RECORDINGS_ENCRYPTION_KEY`, tenant-isolated under a hashed key prefix, and written without public ACLs. Plain WAV files are allowed only in local development when `RECORDINGS_ALLOW_UNENCRYPTED_LOCAL=true`.
 
-The local store writes valid WAV segments under `RECORDINGS_DIR` (default `./var/recordings`). Do not put recordings or raw provider payloads in logs.
+Set `OBJECT_STORAGE_BUCKET` for the bucket. For S3-compatible services, set `OBJECT_STORAGE_ENDPOINT_URL`; AWS S3 uses the default endpoint when it is blank. Set `OBJECT_STORAGE_REGION`, and either provide access key/secret settings or use the runtime's cloud credential chain. `OBJECT_STORAGE_ADDRESSING_STYLE=path` is the compatible default, and `OBJECT_STORAGE_PREFIX=chiefvoice` scopes this app's keys. Recordings use the `recordings/` prefix; backups use `backups/`. The bucket must be private, support list/get/put/delete for those prefixes, and require TLS outside local development. `RECORDINGS_DIR` remains the local-development path. Do not put recordings or raw provider payloads in logs.
+
+Example S3-compatible configuration:
+
+```dotenv
+OBJECT_STORAGE_ENDPOINT_URL=https://objects.example.com
+OBJECT_STORAGE_REGION=us-east-1
+OBJECT_STORAGE_BUCKET=chiefvoice-prod
+OBJECT_STORAGE_ACCESS_KEY_ID=...
+OBJECT_STORAGE_SECRET_ACCESS_KEY=...
+OBJECT_STORAGE_ADDRESSING_STYLE=path
+OBJECT_STORAGE_PREFIX=chiefvoice
+RECORDINGS_STORAGE_BACKEND=s3
+```
 
 Cross-cutting data lifecycle code lives in `src/chiefvoice/data_lifecycle/`. Explicit `RETENTION_POLICIES_JSON` settings start a bounded background purge worker for recordings and post-call transcript/result records. Empty policy lists disable deletion. Legal holds are honored for encrypted recordings; transcript retention skips active leased jobs. Policies are deployment configuration today, not yet tenant-editable UI/API, and supported data classes depend on wired storage targets.
 
-PostgreSQL backups can be enabled with `BACKUP_POLICIES_JSON`, `BACKUP_ENCRYPTION_KEY`, and a configured `DATABASE_URL`. The worker streams `pg_dump` into an authenticated encrypted local artifact, verifies its checksum and archive structure, and prunes expired files. `BACKUP_RESTORE_TARGETS_JSON` is an optional JSON list of exact DSNs permitted for restore; restoring to the source database is rejected. Backups are service-scoped because tenants share a database. Local backup files are not disaster recovery: production must use durable offsite storage, tightly controlled restore targets, and scheduled restore drills. No live backup or restore was run for this code change.
+PostgreSQL backups can be enabled with `BACKUP_POLICIES_JSON`, `BACKUP_ENCRYPTION_KEY`, and a configured `DATABASE_URL`. Non-local environments default to `BACKUP_STORAGE_BACKEND=s3`; local development defaults to `local`. S3 backups are AES-GCM encrypted before upload, metadata is authenticated, and verification downloads/decrypts the archive and checks its checksum and PostgreSQL archive structure. The local `BACKUP_DIRECTORY` is used only as encrypted staging for S3 uploads and restore verification. The runtime image must include compatible `pg_dump` and `pg_restore` binaries. `BACKUP_RESTORE_TARGETS_JSON` is an optional JSON list of exact DSNs permitted for restore; restoring to the source database is rejected. Backups are service-scoped because tenants share a database. Align backup expiry with storage lifecycle policy and run scheduled restore drills. Recording retention is enforced by the app worker; do not configure bucket lifecycle rules that delete recordings before that worker can respect configured holds. S3 Object Lock is not configured by this app. No live backup or restore was run for this code change.
 
-Retention and backup worker outcomes are emitted as low-cardinality Prometheus metrics. Example dashboard and alert rules are in `monitoring/`; import/configure them in your Prometheus/Grafana stack. These files do not provision monitoring infrastructure.
+Retention and backup worker outcomes, plus recording upload success/failure, are emitted as low-cardinality Prometheus metrics. Example dashboard and alert rules are in `monitoring/`; import/configure them in your Prometheus/Grafana stack. These files do not provision monitoring infrastructure.
 
 ## Realtime agent providers
 

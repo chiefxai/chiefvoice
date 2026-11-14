@@ -24,6 +24,7 @@ from chiefvoice.data_lifecycle.backup import (
     BackupPolicy,
     BackupScope,
 )
+from chiefvoice.storage.s3 import object_key
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +54,20 @@ class EncryptedPostgresBackupProvider:
         resource_name: str = "postgres",
         pg_dump_executable: str = "pg_dump",
         pg_restore_executable: str = "pg_restore",
+        s3_client=None,
+        s3_bucket: str | None = None,
+        s3_prefix: str = "backups",
     ):
         self._source_env, self._source_identity = _libpq_environment(database_url)
         self.directory = Path(directory).resolve()
         self.resource_name = resource_name
         self.pg_dump_executable = pg_dump_executable
         self.pg_restore_executable = pg_restore_executable
+        if (s3_client is None) != (s3_bucket is None):
+            raise ValueError("S3 backup storage requires both a client and bucket")
+        self._s3_client = s3_client
+        self._s3_bucket = s3_bucket
+        self._s3_prefix = s3_prefix.strip("/") or "backups"
         try:
             key = base64.urlsafe_b64decode(encryption_key.encode("ascii"))
         except (ValueError, UnicodeEncodeError) as exc:
@@ -80,18 +89,22 @@ class EncryptedPostgresBackupProvider:
         os.chmod(self.directory, 0o700)
         backup_id = uuid4().hex
         staging_directory = self.directory / f".{backup_id}.tmp"
-        final_directory = self.directory / backup_id
         staging_directory.mkdir(mode=0o700)
         encrypted_path = staging_directory / "database.dump.aesgcm"
         try:
             created_at, checksum, size_bytes = await self._dump_encrypted(encrypted_path)
+            storage_uri = (
+                f"s3://{self._s3_bucket}/{self._backup_key(backup_id, 'database.dump.aesgcm')}"
+                if self._s3_client is not None
+                else (self.directory / backup_id / encrypted_path.name).as_uri()
+            )
             artifact = BackupArtifact(
                 backup_id=backup_id,
                 scope=policy.scope,
                 tenant_id=None,
                 resource=policy.resource,
                 created_at=created_at,
-                storage_uri=(final_directory / encrypted_path.name).as_uri(),
+                storage_uri=storage_uri,
                 checksum_sha256=checksum,
                 encrypted=True,
                 size_bytes=size_bytes,
@@ -102,11 +115,35 @@ class EncryptedPostgresBackupProvider:
                 staging_directory / "metadata.json",
                 json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8"),
             )
-            os.rename(staging_directory, final_directory)
-            os.chmod(final_directory, 0o700)
+            if self._s3_client is not None:
+                await asyncio.to_thread(
+                    self._s3_client.upload_file,
+                    str(encrypted_path),
+                    self._s3_bucket,
+                    self._backup_key(backup_id, "database.dump.aesgcm"),
+                    ExtraArgs={"ContentType": "application/octet-stream"},
+                )
+                metadata_bytes = (staging_directory / "metadata.json").read_bytes()
+                await asyncio.to_thread(
+                    self._s3_client.put_object,
+                    Bucket=self._s3_bucket,
+                    Key=self._backup_key(backup_id, "metadata.json"),
+                    Body=metadata_bytes,
+                    ContentType="application/json",
+                )
+                shutil.rmtree(staging_directory, ignore_errors=True)
+            else:
+                final_directory = self.directory / backup_id
+                os.rename(staging_directory, final_directory)
+                os.chmod(final_directory, 0o700)
             return artifact
         except BaseException:
             shutil.rmtree(staging_directory, ignore_errors=True)
+            if self._s3_client is not None:
+                try:
+                    await asyncio.to_thread(self._delete_s3_backup_sync, backup_id)
+                except Exception:
+                    logger.error("s3_backup_partial_cleanup_failed", extra={"backup_id": backup_id})
             raise
 
     async def get_backup(self, backup_id: str) -> BackupArtifact | None:
@@ -115,6 +152,8 @@ class EncryptedPostgresBackupProvider:
 
     async def list_backups(self, policy: BackupPolicy) -> list[BackupArtifact]:
         self._validate_policy(policy)
+        if self._s3_client is not None:
+            return await asyncio.to_thread(self._list_s3_backups_sync, policy)
         if not self.directory.is_dir() or self.directory.is_symlink():
             return []
         artifacts: list[BackupArtifact] = []
@@ -199,6 +238,20 @@ class EncryptedPostgresBackupProvider:
     async def delete_backup(self, backup_id: str) -> None:
         await asyncio.to_thread(self._delete_sync, backup_id)
 
+    async def check_storage(self) -> None:
+        if self._s3_client is None:
+            return
+        await asyncio.to_thread(
+            self._s3_client.list_objects_v2,
+            Bucket=self._s3_bucket,
+            Prefix=object_key(self._s3_prefix) + "/",
+            MaxKeys=1,
+        )
+
+    async def close(self) -> None:
+        if self._s3_client is not None:
+            await asyncio.to_thread(self._s3_client.close)
+
     def _validate_policy(self, policy: BackupPolicy) -> None:
         if policy.scope is not BackupScope.SERVICE or policy.tenant_id is not None:
             raise ValueError("PostgreSQL backups must be service-scoped")
@@ -251,14 +304,37 @@ class EncryptedPostgresBackupProvider:
     def _read_metadata(self, backup_id: str) -> dict | None:
         if not _BACKUP_ID.fullmatch(backup_id):
             return None
-        directory = self.directory / backup_id
-        if directory.is_symlink() or not directory.is_dir():
-            return None
-        metadata_path = directory / "metadata.json"
-        if metadata_path.is_symlink() or not metadata_path.is_file():
-            return None
         try:
-            payload = json.loads(metadata_path.read_text("utf-8"))
+            if self._s3_client is not None:
+                try:
+                    response = self._s3_client.get_object(
+                        Bucket=self._s3_bucket,
+                        Key=self._backup_key(backup_id, "metadata.json"),
+                    )
+                except Exception as exc:
+                    if _is_missing_s3_object(exc):
+                        return None
+                    raise
+                body = response["Body"]
+                try:
+                    metadata_bytes = body.read()
+                finally:
+                    body.close()
+                expected_uri = (
+                    f"s3://{self._s3_bucket}/"
+                    f"{self._backup_key(backup_id, 'database.dump.aesgcm')}"
+                )
+            else:
+                directory = self.directory / backup_id
+                if directory.is_symlink() or not directory.is_dir():
+                    return None
+                metadata_path = directory / "metadata.json"
+                if metadata_path.is_symlink() or not metadata_path.is_file():
+                    return None
+                metadata_bytes = metadata_path.read_bytes()
+                expected_uri = (directory / "database.dump.aesgcm").resolve().as_uri()
+
+            payload = json.loads(metadata_bytes.decode("utf-8"))
             if not isinstance(payload, dict):
                 return None
             supplied_mac = payload.pop("metadata_hmac")
@@ -269,24 +345,82 @@ class EncryptedPostgresBackupProvider:
                 return None
             if payload.get("backup_id") != backup_id:
                 return None
-            expected_file = (directory / "database.dump.aesgcm").resolve()
-            if Path(payload["storage_uri"]).resolve() != expected_file:
+            if self._s3_client is not None:
+                if payload.get("storage_uri") != expected_uri:
+                    return None
+            elif Path(payload["storage_uri"]).resolve().as_uri() != expected_uri:
                 return None
             return payload
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (OSError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
             return None
+
+    def _backup_key(self, backup_id: str, filename: str) -> str:
+        if not _BACKUP_ID.fullmatch(backup_id):
+            raise ValueError("Invalid backup ID")
+        return object_key(self._s3_prefix, backup_id, filename)
+
+    def _list_s3_backups_sync(self, policy: BackupPolicy) -> list[BackupArtifact]:
+        prefix = object_key(self._s3_prefix) + "/"
+        continuation_token = None
+        artifacts: list[BackupArtifact] = []
+        while True:
+            options = {"Bucket": self._s3_bucket, "Prefix": prefix, "MaxKeys": 1000}
+            if continuation_token:
+                options["ContinuationToken"] = continuation_token
+            response = self._s3_client.list_objects_v2(**options)
+            for item in response.get("Contents", []):
+                key = item.get("Key", "")
+                if not key.endswith("/metadata.json"):
+                    continue
+                backup_id = key[len(prefix) : -len("/metadata.json")]
+                metadata = self._read_metadata(backup_id)
+                artifact = _artifact_from_payload(metadata) if metadata else None
+                if artifact and artifact.resource == policy.resource:
+                    artifacts.append(artifact)
+            if not response.get("IsTruncated") or not response.get("NextContinuationToken"):
+                break
+            continuation_token = response["NextContinuationToken"]
+        return sorted(artifacts, key=lambda item: item.created_at)
 
     def _metadata_signature(self, payload: dict) -> str:
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hmac.new(self._metadata_key, canonical, hashlib.sha256).hexdigest()
 
     def _decrypt_to_temp(self, artifact: BackupArtifact) -> tuple[Path, str, int]:
-        backup_path = self.directory / artifact.backup_id / "database.dump.aesgcm"
+        downloaded_path: Path | None = None
+        if self._s3_client is not None:
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.directory, 0o700)
+            temporary = tempfile.NamedTemporaryFile(
+                prefix="chiefvoice-encrypted-backup-",
+                suffix=".aesgcm",
+                dir=self.directory,
+                delete=False,
+            )
+            downloaded_path = Path(temporary.name)
+            os.chmod(downloaded_path, 0o600)
+            temporary.close()
+            try:
+                self._s3_client.download_file(
+                    self._s3_bucket,
+                    self._backup_key(artifact.backup_id, "database.dump.aesgcm"),
+                    str(downloaded_path),
+                )
+            except BaseException:
+                downloaded_path.unlink(missing_ok=True)
+                raise
+            backup_path = downloaded_path
+        else:
+            backup_path = self.directory / artifact.backup_id / "database.dump.aesgcm"
         if backup_path.is_symlink() or not backup_path.is_file():
+            if downloaded_path is not None:
+                downloaded_path.unlink(missing_ok=True)
             raise ValueError("Encrypted backup payload is missing")
         total_size = backup_path.stat().st_size
         header_size = len(_MAGIC) + _NONCE_BYTES
         if total_size < header_size + _TAG_BYTES:
+            if downloaded_path is not None:
+                downloaded_path.unlink(missing_ok=True)
             raise ValueError("Encrypted backup payload is truncated")
         with tempfile.NamedTemporaryFile(
             prefix="chiefvoice-restore-", suffix=".dump", dir=self.directory, delete=False
@@ -325,13 +459,20 @@ class EncryptedPostgresBackupProvider:
                     plaintext.write(final)
                     plaintext.flush()
                     os.fsync(plaintext.fileno())
+                if downloaded_path is not None:
+                    downloaded_path.unlink(missing_ok=True)
                 return temporary_path, digest.hexdigest(), plain_size
             except BaseException:
                 temporary_path.unlink(missing_ok=True)
+                if downloaded_path is not None:
+                    downloaded_path.unlink(missing_ok=True)
                 raise
 
     def _delete_sync(self, backup_id: str) -> None:
         if not _BACKUP_ID.fullmatch(backup_id):
+            return
+        if self._s3_client is not None:
+            self._delete_s3_backup_sync(backup_id)
             return
         directory = self.directory / backup_id
         if directory.is_symlink() or not directory.is_dir():
@@ -341,6 +482,22 @@ class EncryptedPostgresBackupProvider:
             if child.is_symlink() or not child.is_file():
                 raise ValueError("Backup artifact contains an unexpected filesystem entry")
         shutil.rmtree(directory)
+
+    def _delete_s3_backup_sync(self, backup_id: str) -> None:
+        if not _BACKUP_ID.fullmatch(backup_id):
+            return
+        response = self._s3_client.delete_objects(
+            Bucket=self._s3_bucket,
+            Delete={
+                "Objects": [
+                    {"Key": self._backup_key(backup_id, "database.dump.aesgcm")},
+                    {"Key": self._backup_key(backup_id, "metadata.json")},
+                ],
+                "Quiet": True,
+            },
+        )
+        if response.get("Errors"):
+            raise RuntimeError("S3-compatible storage could not delete a backup object")
 
 
 def _artifact_payload(artifact: BackupArtifact) -> dict:
@@ -397,6 +554,12 @@ def _safe_process_environment() -> dict[str, str]:
         "PGSSLROOTCERT",
     }
     return {key: value for key, value in os.environ.items() if key in allowed}
+
+
+def _is_missing_s3_object(exc: Exception) -> bool:
+    response = getattr(exc, "response", {})
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    return error.get("Code") in {"404", "NoSuchKey", "NotFound"}
 
 
 def _libpq_environment(database_url: str) -> tuple[dict[str, str], tuple[str, str, str]]:

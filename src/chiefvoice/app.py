@@ -45,10 +45,12 @@ from chiefvoice.data_lifecycle.retention import (
 )
 from chiefvoice.data_lifecycle.backup import (
     BackupRunner,
+    PostgresBackupRunLock,
     StaticBackupPolicyDirectory,
     run_backups_periodically,
 )
 from chiefvoice.data_lifecycle.postgres_backup import EncryptedPostgresBackupProvider
+from chiefvoice.storage.s3 import create_s3_compatible_client
 from chiefvoice.sessions import AcceptedSession
 from chiefvoice.calls.routes import router as calls_router
 
@@ -66,7 +68,12 @@ async def lifespan(_app: FastAPI):
     post_call_dispatcher = getattr(_app.state, "post_call_dispatcher", None)
     post_call_agent = getattr(_app.state, "post_call_agent", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
+    recording_store = getattr(_app.state, "recording_store", None)
+    backup_provider = getattr(_app.state, "backup_provider", None)
+    backup_execution_lock = getattr(_app.state, "backup_execution_lock", None)
     worker_tasks: list[asyncio.Task] = []
+    storage_checks = getattr(_app.state, "object_storage_checks", [])
+    _app.state.object_storage_ready = not storage_checks
     try:
         if account_store is not None:
             await account_store.initialize()
@@ -82,6 +89,9 @@ async def lifespan(_app: FastAPI):
             await agent_profile_directory.initialize()
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.initialize()
+        for check_storage in storage_checks:
+            await check_storage()
+        _app.state.object_storage_ready = True
         if isinstance(post_call_dispatcher, SqlPostCallQueue) and post_call_agent is not None:
             worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent)))
         retention_runner = getattr(_app.state, "retention_runner", None)
@@ -92,7 +102,11 @@ async def lifespan(_app: FastAPI):
         backup_runner = getattr(_app.state, "backup_runner", None)
         if backup_runner is not None:
             worker_tasks.append(asyncio.create_task(
-                run_backups_periodically(backup_runner, settings.backup_interval_seconds)
+                run_backups_periodically(
+                    backup_runner,
+                    settings.backup_interval_seconds,
+                    backup_execution_lock,
+                )
             ))
         logger.info("application_started", extra={"event": "application_started"})
         yield
@@ -106,6 +120,12 @@ async def lifespan(_app: FastAPI):
             await post_call_dispatcher.close()
         if billing_directory is not None:
             await billing_directory.close()
+        if backup_execution_lock is not None:
+            await backup_execution_lock.close()
+        for storage_component in (recording_store, backup_provider):
+            close = getattr(storage_component, "close", None)
+            if close is not None:
+                await close()
         if integration_store is not None:
             await integration_store.close()
         if post_call_webhook_directory is not None:
@@ -166,6 +186,9 @@ def create_app(
     if agent_profile_directory is None and settings.database_url:
         agent_profile_directory = SqlAgentProfileDirectory(settings.database_url)
     recording_store = create_recording_store()
+    object_storage_checks: list[Callable[[], Awaitable[None]]] = []
+    if recording_store is not None and hasattr(recording_store, "check_storage"):
+        object_storage_checks.append(recording_store.check_storage)
     application.state.recording_store = recording_store
     if voice_pipeline_factory is None and settings.realtime_provider == "vertex":
         if settings.vertex_project_id and settings.vertex_location:
@@ -234,6 +257,8 @@ def create_app(
         retention_runner = RetentionRunner(retention_policies, targets)
     backup_policies = StaticBackupPolicyDirectory.from_json(settings.backup_policies_json)
     backup_runner = None
+    backup_provider = None
+    backup_execution_lock = None
     if backup_policies.policies:
         if settings.backup_interval_seconds < 60:
             raise ValueError("BACKUP_INTERVAL_SECONDS must be at least 60")
@@ -247,13 +272,34 @@ def create_app(
             raise ValueError("BACKUP_RESTORE_TARGETS_JSON must be a JSON list of DSNs") from exc
         if not isinstance(restore_targets, list) or any(not isinstance(item, str) for item in restore_targets):
             raise ValueError("BACKUP_RESTORE_TARGETS_JSON must be a JSON list of DSNs")
-        provider = EncryptedPostgresBackupProvider(
-            settings.database_url,
-            settings.backup_directory,
-            settings.backup_encryption_key,
-            allowed_restore_targets=tuple(restore_targets),
-        )
+        backup_backend = settings.backup_storage_backend
+        if backup_backend == "s3":
+            if not settings.object_storage_bucket:
+                raise ValueError("OBJECT_STORAGE_BUCKET is required for S3 database backups")
+            provider = EncryptedPostgresBackupProvider(
+                settings.database_url,
+                settings.backup_directory,
+                settings.backup_encryption_key,
+                allowed_restore_targets=tuple(restore_targets),
+                s3_client=create_s3_compatible_client(),
+                s3_bucket=settings.object_storage_bucket,
+                s3_prefix="backups",
+            )
+            object_storage_checks.append(provider.check_storage)
+        elif backup_backend == "local":
+            if settings.app_env.lower() != "local":
+                raise ValueError("Local backup storage is allowed only in local development")
+            provider = EncryptedPostgresBackupProvider(
+                settings.database_url,
+                settings.backup_directory,
+                settings.backup_encryption_key,
+                allowed_restore_targets=tuple(restore_targets),
+            )
+        else:
+            raise ValueError("BACKUP_STORAGE_BACKEND must be 'local' or 's3'")
+        backup_provider = provider
         backup_runner = BackupRunner(backup_policies, provider)
+        backup_execution_lock = PostgresBackupRunLock(settings.database_url)
     vobiz_adapter = adapters.get("vobiz")
     if vobiz_adapter is None and settings.vobiz_webhook_secret and provider_integration_store is not None:
         vobiz_adapter = VobizAdapter(provider_integration_store)
@@ -264,8 +310,12 @@ def create_app(
     application.state.api_key_directory = api_key_directory
     application.state.post_call_webhook_directory = post_call_webhook_directory
     application.state.agent_profile_directory = agent_profile_directory
+    application.state.object_storage_checks = object_storage_checks
+    application.state.object_storage_ready = not object_storage_checks
     application.state.retention_runner = retention_runner
     application.state.backup_runner = backup_runner
+    application.state.backup_provider = backup_provider
+    application.state.backup_execution_lock = backup_execution_lock
     application.state.channel_adapters = adapters
     application.state.vobiz_adapter = vobiz_adapter
     application.state.subscription_authorizer = subscription_authorizer
@@ -323,6 +373,7 @@ async def readyz(request: Request):
         "voice_pipeline": getattr(state, "voice_pipeline_factory", None) is not None,
         "account_store": getattr(state, "account_store", None) is not None,
         "provider_integration_store": getattr(state, "provider_integration_store", None) is not None,
+        "object_storage": getattr(state, "object_storage_ready", True),
         "channel_adapter": bool(adapters),
         "post_call_agent": (
             not getattr(state, "post_call_required", True)

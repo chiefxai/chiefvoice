@@ -90,6 +90,11 @@ CALL_DURATION_LIMITS = Counter(
     "chiefvoice_call_duration_limit_events_total",
     "Calls that reached or exceeded their configured duration cap",
 )
+RECORDING_STORAGE_EVENTS = Counter(
+    "chiefvoice_recording_storage_events_total",
+    "Encrypted recording object storage outcomes",
+    ["result"],
+)
 
 
 def session_started(channel: str, provider: str) -> None:
@@ -108,6 +113,11 @@ def call_duration_limit_event() -> None:
 def data_lifecycle_run(task: str, result: str) -> None:
     if task in {"backup", "retention"} and result in {"succeeded", "failed"}:
         DATA_LIFECYCLE_RUNS.labels(task, result).inc()
+
+
+def recording_storage_event(result: str) -> None:
+    if result in {"saved", "failed"}:
+        RECORDING_STORAGE_EVENTS.labels(result).inc()
 
 
 def session_ended(

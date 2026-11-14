@@ -86,3 +86,13 @@ groups:
         annotations:
           summary: Chiefvoice retention run failed
           description: A scheduled retention pass failed in the last two hours.
+
+      - alert: ChiefvoiceRecordingStorageFailed
+        expr: increase(chiefvoice_recording_storage_events_total{result="failed"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: chiefvoice
+        annotations:
+          summary: Call recording could not be saved to object storage
+          description: At least one encrypted recording upload failed in the last ten minutes.
