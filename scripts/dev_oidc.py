@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -22,6 +23,8 @@ AUDIENCE = "chiefvoice-local"
 CLIENT_ID = "chiefvoice-console"
 REDIRECT_URI = os.getenv("DEV_OIDC_REDIRECT_URI", "http://localhost:5173/")
 KEY_ID = "chiefvoice-local-dev"
+LOCAL_USERNAME = os.getenv("DEV_OIDC_USERNAME", "admin@elvoryx.in")
+LOCAL_PASSWORD = os.getenv("DEV_OIDC_PASSWORD", "Admin@123")
 LOCAL_SCOPES = (
     "accounts:create accounts:read agents:read agents:write api_keys:read api_keys:write "
     "billing:admin billing:read calls:read calls:reconcile calls:write integrations:read "
@@ -127,15 +130,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorize_page(self) -> None:
         query = parse_qs(urlparse(self.path).query)
-        redirect_uri = self._field(query, "redirect_uri")
-        challenge = self._field(query, "code_challenge")
-        state = self._field(query, "state")
-        nonce = self._field(query, "nonce")
+        self._render_authorize_page(query)
+
+    def _render_authorize_page(
+        self, fields: dict[str, list[str]], *, invalid_credentials: bool = False
+    ) -> None:
+        redirect_uri = self._field(fields, "redirect_uri")
+        challenge = self._field(fields, "code_challenge")
+        state = self._field(fields, "state")
+        nonce = self._field(fields, "nonce")
         if (
-            self._field(query, "client_id") != CLIENT_ID
+            self._field(fields, "client_id") != CLIENT_ID
             or redirect_uri != REDIRECT_URI
-            or self._field(query, "response_type") != "code"
-            or self._field(query, "code_challenge_method") != "S256"
+            or self._field(fields, "response_type") != "code"
+            or self._field(fields, "code_challenge_method") != "S256"
             or not challenge
             or not state
         ):
@@ -146,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
             "client_id": CLIENT_ID,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": self._field(query, "scope"),
+            "scope": self._field(fields, "scope"),
             "state": state,
             "nonce": nonce,
             "code_challenge": challenge,
@@ -155,6 +163,12 @@ class Handler(BaseHTTPRequestHandler):
         inputs = "".join(
             f'<input type="hidden" name="{html.escape(name)}" value="{html.escape(value)}">'
             for name, value in hidden.items()
+        )
+        username = self._field(fields, "username")
+        error_message = (
+            '<p class="error" role="alert">The username or password is incorrect.</p>'
+            if invalid_credentials
+            else ""
         )
         body = f"""<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -167,16 +181,27 @@ main {{ box-sizing:border-box; width:min(420px,calc(100% - 32px)); padding:36px;
 .mark {{ margin:auto auto 20px; width:48px; height:48px; border-radius:15px;
   display:grid; place-items:center; background:#72dfbd; font-size:22px }}
 p {{ color:#738097; line-height:1.6 }}
+label {{ display:block; margin:14px 0 6px; text-align:left; color:#56627a;
+  font-size:12px; font-weight:650 }}
+input[type=email], input[type=password] {{ box-sizing:border-box; width:100%; padding:12px;
+  border:1px solid #dce2ed; border-radius:9px; font:14px system-ui }}
 button {{ width:100%; padding:13px; border:0; border-radius:10px; background:#4159d8;
   color:white; font-weight:700; font-size:14px; cursor:pointer }}
+.error {{ padding:10px; border-radius:8px; background:#fff1ef; color:#a33f36 }}
 small {{ display:block; margin-top:22px; color:#9099aa }}
 </style>
 <main>
 <div class="mark">C</div><small>LOCAL DEVELOPMENT IDENTITY</small>
 <h1>Sign in to Chiefvoice</h1>
 <p>This local OIDC provider signs you in as the development platform administrator.</p>
+{error_message}
 <form method="post" action="/authorize">{inputs}
-<button type="submit">Continue as local admin</button></form>
+<label for="username">Username</label>
+<input id="username" name="username" type="email" autocomplete="username" required
+value="{html.escape(username)}">
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required>
+<button type="submit">Sign in</button></form>
 <small>Development only. Do not use this identity outside your local stack.</small>
 </main></html>"""
         encoded = body.encode()
@@ -195,6 +220,11 @@ small {{ display:block; margin-top:22px; color:#9099aa }}
             or self._field(fields, "code_challenge_method") != "S256"
         ):
             self._json(400, {"detail": "Invalid local OIDC authorization request"})
+            return
+        username_matches = hmac.compare_digest(self._field(fields, "username"), LOCAL_USERNAME)
+        password_matches = hmac.compare_digest(self._field(fields, "password"), LOCAL_PASSWORD)
+        if not (username_matches and password_matches):
+            self._render_authorize_page(fields, invalid_credentials=True)
             return
         code = secrets.token_urlsafe(32)
         _AUTHORIZATION_CODES[code] = {

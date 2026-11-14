@@ -11,7 +11,7 @@ cp .env.docker.example .env.docker
 docker compose up --build
 ```
 
-Open <http://localhost:5173> and select **Sign in with OIDC**. The local identity provider displays its own sign-in page; select **Continue as local admin** to enter the console. The browser uses the authorization-code flow with PKCE, and the access token is kept in session storage. Its test signing key persists in a local Docker volume across provider restarts. The local identity provider and its administrator are for development only. Live calls need real telephony and voice model credentials, which this local stack does not configure.
+Open <http://localhost:5173> and select **Sign in with OIDC**. On the local identity-provider page, use username `admin@elvoryx.in` and password `Admin@123`. The browser uses the authorization-code flow with PKCE, and the access token is kept in session storage. The test signing key persists in a local Docker volume across provider restarts. These credentials are for the local development identity provider only. Live calls need real telephony and voice model credentials, which this local stack does not configure.
 
 Local Compose stores encrypted recordings in MinIO. Open <http://localhost:9003> for the MinIO console (`chiefvoice-local` / `chiefvoice-local-storage-password`); the S3 API is at <http://localhost:9002>.
 

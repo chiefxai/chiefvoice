@@ -119,6 +119,8 @@ services:
     environment:
       DEV_OIDC_PORT: "9000"
       DEV_OIDC_ISSUER: http://localhost:9000
+      DEV_OIDC_USERNAME: admin@elvoryx.in
+      DEV_OIDC_PASSWORD: Admin@123
     ports:
       - "9000:9000"
     restart: unless-stopped
