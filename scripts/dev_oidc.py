@@ -111,7 +111,6 @@ class Handler(BaseHTTPRequestHandler):
             or self._field(query, "code_challenge_method") != "S256"
             or not challenge
             or not state
-            or not nonce
         ):
             self._json(400, {"detail": "Invalid local OIDC authorization request"})
             return
@@ -221,18 +220,20 @@ small {{ display:block; margin-top:22px; color:#9099aa }}
             algorithm="RS256",
             headers={"kid": KEY_ID},
         )
+        id_token_claims = {
+            "iss": ISSUER,
+            "aud": CLIENT_ID,
+            "sub": "local-dev-user",
+            "name": "Local Platform Admin",
+            "email": "admin@localhost",
+            "email_verified": True,
+            "iat": now,
+            "exp": now + 3600,
+        }
+        if authorization["nonce"]:
+            id_token_claims["nonce"] = authorization["nonce"]
         id_token = jwt.encode(
-            {
-                "iss": ISSUER,
-                "aud": CLIENT_ID,
-                "sub": "local-dev-user",
-                "name": "Local Platform Admin",
-                "email": "admin@localhost",
-                "email_verified": True,
-                "nonce": authorization["nonce"],
-                "iat": now,
-                "exp": now + 3600,
-            },
+            id_token_claims,
             PRIVATE_KEY,
             algorithm="RS256",
             headers={"kid": KEY_ID},
