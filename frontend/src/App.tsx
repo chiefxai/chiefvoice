@@ -431,6 +431,9 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (!simulationDestination.trim()) { setToast('Enter the destination phone number.'); return }
     if (!simulationCallerId) { setToast('Choose an assigned caller ID.'); return }
     if (!key.voice_agent_enabled) { setToast('This API has no calling agent enabled.'); return }
+    if (/\b(transcript|post[- ]call|after the call|summari[sz]e the call)\b/i.test(simulationLiveInstructions)) {
+      setToast('These look like post-call instructions. Put transcript extraction or call summaries in the Post-call task field.'); return
+    }
     let liveContext: Record<string, unknown>
     let outputSchema: Record<string, unknown>
     try {
@@ -774,7 +777,7 @@ function SimulationPage(props: {
         <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Live-call agent</Typography>
         <FormControl fullWidth disabled={!selected}><InputLabel id="simulation-profile-label">Agent profile (optional)</InputLabel><Select labelId="simulation-profile-label" label="Agent profile (optional)" value={props.profileId} onChange={event => props.onProfileChange(event.target.value)}><MenuItem value="">API default voice</MenuItem>{props.profiles.map(profile => <MenuItem key={profile.id} value={profile.id}>{profile.name} · {profile.language} · {profile.voice}</MenuItem>)}</Select></FormControl>
         {props.profilesLoading && <Typography variant="caption" color="text.secondary">Loading profiles owned by this API customer…</Typography>}
-        <TextField fullWidth multiline minRows={4} label="Live-call prompt / instructions" value={props.liveInstructions} onChange={event => props.onLiveInstructionsChange(event.target.value)} placeholder="Tell the caller who the agent is, the goal of the call, and how it should handle questions." helperText="This is sent as system instructions for this test call only." />
+        <TextField fullWidth multiline minRows={4} label="Live-call prompt / instructions" value={props.liveInstructions} onChange={event => props.onLiveInstructionsChange(event.target.value)} placeholder="Tell the caller who the agent is, the goal of the call, and how it should handle questions." helperText="Give spoken-conversation directions here. Put transcript extraction, summaries, and result formatting in the Post-call task below." />
         <TextField fullWidth multiline minRows={3} label="Live-call context (JSON object)" value={props.liveContext} onChange={event => props.onLiveContextChange(event.target.value)} helperText="Per-call facts for personalization. Instructions belong in the prompt above." />
         <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Post-call agent</Typography>
         {!selected?.post_call_agent_enabled ? <Alert severity="info">Post-call analysis is disabled for this API. Enable a post-call agent in API settings to test extraction.</Alert> : <>
