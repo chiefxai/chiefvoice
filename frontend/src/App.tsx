@@ -26,6 +26,8 @@ type Page = 'Numbers' | 'Agents' | 'API' | 'Simulation' | 'Docs'
 const pagePaths: Record<Page, string> = {
   Numbers: '/numbers', Agents: '/agents', API: '/api', Simulation: '/simulation', Docs: '/docs',
 }
+const defaultSimulationPostCallContext = 'Summarize the call and extract the requested fields. Use unknown when information is not stated; do not guess.'
+const defaultSimulationOutputSchema = JSON.stringify({ type: 'object', properties: { summary: { type: 'string' }, outcome: { type: 'string', enum: ['completed', 'follow_up_needed', 'unknown'] } }, required: ['summary', 'outcome'] }, null, 2)
 const pageFromPath = (pathname: string): Page => {
   const match = (Object.entries(pagePaths) as [Page, string][]).find(([, path]) => path === pathname.replace(/\/$/, ''))
   return match?.[0] || 'Numbers'
@@ -199,8 +201,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [simulationProfileId, setSimulationProfileId] = useState('')
   const [simulationLiveInstructions, setSimulationLiveInstructions] = useState('')
   const [simulationLiveContext, setSimulationLiveContext] = useState('{}')
-  const [simulationPostCallContext, setSimulationPostCallContext] = useState('Summarize the call and extract the requested fields. Use unknown when information is not stated; do not guess.')
-  const [simulationOutputSchema, setSimulationOutputSchema] = useState('{\n  "type": "object",\n  "properties": {\n    "summary": { "type": "string" },\n    "outcome": { "type": "string", "enum": ["completed", "follow_up_needed", "unknown"] }\n  },\n  "required": ["summary", "outcome"]\n}')
+  const [simulationPostCallContext, setSimulationPostCallContext] = useState(defaultSimulationPostCallContext)
+  const [simulationOutputSchema, setSimulationOutputSchema] = useState(defaultSimulationOutputSchema)
   const [simulationTools, setSimulationTools] = useState<string[]>([])
   const [simulationTimeZone, setSimulationTimeZone] = useState('Asia/Kolkata')
   const [simulationTimeFormat, setSimulationTimeFormat] = useState('%Y-%m-%d %H:%M:%S %z')
@@ -402,6 +404,27 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (!Number.isFinite(amount) || amount <= 0) { setToast('Enter a positive INR starting balance or credit limit.'); return }
     issueMutation.mutate({ customerName: apiCustomerName.trim(), billingMode: apiBillingMode, billingAmountMinor: Math.round(amount * 100), name: apiName.trim(), tags: parseTags(apiTags), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim() })
   }
+  const selectSimulationApi = (id: string) => {
+    setSimulationApiId(id)
+    setSimulationSessionId('')
+    const key = (keysQuery.data || []).find(item => item.id === id)
+    setSimulationCallerId(key?.assigned_numbers[0] ? `${key.assigned_numbers[0].provider}|${key.assigned_numbers[0].phone_number}` : '')
+    setSimulationProfileId('')
+    setSimulationLiveInstructions('')
+    setSimulationLiveContext('{}')
+    setSimulationPostCallContext(defaultSimulationPostCallContext)
+    setSimulationOutputSchema(defaultSimulationOutputSchema)
+    setSimulationTools([])
+    setSimulationTimeZone('Asia/Kolkata')
+    setSimulationTimeFormat('%Y-%m-%d %H:%M:%S %z')
+    setSimulationIncludeLiveContext(false)
+  }
+  const selectSimulationProfile = (id: string) => {
+    setSimulationProfileId(id)
+    const profile = (simulationProfilesQuery.data || []).find(item => item.id === id)
+    setSimulationLiveInstructions(profile?.instructions || '')
+    setSimulationLiveContext('{}')
+  }
   const startSimulation = () => {
     const key = (keysQuery.data || []).find(item => item.id === simulationApiId)
     if (!key || key.revoked_at) { setToast('Select an active API first.'); return }
@@ -501,7 +524,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)); setManagedNumberTags((number.tags || []).join(', ')) }} />}
         {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => setViewingKey(key)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />}
         {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
-        {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={id => { setSimulationApiId(id); setSimulationSessionId(''); const key = (keysQuery.data || []).find(item => item.id === id); setSimulationCallerId(key?.assigned_numbers[0] ? `${key.assigned_numbers[0].provider}|${key.assigned_numbers[0].phone_number}` : ''); setSimulationProfileId('') }} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={id => { setSimulationProfileId(id); const profile = (simulationProfilesQuery.data || []).find(item => item.id === id); if (profile) setSimulationLiveInstructions(profile.instructions) }} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} submitting={simulateCallMutation.isPending} />}
+        {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={selectSimulationProfile} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} submitting={simulateCallMutation.isPending} />}
         {page === 'Docs' && <DocsPage />}
       </div>
     </main>
