@@ -1,8 +1,12 @@
 import json
+import logging
 from collections.abc import Sequence
 
 from fastapi import HTTPException
 from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
@@ -10,6 +14,8 @@ from chiefvoice.agents.call.providers.base import RealtimeAgentProvider
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.identity.api_keys import ApiKeyDirectory
 from chiefvoice.sessions import AcceptedSession
+
+logger = logging.getLogger(__name__)
 
 
 class VertexGeminiLiveProvider(RealtimeAgentProvider):
@@ -154,6 +160,44 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 f"Per-call context JSON: {context_json}"
             )
 
+        tools = None
+        if session.auto_hangup_when_complete:
+            system_instruction = (
+                f"{system_instruction.strip()}\n\n"
+                "When the caller's requested information has been collected, briefly thank them, "
+                "then call the hang_up_call tool to end the phone call. Do not call it before "
+                "the requested information is collected. Never claim the call has ended unless "
+                "the tool succeeds."
+            )
+
+            async def hang_up_call(params: FunctionCallParams) -> None:
+                callback = session.metadata.get("hang_up_call")
+                if not callable(callback):
+                    logger.warning(
+                        "call_agent_hangup_unavailable",
+                        extra={"session_id": session.session_id, "provider": session.provider},
+                    )
+                    await params.result_callback({"success": False, "reason": "hangup_unavailable"})
+                    return
+                try:
+                    await callback()
+                except Exception as exc:
+                    logger.error(
+                        "call_agent_hangup_failed",
+                        extra={"session_id": session.session_id, "error_type": type(exc).__name__},
+                    )
+                    await params.result_callback({"success": False, "reason": "provider_error"})
+                    return
+                logger.info("call_agent_hangup_requested", extra={"session_id": session.session_id})
+                await params.result_callback({"success": True})
+
+            tools = ToolsSchema(standard_tools=[FunctionSchema(
+                name="hang_up_call",
+                description="End the current phone call after the requested information has been collected and the caller has been thanked.",
+                properties={},
+                required=[],
+                handler=hang_up_call,
+            )])
         if service_type == "google_ai":
             service = GeminiLiveLLMService(
                 api_key=self.google_ai_api_key,
@@ -161,6 +205,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 voice_id=voice,
                 system_instruction=system_instruction,
                 settings=params,
+                tools=tools,
             )
             return (service,)
 
@@ -173,5 +218,6 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             voice_id=voice,
             system_instruction=system_instruction,
             settings=params,
+            tools=tools,
         )
         return (service,)

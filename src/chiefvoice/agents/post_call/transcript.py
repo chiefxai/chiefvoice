@@ -73,6 +73,15 @@ class TranscriptCollector(FrameProcessor):
             if text:
                 self._buffer.segments.append(f"{speaker}: {text}")
                 self._buffer.characters += len(text)
+                if len(self._buffer.segments) == 1:
+                    logger.info(
+                        "call_transcript_first_segment",
+                        extra={
+                            "session_id": self._session.session_id,
+                            "speaker": speaker.lower(),
+                            "characters": len(text),
+                        },
+                    )
                 self._session.metadata["post_call_transcript"] = "\n".join(
                     self._buffer.segments
                 )

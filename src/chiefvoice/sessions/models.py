@@ -32,6 +32,7 @@ class AcceptedSession:
     post_call_agent_enabled: bool = True
     max_call_seconds: int | None = None
     recording_allowed: bool = False
+    auto_hangup_when_complete: bool = False
     session_id: str = field(default_factory=lambda: str(uuid4()))
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)

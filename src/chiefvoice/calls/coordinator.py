@@ -80,6 +80,7 @@ class CallCoordinator:
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
         post_call_agent_enabled = True
+        auto_hangup_when_complete = False
         if command.api_key_id is not None:
             if self.api_key_directory is None:
                 raise HTTPException(status_code=503, detail="API agent configuration is unavailable")
@@ -91,6 +92,7 @@ class CallCoordinator:
             if not api_config.project_id or not api_config.credentials_json:
                 raise HTTPException(status_code=503, detail="Configure Google Cloud credentials for this API before placing calls")
             post_call_agent_enabled = api_config.post_call_agent_enabled
+            auto_hangup_when_complete = api_config.auto_hangup_when_complete
         if post_call_agent_enabled:
             self._require_post_call_ready()
         await self._require_vertex_project(command.tenant_id)
@@ -123,6 +125,7 @@ class CallCoordinator:
             post_call_time_format=command.post_call_time_format,
             include_live_agent_context=command.include_live_agent_context,
             post_call_agent_enabled=post_call_agent_enabled,
+            auto_hangup_when_complete=auto_hangup_when_complete,
         )
         fingerprint = SqlCallSessionStore.fingerprint(
             {

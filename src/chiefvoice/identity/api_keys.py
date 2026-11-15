@@ -75,6 +75,7 @@ class ApiKeyVertexConfig:
     post_call_project_id: str | None = None
     post_call_location: str | None = None
     post_call_credentials_json: str | None = None
+    auto_hangup_when_complete: bool = False
 
 
 class ApiKeyDirectory(Protocol):
@@ -345,6 +346,7 @@ class SqlApiKeyDirectory:
                 post_call_project_id=row.vertex_project_id,
                 post_call_location=row.post_call_location or (post_call_agent.location if post_call_agent else None) or row.vertex_location or "us-central1",
                 post_call_credentials_json=credentials.decode("utf-8") if credentials else None,
+                auto_hangup_when_complete=bool(voice_agent and voice_agent.auto_hangup_when_complete),
                 project_id=row.vertex_project_id,
                 location=row.voice_location or (voice_agent.location if voice_agent else None) or row.vertex_location or "us-central1",
                 credentials_json=credentials.decode("utf-8") if credentials else None,

@@ -406,6 +406,10 @@ class VobizAdapter:
             if inspect.isawaitable(persistence_result):
                 await persistence_result
         end_reason = "completed"
+
+        async def hang_up_from_agent() -> None:
+            await self.hangup(session, "agent_completed")
+        session.metadata["hang_up_call"] = hang_up_from_agent
         try:
             transport = await self.build_transport(session, websocket)
             if pipeline_factory is None:

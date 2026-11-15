@@ -116,6 +116,7 @@ class CreatePhoneApiKeyBody(BaseModel):
     gcp_credentials_json: str = Field(min_length=1, max_length=20000)
     voice_location: str | None = Field(default=None, max_length=64)
     post_call_location: str | None = Field(default=None, max_length=64)
+    recording_allowed: bool = False
 
     @field_validator("customer_name", "name")
     @classmethod
@@ -326,6 +327,7 @@ class AgentProviderConfigBody(BaseModel):
     location: str = Field(default="us-central1", min_length=1, max_length=64)
     cost_per_minute_minor: int = Field(default=0, ge=0, le=1_000_000_000)
     currency: Literal["INR"] = "INR"
+    auto_hangup_when_complete: bool = False
     tags: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("tags")
@@ -366,6 +368,7 @@ def _agent_config_json(agent: AgentConfiguration) -> dict:
         "name": agent.name, "kind": agent.kind,
         "provider": agent.provider, "model": agent.model, "location": agent.location,
         "cost_per_minute_minor": agent.cost_per_minute_minor, "currency": agent.currency,
+        "auto_hangup_when_complete": agent.auto_hangup_when_complete,
         "tags": agent.tags,
         "enabled": agent.enabled, "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
@@ -386,6 +389,7 @@ async def create_agent_config(body: AgentProviderConfigBody, request: Request, p
         agent_id=uuid4().hex, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(),
         kind=body.kind, provider=body.provider, model=body.model.strip(), location=body.location.strip(),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
+        auto_hangup_when_complete=body.auto_hangup_when_complete,
         tags=tuple(body.tags),
         enabled=True, created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
     )
@@ -407,6 +411,7 @@ async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, requ
         agent_id=agent_id, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(), kind=body.kind,
         provider=body.provider, model=body.model.strip(), location=body.location.strip(),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
+        auto_hangup_when_complete=body.auto_hangup_when_complete,
         tags=tuple(body.tags),
         enabled=True, created_at=current.created_at, updated_at=datetime.now(UTC),
     )
@@ -790,9 +795,21 @@ async def list_platform_api_calls(
                 call["webhook_status"] = None
                 continue
             post_call = await dispatcher.get_status(key.tenant_id, call["session_id"])
-            call["post_call_status"] = post_call["status"] if post_call else None
+            call["post_call_status"] = post_call["status"] if post_call else (
+                "failed" if call["status"] == "completed" and not call["transcript_available"]
+                else "queued" if call["status"] == "completed" else None
+            )
             call["post_call_result"] = post_call["result"] if post_call else None
             call["webhook_status"] = post_call["webhook_status"] if post_call else None
+            call["post_call_error"] = (
+                post_call.get("last_error_type") if post_call else
+                "transcript_missing" if call["status"] == "completed" and not call["transcript_available"] else None
+            )
+    else:
+        for call in result["items"]:
+            if call["post_call_agent_enabled"] and call["status"] == "completed":
+                call["post_call_status"] = "failed" if not call["transcript_available"] else "queued"
+                call["post_call_error"] = "transcript_missing" if not call["transcript_available"] else "dispatcher_unavailable"
     return result
 
 
@@ -1025,7 +1042,7 @@ async def issue_phone_api_key(
                 "max_call_seconds": 3600,
                 "allowed_channels": ["phone"],
                 "max_concurrent_sessions": channel_capacity,
-                "recording_allowed": True,
+                "recording_allowed": body.recording_allowed,
                 "prepaid_balance_minor": body.prepaid_balance_minor,
                 "postpaid_credit_limit_minor": body.postpaid_credit_limit_minor,
             },

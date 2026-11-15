@@ -18,6 +18,7 @@ class AgentConfiguration:
     location: str
     cost_per_minute_minor: int
     currency: str
+    auto_hangup_when_complete: bool
     enabled: bool
     created_at: datetime
     updated_at: datetime

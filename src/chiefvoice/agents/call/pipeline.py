@@ -31,14 +31,23 @@ def build_pipeline(
     The context aggregators initialize LLM services with an LLMContextFrame before
     realtime audio reaches them and maintain conversation state for post-call capture.
     """
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(LLMContext())
+    # Start the first spoken turn as soon as Gemini is connected. Without an
+    # initial prompt, a realtime model waits for caller speech and server VAD,
+    # which feels like a several-second dead air on phone calls.
+    context = LLMContext(messages=[{
+        "role": "user",
+        "content": "The phone call has just connected. Greet the caller briefly in the configured language and ask the first question needed for this call's task.",
+    }])
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
 
     # Vobiz supplies narrowband 8 kHz PCM, while Gemini Live requires 16 kHz
     # PCM input. Resample before both diagnostics and the realtime model.
-    processors: list[FrameProcessor] = [transport.input(), GeminiInputResampler()]
+    processors: list[FrameProcessor] = [transport.input(), GeminiInputResampler(), user_aggregator]
+    # Gemini emits caller transcription frames upstream. Put the collector
+    # after the LLM and before the user aggregator: the aggregator consumes
+    # TranscriptionFrame, so a tap before it never sees the text.
     if transcript_processor is not None:
         processors.append(transcript_processor)
-    processors.append(user_aggregator)
     if audio_diagnostics is not None:
         # Count at the actual model input boundary, after the context
         # aggregator, so the metric catches frames the model can consume.

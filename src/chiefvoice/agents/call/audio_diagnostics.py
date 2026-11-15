@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,7 @@ class CallAudioDiagnostics:
     def __init__(self, session: AcceptedSession):
         self.session_id = session.session_id
         self._stages: dict[str, _AudioStage] = {}
+        self._started_at = time.monotonic()
 
     def record(
         self,
@@ -49,14 +51,16 @@ class CallAudioDiagnostics:
         if sample_rate:
             stats.sample_rates.add(sample_rate)
         if stats.frames == 1:
+            extra = {
+                "session_id": self.session_id,
+                "stage": stage,
+                "audio_bytes": audio_bytes,
+                "sample_rate": sample_rate,
+                "elapsed_since_pipeline_ms": round((time.monotonic() - self._started_at) * 1000),
+            }
             logger.info(
                 "call_audio_first_frame",
-                extra={
-                    "session_id": self.session_id,
-                    "stage": stage,
-                    "audio_bytes": audio_bytes,
-                    "sample_rate": sample_rate,
-                },
+                extra=extra,
             )
 
     def record_frame(

@@ -24,6 +24,7 @@ class AgentConfigurationRow(Base):
     location: Mapped[str] = mapped_column(String(64), nullable=False)
     cost_per_minute_minor: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR", server_default="INR")
+    auto_hangup_when_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -48,6 +49,7 @@ class SqlAgentConfigurationDirectory:
             kind=agent.kind, provider=agent.provider, model=agent.model,
             location=agent.location, cost_per_minute_minor=agent.cost_per_minute_minor,
             currency=agent.currency, enabled=True,
+            auto_hangup_when_complete=agent.auto_hangup_when_complete,
             tags_json=json.dumps(agent.tags),
             created_at=now, updated_at=now,
         )
@@ -93,6 +95,7 @@ class SqlAgentConfigurationDirectory:
             row.location = agent.location
             row.cost_per_minute_minor = agent.cost_per_minute_minor
             row.currency = agent.currency
+            row.auto_hangup_when_complete = agent.auto_hangup_when_complete
             row.tags_json = json.dumps(agent.tags)
             row.updated_at = datetime.now(UTC)
             await session.flush()
@@ -116,6 +119,7 @@ class SqlAgentConfigurationDirectory:
             agent_id=row.id, tenant_id=row.tenant_id, name=row.name, kind=row.kind,
             provider=row.provider, model=row.model, location=row.location,
             cost_per_minute_minor=row.cost_per_minute_minor, currency=row.currency,
+            auto_hangup_when_complete=row.auto_hangup_when_complete,
             enabled=row.enabled, created_at=row.created_at, updated_at=row.updated_at,
             tags=tuple(json.loads(row.tags_json or "[]")),
         )
