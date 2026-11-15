@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Request, Security, status
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
@@ -17,6 +17,14 @@ class PhoneNumberBody(BaseModel):
     inbound_enabled: bool = True
     outbound_enabled: bool = True
     agent_id: str | None = Field(default=None, min_length=1, max_length=128)
+    standard_channels: int = Field(default=1, ge=0, le=1_000)
+    unlimited_channels: int = Field(default=0, ge=0, le=1_000)
+
+    @model_validator(mode="after")
+    def require_channel_capacity(self):
+        if self.standard_channels + self.unlimited_channels < 1:
+            raise ValueError("At least one standard or unlimited channel is required")
+        return self
 
     @field_validator("number")
     @classmethod
@@ -88,6 +96,8 @@ async def get_integration(
                 "inbound_enabled": n.inbound_enabled,
                 "outbound_enabled": n.outbound_enabled,
                 "agent_id": n.agent_id,
+                "standard_channels": n.standard_channels,
+                "unlimited_channels": n.unlimited_channels,
             }
             for n in phone_numbers
         ],
@@ -103,7 +113,10 @@ async def put_integration(
 ):
     _validate_provider(provider)
     numbers = tuple(
-        ProviderPhoneNumber(n.number, n.inbound_enabled, n.outbound_enabled, n.agent_id)
+        ProviderPhoneNumber(
+            n.number, n.inbound_enabled, n.outbound_enabled, n.agent_id,
+            n.standard_channels, n.unlimited_channels,
+        )
         for n in body.phone_numbers
     )
     if len({n.number for n in numbers}) != len(numbers):

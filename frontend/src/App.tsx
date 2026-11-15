@@ -28,6 +28,8 @@ type RegisteredNumber = {
   customer_name: string
   inbound_enabled: boolean
   outbound_enabled: boolean
+  standard_channels: number
+  unlimited_channels: number
   agent_id: string | null
   api_key_id: string | null
   api_key_name: string | null
@@ -107,8 +109,8 @@ const api = {
   apiBilling: (id: string) => http.get<ApiBillingUsage>(`/v1/admin/customers/api-keys/${id}/billing`).then(r => r.data),
   adjustApiBilling: (id: string, mode: 'prepaid' | 'postpaid', amountMinor: number) => http.put(`/v1/admin/customers/api-keys/${id}/billing`, mode === 'prepaid' ? { prepaid_balance_minor: amountMinor } : { postpaid_credit_limit_minor: amountMinor }),
   customers: () => http.get<{ items: Customer[] }>('/v1/admin/customers').then(r => r.data.items),
-  addNumbers: (data: { credential_mode: 'platform' | 'custom'; phone_numbers: string[]; auth_id?: string; auth_token?: string }) => http.post('/v1/admin/customers/phone-numbers', data),
-  updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound }, { params: { customer_id: number.customer_id } }),
+  addNumbers: (data: { credential_mode: 'platform' | 'custom'; phone_numbers: string[]; standard_channels: number; unlimited_channels: number; auth_id?: string; auth_token?: string }) => http.post('/v1/admin/customers/phone-numbers', data),
+  updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean, standardChannels: number, unlimitedChannels: number) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound, standard_channels: standardChannels, unlimited_channels: unlimitedChannels }, { params: { customer_id: number.customer_id } }),
   deleteNumber: (number: RegisteredNumber) => http.delete(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { params: { customer_id: number.customer_id } }),
   createApiKey: (customerName: string, billingMode: 'prepaid' | 'postpaid', billingAmountMinor: number, name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { customer_name: customerName, billing_mode: billingMode, prepaid_balance_minor: billingMode === 'prepaid' ? billingAmountMinor : 0, postpaid_credit_limit_minor: billingMode === 'postpaid' ? billingAmountMinor : 0, name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation }).then(r => r.data),
   updateApiConfig: (id: string, name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials || null, voice_location: voiceLocation, post_call_location: postCallLocation }),
@@ -152,11 +154,15 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [addNumberAnchor, setAddNumberAnchor] = useState<HTMLElement | null>(null)
   const [addNumberMode, setAddNumberMode] = useState<'platform' | 'custom' | null>(null)
   const [numberInput, setNumberInput] = useState('')
+  const [newStandardChannels, setNewStandardChannels] = useState('1')
+  const [newUnlimitedChannels, setNewUnlimitedChannels] = useState('0')
   const [vobizAuthId, setVobizAuthId] = useState('')
   const [vobizAuthToken, setVobizAuthToken] = useState('')
   const [managedNumber, setManagedNumber] = useState<RegisteredNumber | null>(null)
   const [managedInbound, setManagedInbound] = useState(true)
   const [managedOutbound, setManagedOutbound] = useState(true)
+  const [managedStandardChannels, setManagedStandardChannels] = useState('1')
+  const [managedUnlimitedChannels, setManagedUnlimitedChannels] = useState('0')
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
   const [viewingKey, setViewingKey] = useState<PlatformApiKey | null>(null)
   const [billingAdjustmentOpen, setBillingAdjustmentOpen] = useState(false)
@@ -261,13 +267,13 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-customers'] })
-      setAddNumberMode(null); setNumberInput(''); setVobizAuthId(''); setVobizAuthToken('')
+      setAddNumberMode(null); setNumberInput(''); setNewStandardChannels('1'); setNewUnlimitedChannels('0'); setVobizAuthId(''); setVobizAuthToken('')
       setToast('Vobiz phone numbers added.')
     },
     onError: error => setToast(errorText(error)),
   })
   const updateNumberMutation = useMutation({
-    mutationFn: ({ number, inbound, outbound }: { number: RegisteredNumber; inbound: boolean; outbound: boolean }) => api.updateNumber(number, inbound, outbound),
+    mutationFn: ({ number, inbound, outbound, standardChannels, unlimitedChannels }: { number: RegisteredNumber; inbound: boolean; outbound: boolean; standardChannels: number; unlimitedChannels: number }) => api.updateNumber(number, inbound, outbound, standardChannels, unlimitedChannels),
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] }); setManagedNumber(null); setToast('Phone number settings updated.') },
     onError: error => setToast(errorText(error)),
   })
@@ -360,7 +366,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         </div>
       </header>
       <div className="content">
-        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled) }} />}
+        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)) }} />}
         {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => setViewingKey(key)} onManage={openEditApi} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
         {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} />}
         {page === 'Docs' && <DocsPage />}
@@ -381,11 +387,16 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           <TextField label="Vobiz Auth ID" value={vobizAuthId} onChange={event => setVobizAuthId(event.target.value)} fullWidth autoComplete="off" />
           <TextField label="Vobiz Auth Token" type="password" value={vobizAuthToken} onChange={event => setVobizAuthToken(event.target.value)} fullWidth autoComplete="new-password" />
         </>}
+        <Alert severity="info">Configure line capacity per phone number. Standard channels use per-minute carrier pricing; unlimited channels have no carrier line-minute fee. Agent usage remains billed by the API’s agent rate.</Alert>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+          <TextField label="Standard channels per number" type="number" value={newStandardChannels} onChange={event => setNewStandardChannels(event.target.value)} inputProps={{ min: 0, max: 1000, step: 1 }} fullWidth />
+          <TextField label="Unlimited channels per number" type="number" value={newUnlimitedChannels} onChange={event => setNewUnlimitedChannels(event.target.value)} inputProps={{ min: 0, max: 1000, step: 1 }} fullWidth />
+        </Stack>
         <TextField label="Phone numbers" value={numberInput} onChange={event => setNumberInput(event.target.value)} multiline minRows={4} fullWidth placeholder={'+15551234567\n+15557654321'} helperText="Enter one number per line in international format. You can add several numbers at once." />
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAddNumberMode(null)}>Cancel</Button><Button variant="contained" disabled={!numberInput.trim() || (addNumberMode === 'custom' && (!vobizAuthId.trim() || !vobizAuthToken.trim())) || addNumbersMutation.isPending} onClick={() => {
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAddNumberMode(null)}>Cancel</Button><Button variant="contained" disabled={!numberInput.trim() || Number(newStandardChannels) < 0 || Number(newUnlimitedChannels) < 0 || Number(newStandardChannels) + Number(newUnlimitedChannels) < 1 || (addNumberMode === 'custom' && (!vobizAuthId.trim() || !vobizAuthToken.trim())) || addNumbersMutation.isPending} onClick={() => {
         const phoneNumbers = [...new Set(numberInput.split(/[\n,;\s]+/).map(value => value.trim()).filter(Boolean))]
-        addNumbersMutation.mutate({ credential_mode: addNumberMode || 'platform', phone_numbers: phoneNumbers, ...(addNumberMode === 'custom' ? { auth_id: vobizAuthId, auth_token: vobizAuthToken } : {}) })
+        addNumbersMutation.mutate({ credential_mode: addNumberMode || 'platform', phone_numbers: phoneNumbers, standard_channels: Number(newStandardChannels), unlimited_channels: Number(newUnlimitedChannels), ...(addNumberMode === 'custom' ? { auth_id: vobizAuthId, auth_token: vobizAuthToken } : {}) })
       }}>{addNumbersMutation.isPending ? 'Adding…' : 'Add numbers'}</Button></DialogActions>
     </Dialog>
 
@@ -395,9 +406,14 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <Typography><b>{managedNumber?.phone_number}</b> · {managedNumber?.provider} · Platform inventory</Typography>
         <FormControl fullWidth><InputLabel id="inbound-number-label">Inbound calls</InputLabel><Select labelId="inbound-number-label" label="Inbound calls" value={managedInbound ? 'enabled' : 'disabled'} onChange={event => setManagedInbound(event.target.value === 'enabled')}><MenuItem value="enabled">Enabled</MenuItem><MenuItem value="disabled">Disabled</MenuItem></Select></FormControl>
         <FormControl fullWidth><InputLabel id="outbound-number-label">Outbound calls</InputLabel><Select labelId="outbound-number-label" label="Outbound calls" value={managedOutbound ? 'enabled' : 'disabled'} onChange={event => setManagedOutbound(event.target.value === 'enabled')}><MenuItem value="enabled">Enabled</MenuItem><MenuItem value="disabled">Disabled</MenuItem></Select></FormControl>
+        <Alert severity="info">Unlimited channels do not incur carrier line-minute charges. AI agent minutes are still included in this API customer’s usage.</Alert>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+          <TextField label="Standard channels" type="number" value={managedStandardChannels} onChange={event => setManagedStandardChannels(event.target.value)} inputProps={{ min: 0, max: 1000, step: 1 }} fullWidth />
+          <TextField label="Unlimited channels" type="number" value={managedUnlimitedChannels} onChange={event => setManagedUnlimitedChannels(event.target.value)} inputProps={{ min: 0, max: 1000, step: 1 }} fullWidth />
+        </Stack>
         <Typography variant="caption">Credential mode: {managedNumber?.credential_mode || 'Vobiz integration'}</Typography>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5, justifyContent: 'space-between' }}><Button color="error" disabled={!managedNumber || deleteNumberMutation.isPending} onClick={() => { if (managedNumber && window.confirm(`Remove ${managedNumber.phone_number}? This will release the number from any API key.`)) deleteNumberMutation.mutate(managedNumber) }}>Remove number</Button><Stack direction="row" gap={1}><Button onClick={() => setManagedNumber(null)}>Cancel</Button><Button variant="contained" disabled={!managedNumber || (!managedInbound && !managedOutbound) || updateNumberMutation.isPending} onClick={() => managedNumber && updateNumberMutation.mutate({ number: managedNumber, inbound: managedInbound, outbound: managedOutbound })}>{updateNumberMutation.isPending ? 'Saving…' : 'Save settings'}</Button></Stack></DialogActions>
+      <DialogActions sx={{ p: 2.5, justifyContent: 'space-between' }}><Button color="error" disabled={!managedNumber || deleteNumberMutation.isPending} onClick={() => { if (managedNumber && window.confirm(`Remove ${managedNumber.phone_number}? This will release the number from any API key.`)) deleteNumberMutation.mutate(managedNumber) }}>Remove number</Button><Stack direction="row" gap={1}><Button onClick={() => setManagedNumber(null)}>Cancel</Button><Button variant="contained" disabled={!managedNumber || (!managedInbound && !managedOutbound) || Number(managedStandardChannels) < 0 || Number(managedUnlimitedChannels) < 0 || Number(managedStandardChannels) + Number(managedUnlimitedChannels) < 1 || updateNumberMutation.isPending} onClick={() => managedNumber && updateNumberMutation.mutate({ number: managedNumber, inbound: managedInbound, outbound: managedOutbound, standardChannels: Number(managedStandardChannels), unlimitedChannels: Number(managedUnlimitedChannels) })}>{updateNumberMutation.isPending ? 'Saving…' : 'Save settings'}</Button></Stack></DialogActions>
     </Dialog>
 
     <Dialog open={assignmentOpen} onClose={() => setAssignmentOpen(false)} maxWidth="md" fullWidth>
@@ -525,7 +541,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
 function NumbersPage({ connected, onConnect, numbers, loading, error, onAddNumber, onManageNumber }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; loading: boolean; error: unknown; onAddNumber: (event: React.MouseEvent<HTMLButtonElement>) => void; onManageNumber: (number: RegisteredNumber) => void }) {
   return <><PageIntro eyebrow="PHONE INVENTORY" title="Numbers" subtitle="Platform-owned phone inventory across telephony providers." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onAddNumber} disabled={!connected}>Add number</Button>} />
     <Card className="surface-card" sx={{ mt: 3 }}>
-      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : numbers.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 900 }}><TableHead><TableRow>{['Phone number', 'Provider', 'Owner', 'Credentials', 'Inbound', 'Outbound', 'API access', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{numbers.map(number => <TableRow key={`${number.provider}|${number.phone_number}|${number.customer_id}`} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{number.phone_number}</TableCell><TableCell className="table-cell"><Chip size="small" label={number.provider} variant="outlined" sx={{ textTransform: 'capitalize' }} /></TableCell><TableCell className="table-cell">Platform</TableCell><TableCell className="table-cell">{number.credential_mode === 'platform' ? 'Platform' : number.credential_mode === 'custom' ? 'Custom account' : '—'}</TableCell><TableCell className="table-cell"><StatusChip enabled={number.inbound_enabled} /></TableCell><TableCell className="table-cell"><StatusChip enabled={number.outbound_enabled} /></TableCell><TableCell className="table-cell">{number.api_key_name || 'Unassigned'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onManageNumber(number)}>Manage</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><HubRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No phone numbers registered</b><div style={{ fontSize: 12, marginTop: 6 }}>Add a number to get started. You can use the platform Vobiz account or add a custom provider account owned by the platform.</div></div>}
+      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : numbers.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 1120 }}><TableHead><TableRow>{['Phone number', 'Provider', 'Owner', 'Credentials', 'Standard channels', 'Unlimited channels', 'Inbound', 'Outbound', 'API access', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{numbers.map(number => <TableRow key={`${number.provider}|${number.phone_number}|${number.customer_id}`} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{number.phone_number}</TableCell><TableCell className="table-cell"><Chip size="small" label={number.provider} variant="outlined" sx={{ textTransform: 'capitalize' }} /></TableCell><TableCell className="table-cell">Platform</TableCell><TableCell className="table-cell">{number.credential_mode === 'platform' ? 'Platform' : number.credential_mode === 'custom' ? 'Custom account' : '—'}</TableCell><TableCell className="table-cell">{number.standard_channels}</TableCell><TableCell className="table-cell">{number.unlimited_channels}</TableCell><TableCell className="table-cell"><StatusChip enabled={number.inbound_enabled} /></TableCell><TableCell className="table-cell"><StatusChip enabled={number.outbound_enabled} /></TableCell><TableCell className="table-cell">{number.api_key_name || 'Unassigned'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onManageNumber(number)}>Manage</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><HubRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No phone numbers registered</b><div style={{ fontSize: 12, marginTop: 6 }}>Add a number to get started. You can use the platform Vobiz account or add a custom provider account owned by the platform.</div></div>}
     </Card>
   </>
 }

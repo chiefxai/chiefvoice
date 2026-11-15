@@ -166,8 +166,16 @@ class ReplacePhoneApiKeyNumbersBody(BaseModel):
 class AddPlatformNumbersBody(BaseModel):
     credential_mode: Literal["platform", "custom"]
     phone_numbers: list[str] = Field(min_length=1, max_length=100)
+    standard_channels: int = Field(default=1, ge=0, le=1_000)
+    unlimited_channels: int = Field(default=0, ge=0, le=1_000)
     auth_id: str | None = Field(default=None, max_length=200)
     auth_token: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_channel_capacity(self):
+        if self.standard_channels + self.unlimited_channels < 1:
+            raise ValueError("At least one standard or unlimited channel is required")
+        return self
 
     @field_validator("phone_numbers")
     @classmethod
@@ -186,6 +194,14 @@ class AddPlatformNumbersBody(BaseModel):
 class UpdatePlatformNumberBody(BaseModel):
     inbound_enabled: bool
     outbound_enabled: bool
+    standard_channels: int = Field(ge=0, le=1_000)
+    unlimited_channels: int = Field(ge=0, le=1_000)
+
+    @model_validator(mode="after")
+    def require_channel_capacity(self):
+        if self.standard_channels + self.unlimited_channels < 1:
+            raise ValueError("At least one standard or unlimited channel is required")
+        return self
 
 
 def _vobiz_credentials(credential_mode: str, auth_id: str | None, auth_token: str | None) -> dict[str, str]:
@@ -230,6 +246,48 @@ def _integration_store(request: Request) -> SqlProviderIntegrationStore:
     if store is None or not hasattr(store, "list_phone_numbers"):
         raise HTTPException(status_code=503, detail="Phone number storage is not configured")
     return store
+
+
+async def _sync_api_channel_capacity(request: Request, changed_number: tuple[str, str]) -> None:
+    """Keep each API plan's concurrent call limit aligned with its assigned lines."""
+    billing = getattr(request.app.state, "billing_directory", None)
+    api_key_directory = getattr(request.app.state, "api_key_directory", None)
+    if billing is None or api_key_directory is None or not hasattr(billing, "get_plan"):
+        return
+    records = await _integration_store(request).list_phone_numbers()
+    capacities = {
+        (item.provider, item.number): (
+            item.standard_channels + item.unlimited_channels if item.outbound_enabled else 0
+        )
+        for item in records
+    }
+    for key in await api_key_directory.list_all():
+        if changed_number not in key.assigned_numbers:
+            continue
+        plan = await billing.get_plan(key.tenant_id)
+        if plan is None:
+            continue
+        capacity = min(
+            1_000,
+            sum(capacities.get(assigned, 0) for assigned in key.assigned_numbers),
+        )
+        try:
+            await billing.configure(
+                tenant_id=key.tenant_id,
+                billing_mode=BillingMode(plan["billing_mode"]),
+                voice_enabled=plan["voice_enabled"],
+                currency=plan["currency"],
+                rate_per_minute_minor=plan["rate_per_minute_minor"],
+                max_call_seconds=plan["max_call_seconds"],
+                allowed_channels=plan["allowed_channels"],
+                max_concurrent_sessions=max(1, capacity),
+                recording_allowed=plan["recording_allowed"],
+            )
+        except ValueError:
+            logger.exception(
+                "api_channel_capacity_sync_failed",
+                extra={"tenant_id": key.tenant_id, "api_key_id": key.key_id},
+            )
 
 
 class AgentProviderConfigBody(BaseModel):
@@ -486,6 +544,8 @@ async def list_platform_phone_numbers(
                 "customer_name": "Platform",
                 "inbound_enabled": phone.inbound_enabled,
                 "outbound_enabled": phone.outbound_enabled,
+                "standard_channels": phone.standard_channels,
+                "unlimited_channels": phone.unlimited_channels,
                 "agent_id": phone.agent_id,
                 "api_key_id": owner.key_id if owner else None,
                 "api_key_name": owner.name if owner else None,
@@ -516,7 +576,17 @@ async def add_platform_phone_numbers(
     existing_values = {item.number for item in existing_numbers}
     if existing_values.intersection(body.phone_numbers):
         raise HTTPException(status_code=409, detail="A selected number is already registered")
-    merged_numbers = [*existing_numbers, *(ProviderPhoneNumber(number) for number in body.phone_numbers)]
+    merged_numbers = [
+        *existing_numbers,
+        *(
+            ProviderPhoneNumber(
+                number,
+                standard_channels=body.standard_channels,
+                unlimited_channels=body.unlimited_channels,
+            )
+            for number in body.phone_numbers
+        ),
+    ]
     integration_settings = dict(integration.settings) if integration else {}
     integration_settings["credential_mode"] = body.credential_mode
     if integration_settings.get("default_caller_id") not in {
@@ -538,7 +608,9 @@ async def add_platform_phone_numbers(
         "phone_number_count": len(body.phone_numbers), "credential_mode": body.credential_mode,
     })
     return {"provider": "vobiz", "owner": "platform", "credential_mode": body.credential_mode,
-            "phone_numbers": body.phone_numbers}
+            "phone_numbers": body.phone_numbers,
+            "standard_channels": body.standard_channels,
+            "unlimited_channels": body.unlimited_channels}
 
 
 @router.put("/phone-numbers/{provider}/{phone_number:path}")
@@ -558,7 +630,10 @@ async def update_platform_phone_number(
     if integration is None:
         raise HTTPException(status_code=404, detail="Provider configuration not found")
     numbers = [
-        ProviderPhoneNumber(item.number, body.inbound_enabled, body.outbound_enabled, item.agent_id)
+        ProviderPhoneNumber(
+            item.number, body.inbound_enabled, body.outbound_enabled, item.agent_id,
+            body.standard_channels, body.unlimited_channels,
+        )
         if item.number == phone_number else item
         for item in integration.phone_numbers
     ]
@@ -570,6 +645,7 @@ async def update_platform_phone_number(
         integration_settings["default_caller_id"] = next(iter(outbound_numbers), None)
     integration_settings = {key: value for key, value in integration_settings.items() if value is not None}
     await store.save(ProviderIntegration(provider, customer_id, integration.credentials, integration_settings, tuple(numbers)))
+    await _sync_api_channel_capacity(request, (provider, phone_number))
     return {"status": "updated", "phone_number": phone_number}
 
 
@@ -744,6 +820,12 @@ async def issue_phone_api_key(
         raise HTTPException(
             status_code=404, detail="An outbound-enabled phone number was not found"
         )
+    channel_capacity = min(
+        1_000,
+        sum(item.standard_channels + item.unlimited_channels for item in selected if item),
+    )
+    if channel_capacity < 1:
+        raise HTTPException(status_code=409, detail="Selected phone numbers have no configured channels")
     voice_agent = await _assigned_agent(request, body.voice_agent_id, PLATFORM_OWNER_ID, "calling")
     post_call_agent = await _assigned_agent(request, body.post_call_agent_id, PLATFORM_OWNER_ID, "post_call")
     expires_at = datetime.now(UTC) + MAX_API_KEY_LIFETIME
@@ -790,7 +872,7 @@ async def issue_phone_api_key(
                 "rate_per_minute_minor": rate_per_minute_minor,
                 "max_call_seconds": 3600,
                 "allowed_channels": ["phone"],
-                "max_concurrent_sessions": 1,
+                "max_concurrent_sessions": channel_capacity,
                 "recording_allowed": True,
                 "prepaid_balance_minor": body.prepaid_balance_minor,
                 "postpaid_credit_limit_minor": body.postpaid_credit_limit_minor,
@@ -839,10 +921,18 @@ async def update_phone_api_key_config(
     if len(requested) != len(set(requested)) or len({number for _, number in requested}) != len(requested):
         raise HTTPException(status_code=422, detail="Phone number assignments must be unique")
     registered = await _integration_store(request).list_phone_numbers()
+    selected_phone_numbers = []
     for provider, number in requested:
         phone = next((item for item in registered if item.provider == provider and item.number == number and item.outbound_enabled), None)
         if phone is None:
             raise HTTPException(status_code=404, detail="An outbound-enabled platform number was not found")
+        selected_phone_numbers.append(phone)
+    channel_capacity = min(
+        1_000,
+        sum(item.standard_channels + item.unlimited_channels for item in selected_phone_numbers),
+    )
+    if channel_capacity < 1:
+        raise HTTPException(status_code=409, detail="Selected phone numbers have no configured channels")
     voice_agent = await _assigned_agent(request, body.voice_agent_id, PLATFORM_OWNER_ID, "calling")
     post_call_agent = await _assigned_agent(request, body.post_call_agent_id, PLATFORM_OWNER_ID, "post_call")
     credentials_json = None
@@ -896,7 +986,7 @@ async def update_phone_api_key_config(
                     rate_per_minute_minor=rate_per_minute_minor,
                     max_call_seconds=plan["max_call_seconds"],
                     allowed_channels=plan["allowed_channels"],
-                    max_concurrent_sessions=plan["max_concurrent_sessions"],
+                    max_concurrent_sessions=channel_capacity,
                     recording_allowed=plan["recording_allowed"],
                 )
             except ValueError as exc:

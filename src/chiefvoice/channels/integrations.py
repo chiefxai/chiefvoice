@@ -8,6 +8,8 @@ class ProviderPhoneNumber:
     inbound_enabled: bool = True
     outbound_enabled: bool = True
     agent_id: str | None = None
+    standard_channels: int = 1
+    unlimited_channels: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +20,8 @@ class RegisteredPhoneNumber:
     inbound_enabled: bool
     outbound_enabled: bool
     agent_id: str | None = None
+    standard_channels: int = 1
+    unlimited_channels: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from cryptography.fernet import Fernet
-from sqlalchemy import Boolean, ForeignKeyConstraint, MetaData, String, Text, delete, select
+from sqlalchemy import Boolean, ForeignKeyConstraint, Integer, MetaData, String, Text, delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, selectinload
 
@@ -38,6 +38,8 @@ class PhoneNumberRow(Base):
     inbound_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     outbound_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    standard_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    unlimited_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     __table_args__ = (
         ForeignKeyConstraint(
             ["provider", "tenant_id"],
@@ -112,6 +114,8 @@ class SqlProviderIntegrationStore:
                     inbound_enabled=row.inbound_enabled,
                     outbound_enabled=row.outbound_enabled,
                     agent_id=row.agent_id,
+                    standard_channels=row.standard_channels,
+                    unlimited_channels=row.unlimited_channels,
                 )
                 for row in rows
             ]
@@ -141,6 +145,8 @@ class SqlProviderIntegrationStore:
                     inbound_enabled=item.inbound_enabled,
                     outbound_enabled=item.outbound_enabled,
                     agent_id=item.agent_id,
+                    standard_channels=item.standard_channels,
+                    unlimited_channels=item.unlimited_channels,
                 )
                 for item in integration.phone_numbers
             )
@@ -159,7 +165,10 @@ class SqlProviderIntegrationStore:
             credentials=credentials,
             settings=json.loads(row.settings_json),
             phone_numbers=tuple(
-                ProviderPhoneNumber(p.number, p.inbound_enabled, p.outbound_enabled, p.agent_id)
+                ProviderPhoneNumber(
+                    p.number, p.inbound_enabled, p.outbound_enabled, p.agent_id,
+                    p.standard_channels, p.unlimited_channels,
+                )
                 for p in row.phone_numbers
             ),
         )
