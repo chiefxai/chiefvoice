@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, MetaData, String, select
+from sqlalchemy import DateTime, MetaData, String, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -55,6 +55,15 @@ class SqlAccountStore:
             row = await session.scalar(
                 select(TenantAccountRow).where(TenantAccountRow.tenant_id == tenant_id)
             )
+
+    async def update_display_name(self, tenant_id: str, display_name: str) -> bool:
+        async with self._sessions.begin() as session:
+            result = await session.execute(
+                update(TenantAccountRow)
+                .where(TenantAccountRow.tenant_id == tenant_id)
+                .values(display_name=display_name)
+            )
+            return result.rowcount == 1
             if row is None:
                 return None
             created_at = row.created_at

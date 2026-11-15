@@ -100,6 +100,7 @@ class PhoneNumberAssignment(BaseModel):
 
 
 class CreatePhoneApiKeyBody(BaseModel):
+    customer_name: str = Field(min_length=1, max_length=200)
     name: str = Field(default="Phone API", min_length=1, max_length=100)
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
@@ -108,12 +109,12 @@ class CreatePhoneApiKeyBody(BaseModel):
     voice_location: str | None = Field(default=None, max_length=64)
     post_call_location: str | None = Field(default=None, max_length=64)
 
-    @field_validator("name")
+    @field_validator("customer_name", "name")
     @classmethod
     def normalize_name(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("API name cannot be blank")
+            raise ValueError("Value cannot be blank")
         return value
 
 class UpdatePhoneApiKeyConfigBody(BaseModel):
@@ -746,6 +747,9 @@ async def issue_phone_api_key(
         raise HTTPException(
             status_code=409, detail="A selected phone number is already assigned to another API"
         ) from exc
+    if not await account_store.update_display_name(tenant_id, body.customer_name.strip()):
+        raise HTTPException(status_code=404, detail="Customer account was not found")
+    account = await account_store.get(tenant_id)
     logger.info(
         "phone_api_key_issued",
         extra={

@@ -109,7 +109,7 @@ const api = {
   addNumbers: (data: { customer_id: string; credential_mode: 'platform' | 'custom'; phone_numbers: string[]; auth_id?: string; auth_token?: string }) => http.post('/v1/admin/customers/phone-numbers', data),
   updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound }, { params: { customer_id: number.customer_id } }),
   deleteNumber: (number: RegisteredNumber) => http.delete(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { params: { customer_id: number.customer_id } }),
-  createApiKey: (name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation }).then(r => r.data),
+  createApiKey: (customerName: string, name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { customer_name: customerName, name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation }).then(r => r.data),
   updateApiConfig: (id: string, name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials || null, voice_location: voiceLocation, post_call_location: postCallLocation }),
   createAgentConfig: (data: { customer_id: string; name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string }) => http.post<AgentConfiguration>('/v1/admin/customers/agent-configs', data).then(r => r.data),
   updateAgentConfig: (id: string, data: { customer_id: string; name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string }) => http.put<AgentConfiguration>(`/v1/admin/customers/agent-configs/${id}`, data).then(r => r.data),
@@ -131,6 +131,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [assignmentOpen, setAssignmentOpen] = useState(false)
   const [selectedNumbers, setSelectedNumbers] = useState<string[]>([])
   const [apiName, setApiName] = useState('')
+  const [apiCustomerName, setApiCustomerName] = useState('')
   const [voiceAgentId, setVoiceAgentId] = useState('')
   const [postCallAgentId, setPostCallAgentId] = useState('')
   const [agentConfigOpen, setAgentConfigOpen] = useState(false)
@@ -209,14 +210,16 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', viewingKey?.id], queryFn: () => api.apiCalls(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', viewingKey?.id], queryFn: () => api.apiBilling(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 10000 : false })
   const issueMutation = useMutation({
-    mutationFn: ({ name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation }: { name: string; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string }) => api.createApiKey(name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation),
+    mutationFn: ({ customerName, name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation }: { customerName: string; name: string; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string }) => api.createApiKey(customerName, name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation),
     onSuccess: result => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
+      void queryClient.invalidateQueries({ queryKey: ['platform-customers'] })
+      void queryClient.invalidateQueries({ queryKey: ['platform-agent-configs'] })
       setOneTimeKey(result)
       setAssignmentOpen(false)
       setSelectedNumbers([])
-      setApiName(''); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials('')
+      setApiName(''); setApiCustomerName(''); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials('')
       setToast('API key created for the selected phone number.')
     },
     onError: error => setToast(errorText(error)),
@@ -273,10 +276,11 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const selected = outboundNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`))
   const submitCreateApi = () => {
     if (!selected.length) { setToast('Required: select at least one unassigned outbound phone number.'); return }
+    if (!apiCustomerName.trim()) { setToast('Enter the customer name for this API.'); return }
     if (!apiName.trim()) { setToast('Enter a name for this API.'); return }
     if (!voiceAgentId && !postCallAgentId) { setToast('Select at least one agent for this API.'); return }
     if (!apiCredentials.trim()) { setToast('Add a Google Cloud service account JSON for this API.'); return }
-    issueMutation.mutate({ name: apiName.trim(), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim() })
+    issueMutation.mutate({ customerName: apiCustomerName.trim(), name: apiName.trim(), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim() })
   }
   const handleCreateNumberSelection = (value: string[] | string) => {
     const values = typeof value === 'string' ? value.split(',') : value
@@ -289,7 +293,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setPostCallLocation(availableAgents.find(agent => agent.id === postCallAgentId)?.location || availableAgents.find(agent => agent.kind === 'post_call')?.location || 'us-central1')
   }
   const openCreateApi = () => {
-    setSelectedNumbers([]); setApiName(''); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('us-central1'); setAssignmentOpen(true)
+    setSelectedNumbers([]); setApiName(''); setApiCustomerName(''); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('us-central1'); setAssignmentOpen(true)
   }
   const openEditApi = (key: PlatformApiKey) => {
     setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`))
@@ -390,7 +394,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     <Dialog open={assignmentOpen} onClose={() => setAssignmentOpen(false)} maxWidth="md" fullWidth>
       <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Create API</DialogTitle>
       <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        <Alert severity="info" sx={{ fontSize: 12 }}>Assign numbers and agent configurations to this API. Its Google Cloud project credentials are encrypted and isolated to this API.</Alert>
+        <Alert severity="info" sx={{ fontSize: 12 }}>Each API represents a customer. Enter the customer name, assign phone numbers and agent templates, then provide this API's Google Cloud credentials.</Alert>
+        <TextField label="Customer name" value={apiCustomerName} onChange={event => setApiCustomerName(event.target.value)} required fullWidth />
         <TextField label="API name" value={apiName} onChange={event => setApiName(event.target.value)} required fullWidth />
         <Typography variant="h6" sx={{ fontWeight: 800 }}>Phone numbers</Typography>
         <FormControl fullWidth disabled={!outboundNumbers.length}>
@@ -409,7 +414,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <TextField label="Google Cloud service account JSON" value={apiCredentials} onChange={event => setApiCredentials(event.target.value)} multiline minRows={5} required fullWidth placeholder="Paste the service account JSON for this API's Vertex project" />
         {!voiceAgentId && postCallAgentId && <Alert severity="warning">This API has only a post-call agent assigned. Outbound phone calls require a calling agent.</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || !apiCredentials.trim()} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiCustomerName.trim() || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || !apiCredentials.trim()} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={!!oneTimeKey} onClose={() => setOneTimeKey(null)} maxWidth="sm" fullWidth>
