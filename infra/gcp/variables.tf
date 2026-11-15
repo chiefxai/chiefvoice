@@ -1,14 +1,18 @@
 variable "project_id" { type = string }
-variable "region" { type = string
+variable "region" {
+  type    = string
   default = "us-central1"
 }
-variable "zone" { type = string
+variable "zone" {
+  type    = string
   default = "us-central1-a"
 }
-variable "vm_machine_type" { type = string
+variable "vm_machine_type" {
+  type    = string
   default = "e2-standard-4"
 }
-variable "vm_disk_gb" { type = number
+variable "vm_disk_gb" {
+  type    = number
   default = 100
 }
 variable "object_storage_bucket_name" { type = string }
@@ -29,15 +33,19 @@ variable "platform_admin_subjects" {
   default     = []
   description = "OIDC subject IDs allowed to provision and manage customer accounts."
 }
-variable "vertex_location" { type = string
+variable "vertex_location" {
+  type    = string
   default = "us-central1"
 }
-variable "vertex_model" { type = string
+variable "vertex_model" {
+  type    = string
   default = "google/gemini-live-2.5-flash-native-audio"
 }
-variable "post_call_model" { type = string
+variable "post_call_model" {
+  type    = string
   default = "gemini-2.5-flash"
 }
-variable "labels" { type = map(string)
+variable "labels" {
+  type    = map(string)
   default = { app = "chiefvoice", managed_by = "terraform" }
 }

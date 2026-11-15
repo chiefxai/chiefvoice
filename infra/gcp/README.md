@@ -4,6 +4,28 @@ This Terraform root is the active GCP deployment: one Compute Engine VM runs the
 
 ## Prerequisites
 
+- Start Docker Desktop, then authenticate with your own Google account. These commands run gcloud in the provided container and save ADC credentials in the local, Git-ignored `.gcloud/` directory. Complete the Google login in your browser and enter its one-time code in your local terminal; do not send it here. Your account needs permission to manage resources and IAM in `chief-502717` and enable project APIs. Project Owner is the simplest one-time setup role; Terraform creates dedicated runtime and build service accounts for the deployed app.
+
+  ```sh
+  mkdir -p .gcloud
+  docker compose -f infra/gcp/terraform-compose.yaml run --rm gcloud auth login --no-launch-browser
+  docker compose -f infra/gcp/terraform-compose.yaml run --rm gcloud config set project chief-502717
+  docker compose -f infra/gcp/terraform-compose.yaml run --rm gcloud auth application-default login --no-launch-browser
+  docker compose -f infra/gcp/terraform-compose.yaml run --rm gcloud auth application-default set-quota-project chief-502717
+  ```
+
+- Bootstrap the private, versioned Terraform state bucket before initializing the production GCS backend:
+
+  ```sh
+  docker compose -f infra/gcp/terraform-compose.yaml run --rm terraform -chdir=state init
+  docker compose -f infra/gcp/terraform-compose.yaml run --rm terraform -chdir=state plan
+  docker compose -f infra/gcp/terraform-compose.yaml run --rm terraform -chdir=state apply
+  cp infra/gcp/backend.hcl.example infra/gcp/backend.hcl
+  cp infra/gcp/terraform.tfvars.example infra/gcp/terraform.tfvars
+  ```
+
+  The state bucket stack uses local state only to create that bucket; subsequent production state is kept in GCS. The bucket is private and protected from accidental Terraform destruction.
+- Ensure billing is active on `chief-502717` under the supplied billing account. This shared-project deployment does not attach customer projects to the billing account.
 - Set `public_domain` to a DNS name you control. Point its A record to `backend_external_ip` before the first public deployment so Caddy can obtain/renew its HTTPS certificate. Provider callback URLs are HTTPS.
 - Configure OIDC issuer, audience and JWKS URL; `terraform.tfvars.example` shows all required values.
 - Set `platform_admin_subjects` to trusted OIDC `sub` values for platform operators. Customer provisioning also requires `platform:customers:write` or `platform:customers:read` in the token scope; an empty allowlist disables customer administration.

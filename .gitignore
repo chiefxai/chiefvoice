@@ -8,8 +8,14 @@ __pycache__/
 var/recordings/
 var/backups/
 .terraform/
+.gcloud/
 *.tfstate
 *.tfstate.*
 *.tfplan
 terraform.tfvars
 backend.hcl
+.DS_Store
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+.env.docker
