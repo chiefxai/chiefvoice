@@ -232,7 +232,7 @@ class AgentProviderConfigBody(BaseModel):
     model: str = Field(min_length=1, max_length=160)
     location: str = Field(default="us-central1", min_length=1, max_length=64)
     cost_per_minute_minor: int = Field(default=0, ge=0, le=1_000_000_000)
-    currency: str = Field(default="USD", min_length=3, max_length=3)
+    currency: Literal["INR"] = "INR"
 
     @field_validator("name", "model", "location")
     @classmethod
@@ -240,14 +240,6 @@ class AgentProviderConfigBody(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("Value cannot be blank")
-        return value
-
-    @field_validator("currency")
-    @classmethod
-    def normalize_currency(cls, value: str) -> str:
-        value = value.strip().upper()
-        if len(value) != 3 or not value.isalpha():
-            raise ValueError("Currency must be a three-letter ISO code")
         return value
 
 

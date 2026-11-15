@@ -141,7 +141,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [agentModel, setAgentModel] = useState('google/gemini-live-2.5-flash-native-audio')
   const [agentLocation, setAgentLocation] = useState('us-central1')
   const [agentCost, setAgentCost] = useState('0.00')
-  const [agentCurrency, setAgentCurrency] = useState('USD')
+  const [agentCurrency, setAgentCurrency] = useState('INR')
   const [apiCredentials, setApiCredentials] = useState('')
   const [voiceLocation, setVoiceLocation] = useState('us-central1')
   const [postCallLocation, setPostCallLocation] = useState('us-central1')
@@ -296,7 +296,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setApiName(key.name); setVoiceAgentId(key.voice_agent_id || ''); setPostCallAgentId(key.post_call_agent_id || '')
     setApiCredentials(''); setVoiceLocation(key.voice_location || key.vertex_location || 'us-central1'); setPostCallLocation(key.post_call_location || key.vertex_location || 'us-central1')
   }
-  const openCreateAgentConfig = () => { setEditingAgentConfig(null); setAgentCustomerId(''); setAgentName(''); setAgentKind('calling'); setAgentModel('google/gemini-live-2.5-flash-native-audio'); setAgentLocation('us-central1'); setAgentCost('0.00'); setAgentCurrency('USD'); setAgentConfigOpen(true) }
+  const openCreateAgentConfig = () => { setEditingAgentConfig(null); setAgentCustomerId(''); setAgentName(''); setAgentKind('calling'); setAgentModel('google/gemini-live-2.5-flash-native-audio'); setAgentLocation('us-central1'); setAgentCost('0.00'); setAgentCurrency('INR'); setAgentConfigOpen(true) }
   const openEditAgentConfig = (agent: AgentConfiguration) => { setEditingAgentConfig(agent); setAgentCustomerId(agent.customer_id); setAgentName(agent.name); setAgentKind(agent.kind); setAgentModel(agent.model); setAgentLocation(agent.location); setAgentCost((agent.cost_per_minute_minor / 100).toFixed(2)); setAgentCurrency(agent.currency); setAgentConfigOpen(true) }
   const saveAgentConfig = () => {
     if (!agentCustomerId || !agentName.trim() || !agentModel.trim() || !agentLocation.trim()) { setToast('Complete all required agent fields.'); return }
@@ -460,7 +460,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <TextField label="Vertex AI location" value={agentLocation} onChange={event => setAgentLocation(event.target.value)} required fullWidth />
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
           <TextField label="Cost per minute" type="number" value={agentCost} onChange={event => setAgentCost(event.target.value)} inputProps={{ min: 0, step: 0.01 }} helperText="Configured agent cost; informational and separate from the customer billing plan." fullWidth />
-          <TextField label="Currency" value={agentCurrency} onChange={event => setAgentCurrency(event.target.value.toUpperCase())} inputProps={{ maxLength: 3 }} sx={{ minWidth: 130 }} />
+          <TextField label="Currency" value="INR" InputProps={{ readOnly: true }} helperText="Cost is recorded in rupees (paise precision)." sx={{ minWidth: 130 }} />
         </Stack>
       </Stack></DialogContent>
       <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAgentConfigOpen(false)}>Cancel</Button><Button variant="contained" disabled={saveAgentConfigMutation.isPending} onClick={saveAgentConfig}>{saveAgentConfigMutation.isPending ? 'Saving…' : 'Save agent'}</Button></DialogActions>

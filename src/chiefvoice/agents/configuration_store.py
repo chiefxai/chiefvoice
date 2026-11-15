@@ -23,7 +23,7 @@ class AgentConfigurationRow(Base):
     model: Mapped[str] = mapped_column(String(160), nullable=False)
     location: Mapped[str] = mapped_column(String(64), nullable=False)
     cost_per_minute_minor: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD", server_default="USD")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR", server_default="INR")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
