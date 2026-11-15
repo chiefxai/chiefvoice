@@ -36,13 +36,15 @@ def build_pipeline(
     # Vobiz supplies narrowband 8 kHz PCM, while Gemini Live requires 16 kHz
     # PCM input. Resample before both diagnostics and the realtime model.
     processors: list[FrameProcessor] = [transport.input(), GeminiInputResampler()]
-    if audio_diagnostics is not None:
-        processors.append(
-            AudioFrameCounter(audio_diagnostics, "gemini_input", InputAudioRawFrame)
-        )
     if transcript_processor is not None:
         processors.append(transcript_processor)
     processors.append(user_aggregator)
+    if audio_diagnostics is not None:
+        # Count at the actual model input boundary, after the context
+        # aggregator, so the metric catches frames the model can consume.
+        processors.append(
+            AudioFrameCounter(audio_diagnostics, "gemini_input", InputAudioRawFrame)
+        )
     processors.extend(conversation_processors)
     if assistant_transcript_processor is not None:
         processors.append(assistant_transcript_processor)

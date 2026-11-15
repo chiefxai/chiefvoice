@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, Request, Response, WebSocket
 from fastapi.responses import Response as FastAPIResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.serializers.vobiz import VobizFrameSerializer, parse_vobiz_start
 from pipecat.transports.base_transport import BaseTransport
@@ -426,6 +427,15 @@ class VobizAdapter:
                     enable_metrics=True,
                     enable_usage_metrics=True,
                 ),
+            )
+            # LLMContextAggregatorPair only emits an LLMContextFrame after an
+            # LLMRunFrame or user turn. Gemini Live drops realtime audio until
+            # it has received that initial context frame, so seed the empty
+            # per-call context before Vobiz audio can arrive.
+            await task.queue_frames([LLMRunFrame()])
+            logger.info(
+                "call_agent_context_kickoff_queued",
+                extra={"session_id": session.session_id, "provider": self.provider},
             )
             runner_task = asyncio.create_task(
                 PipelineRunner(handle_sigint=False).run(task),
