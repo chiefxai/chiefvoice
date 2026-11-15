@@ -37,6 +37,12 @@ PIPELINE_SAMPLE_RATE = 8000
 MAX_CALL_STATE_TOKEN_LENGTH = 16_384
 
 
+class _InvalidCallState(ValueError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True, slots=True)
 class VobizInboundCall:
     provider: str
@@ -92,8 +98,7 @@ class VobizAdapter:
         self, call: OutboundCall, session: AcceptedSession
     ) -> AcceptedSession:
         self._require_configured()
-        integration = await self.integration_store.get_for_phone_number(self.provider, call.caller_id) if call.caller_id else None
-        integration = integration or await self.integration_store.get(self.provider, "platform")
+        integration = await self._integration_for_caller(call.caller_id)
         if integration is None:
             raise HTTPException(status_code=403, detail="Vobiz is not connected to this account")
         auth_id = integration.credentials.get("auth_id", "")
@@ -319,8 +324,12 @@ class VobizAdapter:
         if not isinstance(connection, WebSocket):
             raise TypeError("Vobiz media transport requires a FastAPI WebSocket")
         self._require_configured()
-        integration = await self.integration_store.get_for_phone_number(self.provider, session.caller)
+        integration = await self._integration_for_caller(session.caller)
         if integration is None:
+            logger.error(
+                "vobiz_media_integration_missing",
+                extra={"session_id": session.session_id, "provider": self.provider},
+            )
             raise HTTPException(status_code=404, detail="Vobiz account is no longer configured")
         auth_id = integration.credentials.get("auth_id", "")
         auth_token = integration.credentials.get("auth_token", "")
@@ -485,7 +494,7 @@ class VobizAdapter:
         if not session.provider_call_id:
             return
         self._require_configured()
-        integration = await self.integration_store.get_for_phone_number(self.provider, session.caller)
+        integration = await self._integration_for_caller(session.caller)
         if integration is None:
             return
         auth_id = integration.credentials.get("auth_id", "")
@@ -582,15 +591,31 @@ class VobizAdapter:
         return token
 
     def _read_state(self, token: str) -> dict[str, Any]:
-        if not token or len(token) > MAX_CALL_STATE_TOKEN_LENGTH:
+        def reject(reason: str) -> None:
+            logger.warning(
+                "vobiz_callback_state_rejected",
+                extra={"provider": self.provider, "reason": reason, "state_length": len(token)},
+            )
             raise HTTPException(status_code=404, detail="Not found")
+
+        if not token:
+            reject("missing")
+        if len(token) > MAX_CALL_STATE_TOKEN_LENGTH:
+            reject("too_large")
         try:
             signed_token = self._state_cipher.decrypt(token.encode("ascii")).decode("ascii")
+        except InvalidToken:
+            reject("encryption_invalid")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            reject("encoding_invalid")
+        try:
             claims = self._state.loads(signed_token, max_age=12 * 60 * 60)
-        except (InvalidToken, UnicodeDecodeError, BadSignature, SignatureExpired) as exc:
-            raise HTTPException(status_code=404, detail="Not found") from exc
+        except SignatureExpired:
+            reject("expired")
+        except BadSignature:
+            reject("signature_invalid")
         if not isinstance(claims, dict):
-            raise HTTPException(status_code=404, detail="Not found")
+            reject("payload_invalid")
         try:
             _required_state_string(claims.get("session_id"), "session_id", 128)
             _required_state_string(claims.get("tenant_id"), "tenant_id", 200)
@@ -627,7 +652,7 @@ class VobizAdapter:
                         .decode("utf-8")
                     )
                 except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise ValueError("Invalid encrypted call context") from exc
+                    raise _InvalidCallState("context_invalid") from exc
                 if not isinstance(call_context, dict):
                     raise ValueError("Invalid call context")
                 live_context = call_context.get("live_agent_context")
@@ -662,9 +687,25 @@ class VobizAdapter:
                 if not isinstance(include_live_context, bool):
                     raise ValueError("Invalid live agent context flag")
                 claims["call_context"] = call_context
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="Not found") from exc
+        except _InvalidCallState as exc:
+            reject(exc.reason)
+        except (AttributeError, TypeError, ValueError):
+            reject("claims_invalid")
         return claims
+
+    async def _integration_for_caller(self, caller: str | None):
+        """Resolve a number-specific provider account, then platform credentials.
+
+        Platform-owned numbers use the platform Vobiz account. All call stages
+        must apply the same fallback so a call placed with platform credentials
+        can also establish its media stream and be hung up reliably.
+        """
+        integration = (
+            await self.integration_store.get_for_phone_number(self.provider, caller)
+            if caller
+            else None
+        )
+        return integration or await self.integration_store.get(self.provider, "platform")
 
     @staticmethod
     def _session_from_state(claims: dict[str, Any]) -> AcceptedSession:
