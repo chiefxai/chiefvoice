@@ -125,6 +125,26 @@ resource "google_service_account" "cloud_build" {
   account_id   = "chiefvoice-build"
   display_name = "Chiefvoice Cloud Build deployer"
 }
+resource "google_service_account" "function_build" {
+  account_id   = "chiefvoice-function-build"
+  display_name = "Chiefvoice post-call function build"
+}
+resource "google_project_iam_member" "function_build_builder" {
+  project = var.project_id
+  role    = "roles/cloudbuild.builds.builder"
+  member  = "serviceAccount:${google_service_account.function_build.email}"
+}
+resource "google_artifact_registry_repository_iam_member" "function_build_ar_writer" {
+  location   = google_artifact_registry_repository.images.location
+  repository = google_artifact_registry_repository.images.name
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.function_build.email}"
+}
+resource "google_service_account_iam_member" "cloud_build_function_build_act_as" {
+  service_account_id = google_service_account.function_build.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.cloud_build.email}"
+}
 resource "google_project_iam_member" "backend_tasks" {
   project = var.project_id
   role    = "roles/cloudtasks.enqueuer"

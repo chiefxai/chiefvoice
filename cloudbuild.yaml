@@ -8,7 +8,7 @@ substitutions:
   _FUNCTION_NAME: chiefvoice-post-call
   _FUNCTION_VPC_CONNECTOR: chiefvoice-functions
   _FUNCTION_SERVICE_ACCOUNT: chiefvoice-post-call@chief-502717.iam.gserviceaccount.com
-  _FUNCTION_BUILD_SERVICE_ACCOUNT: projects/chief-502717/serviceAccounts/chiefvoice-build@chief-502717.iam.gserviceaccount.com
+  _FUNCTION_BUILD_SERVICE_ACCOUNT: projects/chief-502717/serviceAccounts/chiefvoice-function-build@chief-502717.iam.gserviceaccount.com
   _TASK_INVOKER_SERVICE_ACCOUNT: chiefvoice-task-invoker@chief-502717.iam.gserviceaccount.com
   _POST_CALL_FUNCTION_MAX_INSTANCES: "10"
   _DATABASE_URL_SECRET: chiefvoice-function-database-url
