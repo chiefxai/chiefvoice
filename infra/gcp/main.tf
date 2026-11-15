@@ -1,7 +1,7 @@
 locals {
   app_name = "chiefvoice"
   enabled_apis = toset([
-    "artifactregistry.googleapis.com", "billingbudgets.googleapis.com", "cloudbuild.googleapis.com",
+    "aiplatform.googleapis.com", "artifactregistry.googleapis.com", "cloudbuild.googleapis.com",
     "cloudresourcemanager.googleapis.com", "cloudtasks.googleapis.com", "compute.googleapis.com",
     "cloudfunctions.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com",
     "run.googleapis.com", "secretmanager.googleapis.com", "serviceusage.googleapis.com",
@@ -15,13 +15,6 @@ resource "google_project_service" "apis" {
   service = each.value
   disable_on_destroy = false
 }
-resource "google_project_service" "budget_consumer_api" {
-  count = var.budget_api_project_id == var.project_id ? 0 : 1
-  project = var.budget_api_project_id
-  service = "billingbudgets.googleapis.com"
-  disable_on_destroy = false
-}
-
 resource "random_password" "database" { length = 40
   special = false
 }
@@ -179,56 +172,17 @@ resource "google_service_account_iam_member" "tasks_agent_can_mint_token" {
   member = "serviceAccount:${google_project_service_identity.cloud_tasks.email}"
 }
 
-# The backend provisions one GCP project per tenant for Vertex AI. This grants
-# the narrowly required project creation/billing permissions at the configured parent.
-resource "google_folder_iam_member" "tenant_project_creator_folder" {
-  count = startswith(var.tenant_project_parent, "folders/") ? 1 : 0
-  folder = var.tenant_project_parent
-  role = "roles/resourcemanager.projectCreator"
-  member = "serviceAccount:${google_service_account.backend.email}"
-}
-resource "google_folder_iam_member" "tenant_service_usage_admin_folder" {
-  count = startswith(var.tenant_project_parent, "folders/") ? 1 : 0
-  folder = var.tenant_project_parent
-  role = "roles/serviceusage.serviceUsageAdmin"
-  member = "serviceAccount:${google_service_account.backend.email}"
-}
-resource "google_organization_iam_member" "tenant_project_creator_org" {
-  count = startswith(var.tenant_project_parent, "organizations/") ? 1 : 0
-  org_id = trimprefix(var.tenant_project_parent, "organizations/")
-  role = "roles/resourcemanager.projectCreator"
-  member = "serviceAccount:${google_service_account.backend.email}"
-}
-resource "google_organization_iam_member" "tenant_service_usage_admin_org" {
-  count = startswith(var.tenant_project_parent, "organizations/") ? 1 : 0
-  org_id = trimprefix(var.tenant_project_parent, "organizations/")
-  role = "roles/serviceusage.serviceUsageAdmin"
-  member = "serviceAccount:${google_service_account.backend.email}"
-}
-resource "google_billing_account_iam_member" "tenant_project_billing" {
-  billing_account_id = var.tenant_billing_account_id
-  role = "roles/billing.user"
-  member = "serviceAccount:${google_service_account.backend.email}"
-}
-resource "google_billing_account_iam_member" "tenant_project_budget_manager" {
-  billing_account_id = var.tenant_billing_account_id
-  role = "roles/billing.costsManager"
-  member = "serviceAccount:${google_service_account.backend.email}"
-}
-resource "google_project_iam_member" "backend_tenant_service_usage_admin" {
+resource "google_project_iam_member" "backend_vertex_user" {
   project = var.project_id
-  role = "roles/serviceusage.serviceUsageAdmin"
+  role = "roles/aiplatform.user"
   member = "serviceAccount:${google_service_account.backend.email}"
+  depends_on = [google_project_service.apis]
 }
-resource "google_project_iam_member" "backend_tenant_budget_creator" {
-  project = var.budget_api_project_id
-  role = "roles/serviceusage.serviceUsageConsumer"
-  member = "serviceAccount:${google_service_account.backend.email}"
-}
-resource "google_project_iam_member" "function_budget_api_consumer" {
-  project = var.budget_api_project_id
-  role = "roles/serviceusage.serviceUsageConsumer"
+resource "google_project_iam_member" "function_vertex_user" {
+  project = var.project_id
+  role = "roles/aiplatform.user"
   member = "serviceAccount:${google_service_account.post_call_function.email}"
+  depends_on = [google_project_service.apis]
 }
 resource "google_project_iam_member" "backend_log_writer" {
   project = var.project_id
@@ -357,11 +311,7 @@ resource "google_compute_instance" "backend" {
     tasks_queue = google_cloud_tasks_queue.post_call.id
     function_service_account = google_service_account.task_invoker.email
     public_domain = var.public_domain
-    tenant_project_parent = var.tenant_project_parent
-    tenant_billing_account_id = trimprefix(var.tenant_billing_account_id, "billingAccounts/")
-    tenant_runtime_service_account = google_service_account.backend.email
-    budget_api_project_id = var.budget_api_project_id
-    vertex_monthly_spend_cap = var.vertex_monthly_spend_cap
+    vertex_project_id = var.project_id
     vertex_location = var.vertex_location
     vertex_model = var.vertex_model
     post_call_model = var.post_call_model
