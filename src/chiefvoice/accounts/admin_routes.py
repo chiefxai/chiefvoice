@@ -102,6 +102,8 @@ class PhoneNumberAssignment(BaseModel):
 class CreatePhoneApiKeyBody(BaseModel):
     customer_name: str = Field(min_length=1, max_length=200)
     billing_mode: BillingMode = BillingMode.PREPAID
+    prepaid_balance_minor: int = Field(default=0, ge=0, le=10**15)
+    postpaid_credit_limit_minor: int = Field(default=0, ge=0, le=10**15)
     name: str = Field(default="Phone API", min_length=1, max_length=100)
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
@@ -134,6 +136,11 @@ class UpdatePhoneApiKeyConfigBody(BaseModel):
         if not value:
             raise ValueError("API name cannot be blank")
         return value
+
+
+class AdjustApiBillingBody(BaseModel):
+    prepaid_balance_minor: int | None = Field(default=None, ge=0, le=10**15)
+    postpaid_credit_limit_minor: int | None = Field(default=None, ge=0, le=10**15)
 
 
 
@@ -662,6 +669,52 @@ async def get_platform_api_billing(
     return {"configured": True, "api_key_id": key_id, **usage}
 
 
+@router.put("/api-keys/{key_id}/billing")
+async def adjust_platform_api_billing(
+    key_id: str,
+    body: AdjustApiBillingBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+):
+    del principal
+    account_store, api_keys = _stores(request)
+    key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    mode = await account_store.get_billing_mode(key.tenant_id)
+    if mode is None:
+        raise HTTPException(status_code=404, detail="API customer account was not found")
+    if mode is BillingMode.PREPAID:
+        if body.postpaid_credit_limit_minor is not None or body.prepaid_balance_minor is None:
+            raise HTTPException(status_code=422, detail="Provide only prepaid_balance_minor for this API")
+    elif body.prepaid_balance_minor is not None or body.postpaid_credit_limit_minor is None:
+        raise HTTPException(status_code=422, detail="Provide only postpaid_credit_limit_minor for this API")
+    billing = getattr(request.app.state, "billing_directory", None)
+    if billing is None:
+        raise HTTPException(status_code=503, detail="Billing storage is not configured")
+    plan = await billing.get_plan(key.tenant_id)
+    if plan is None:
+        raise HTTPException(status_code=409, detail="Billing plan is not configured for this API")
+    try:
+        await billing.configure(
+            tenant_id=key.tenant_id,
+            billing_mode=mode,
+            voice_enabled=plan["voice_enabled"],
+            currency=plan["currency"],
+            rate_per_minute_minor=plan["rate_per_minute_minor"],
+            max_call_seconds=plan["max_call_seconds"],
+            allowed_channels=plan["allowed_channels"],
+            max_concurrent_sessions=plan["max_concurrent_sessions"],
+            recording_allowed=plan["recording_allowed"],
+            prepaid_balance_minor=body.prepaid_balance_minor,
+            postpaid_credit_limit_minor=body.postpaid_credit_limit_minor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    usage = await billing.get_usage_for_api_key(key.tenant_id, key_id)
+    return {"configured": usage is not None, "api_key_id": key_id, **(usage or {})}
+
+
 @router.post("/api-keys", status_code=status.HTTP_201_CREATED)
 async def issue_phone_api_key(
     body: CreatePhoneApiKeyBody,
@@ -697,6 +750,15 @@ async def issue_phone_api_key(
     credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
     if not settings.credentials_encryption_key:
         raise HTTPException(status_code=503, detail="Credential encryption is not configured")
+    rate_per_minute_minor = sum(
+        agent.cost_per_minute_minor for agent in (voice_agent, post_call_agent) if agent is not None
+    )
+    if rate_per_minute_minor < 1:
+        raise HTTPException(status_code=422, detail="Selected agents must have a positive combined INR per-minute cost")
+    if body.billing_mode is BillingMode.PREPAID and body.prepaid_balance_minor < 1:
+        raise HTTPException(status_code=422, detail="Set a positive prepaid balance in INR")
+    if body.billing_mode is BillingMode.POSTPAID and body.postpaid_credit_limit_minor < 1:
+        raise HTTPException(status_code=422, detail="Set a positive postpaid credit limit in INR")
     try:
         provision = getattr(api_key_directory, "provision_customer", None)
         if provision is None:
@@ -722,6 +784,17 @@ async def issue_phone_api_key(
             post_call_agent_enabled=post_call_agent is not None,
             voice_agent_id=voice_agent.agent_id if voice_agent else None,
             post_call_agent_id=post_call_agent.agent_id if post_call_agent else None,
+            voice_plan={
+                "voice_enabled": voice_agent is not None,
+                "currency": "INR",
+                "rate_per_minute_minor": rate_per_minute_minor,
+                "max_call_seconds": 3600,
+                "allowed_channels": ["phone"],
+                "max_concurrent_sessions": 1,
+                "recording_allowed": True,
+                "prepaid_balance_minor": body.prepaid_balance_minor,
+                "postpaid_credit_limit_minor": body.postpaid_credit_limit_minor,
+            },
         )
     except IntegrityError as exc:
         raise HTTPException(
@@ -802,6 +875,32 @@ async def update_phone_api_key_config(
         raise HTTPException(status_code=409, detail="A selected phone number is already assigned to another API") from exc
     if not replaced:
         raise HTTPException(status_code=404, detail="Active API key not found")
+    # The API's customer price is a snapshot of its currently assigned templates.
+    # Updating the assignment changes future reservations while preserving the
+    # customer's balance, credit usage, and billing history.
+    billing = getattr(request.app.state, "billing_directory", None)
+    if billing is not None:
+        plan = await billing.get_plan(key.tenant_id)
+        if plan is not None:
+            rate_per_minute_minor = sum(
+                agent.cost_per_minute_minor
+                for agent in (voice_agent, post_call_agent)
+                if agent is not None
+            )
+            try:
+                await billing.configure(
+                    tenant_id=key.tenant_id,
+                    billing_mode=BillingMode(plan["billing_mode"]),
+                    voice_enabled=voice_agent is not None,
+                    currency=plan["currency"],
+                    rate_per_minute_minor=rate_per_minute_minor,
+                    max_call_seconds=plan["max_call_seconds"],
+                    allowed_channels=plan["allowed_channels"],
+                    max_concurrent_sessions=plan["max_concurrent_sessions"],
+                    recording_allowed=plan["recording_allowed"],
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
     refreshed = next(item for item in await api_key_directory.list_for_tenant(key.tenant_id) if item.key_id == key_id)
     account = await account_store.get(key.tenant_id)
     logger.info("platform_api_config_updated", extra={"actor_subject": principal.subject, "api_key_id": key_id, "tenant_id": key.tenant_id})

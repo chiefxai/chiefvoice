@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from cryptography.fernet import Fernet
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, delete, select, update
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -147,6 +147,7 @@ class ApiKeyDirectory(Protocol):
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,
         post_call_agent_id: str | None = None,
+        voice_plan: dict | None = None,
     ) -> tuple[TenantAccount, str, ApiKeySummary]: ...
 
 
@@ -429,6 +430,7 @@ class SqlApiKeyDirectory:
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,
         post_call_agent_id: str | None = None,
+        voice_plan: dict | None = None,
     ) -> tuple[TenantAccount, str, ApiKeySummary]:
         """Atomically create a stable customer tenant and its first API credential."""
         from uuid import uuid4
@@ -478,6 +480,31 @@ class SqlApiKeyDirectory:
                 ApiKeyPhoneNumberRow(api_key_id=key_id, provider=provider, phone_number=number)
                 for provider, number in normalized_numbers
             )
+            if voice_plan is not None:
+                await session.execute(
+                    text("""
+                        INSERT INTO tenant_voice_plans
+                            (tenant_id, billing_mode, voice_enabled, currency,
+                             rate_per_minute_minor, max_call_seconds, allowed_channels,
+                             max_concurrent_sessions, recording_allowed,
+                             prepaid_balance_minor, postpaid_credit_limit_minor,
+                             postpaid_used_minor, created_at, updated_at)
+                        VALUES
+                            (:tenant_id, :billing_mode, :voice_enabled, :currency,
+                             :rate_per_minute_minor, :max_call_seconds,
+                             CAST(:allowed_channels AS JSON), :max_concurrent_sessions,
+                             :recording_allowed, :prepaid_balance_minor,
+                             :postpaid_credit_limit_minor, 0, :created_at, :updated_at)
+                    """),
+                    {
+                        **voice_plan,
+                        "tenant_id": tenant_id,
+                        "billing_mode": billing_mode.value,
+                        "allowed_channels": json.dumps(voice_plan["allowed_channels"]),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
             await session.flush()
         account = TenantAccount(
             tenant_id=tenant_id,

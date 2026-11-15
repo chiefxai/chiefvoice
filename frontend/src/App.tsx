@@ -77,7 +77,7 @@ type ApiCallLog = {
   webhook_status?: string | null
 }
 type ApiBillingUsage = {
-  configured: boolean; billing_mode?: string; currency?: string; rate_per_minute_minor?: number
+  configured: boolean; billing_mode?: 'prepaid' | 'postpaid'; currency?: string; rate_per_minute_minor?: number
   calls?: number; billable_seconds?: number; charges_minor?: number; active_reservations?: number
   customer_prepaid_balance_minor?: number; customer_postpaid_used_minor?: number
   customer_postpaid_credit_limit_minor?: number; message?: string
@@ -105,11 +105,12 @@ const api = {
   agentConfigs: () => http.get<{ items: AgentConfiguration[] }>('/v1/admin/customers/agent-configs').then(r => r.data.items),
   apiCalls: (id: string) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`).then(r => r.data),
   apiBilling: (id: string) => http.get<ApiBillingUsage>(`/v1/admin/customers/api-keys/${id}/billing`).then(r => r.data),
+  adjustApiBilling: (id: string, mode: 'prepaid' | 'postpaid', amountMinor: number) => http.put(`/v1/admin/customers/api-keys/${id}/billing`, mode === 'prepaid' ? { prepaid_balance_minor: amountMinor } : { postpaid_credit_limit_minor: amountMinor }),
   customers: () => http.get<{ items: Customer[] }>('/v1/admin/customers').then(r => r.data.items),
   addNumbers: (data: { credential_mode: 'platform' | 'custom'; phone_numbers: string[]; auth_id?: string; auth_token?: string }) => http.post('/v1/admin/customers/phone-numbers', data),
   updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound }, { params: { customer_id: number.customer_id } }),
   deleteNumber: (number: RegisteredNumber) => http.delete(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { params: { customer_id: number.customer_id } }),
-  createApiKey: (customerName: string, billingMode: 'prepaid' | 'postpaid', name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { customer_name: customerName, billing_mode: billingMode, name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation }).then(r => r.data),
+  createApiKey: (customerName: string, billingMode: 'prepaid' | 'postpaid', billingAmountMinor: number, name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { customer_name: customerName, billing_mode: billingMode, prepaid_balance_minor: billingMode === 'prepaid' ? billingAmountMinor : 0, postpaid_credit_limit_minor: billingMode === 'postpaid' ? billingAmountMinor : 0, name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation }).then(r => r.data),
   updateApiConfig: (id: string, name: string, numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { name, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials || null, voice_location: voiceLocation, post_call_location: postCallLocation }),
   createAgentConfig: (data: { name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string }) => http.post<AgentConfiguration>('/v1/admin/customers/agent-configs', data).then(r => r.data),
   updateAgentConfig: (id: string, data: { name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string }) => http.put<AgentConfiguration>(`/v1/admin/customers/agent-configs/${id}`, data).then(r => r.data),
@@ -134,6 +135,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [apiName, setApiName] = useState('')
   const [apiCustomerName, setApiCustomerName] = useState('')
   const [apiBillingMode, setApiBillingMode] = useState<'prepaid' | 'postpaid'>('prepaid')
+  const [apiBillingAmount, setApiBillingAmount] = useState('1000')
   const [voiceAgentId, setVoiceAgentId] = useState('')
   const [postCallAgentId, setPostCallAgentId] = useState('')
   const [agentConfigOpen, setAgentConfigOpen] = useState(false)
@@ -157,6 +159,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [managedOutbound, setManagedOutbound] = useState(true)
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
   const [viewingKey, setViewingKey] = useState<PlatformApiKey | null>(null)
+  const [billingAdjustmentOpen, setBillingAdjustmentOpen] = useState(false)
+  const [billingAdjustmentAmount, setBillingAdjustmentAmount] = useState('')
   const [oneTimeKey, setOneTimeKey] = useState<IssuedApiKey | null>(null)
   const [toast, setToast] = useState('')
   const connected = Boolean(token)
@@ -209,7 +213,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', viewingKey?.id], queryFn: () => api.apiCalls(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', viewingKey?.id], queryFn: () => api.apiBilling(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 10000 : false })
   const issueMutation = useMutation({
-    mutationFn: ({ customerName, billingMode, name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation }: { customerName: string; billingMode: 'prepaid' | 'postpaid'; name: string; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string }) => api.createApiKey(customerName, billingMode, name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation),
+    mutationFn: ({ customerName, billingMode, billingAmountMinor, name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation }: { customerName: string; billingMode: 'prepaid' | 'postpaid'; billingAmountMinor: number; name: string; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string }) => api.createApiKey(customerName, billingMode, billingAmountMinor, name, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation),
     onSuccess: result => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -217,7 +221,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       setOneTimeKey(result)
       setAssignmentOpen(false)
       setSelectedNumbers([])
-      setApiName(''); setApiCustomerName(''); setApiBillingMode('prepaid'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials('')
+      setApiName(''); setApiCustomerName(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials('')
       setToast('API key created for the selected phone number.')
     },
     onError: error => setToast(errorText(error)),
@@ -240,6 +244,11 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       setSelectedNumbers([])
       setToast('API configuration updated.')
     },
+    onError: error => setToast(errorText(error)),
+  })
+  const adjustBillingMutation = useMutation({
+    mutationFn: ({ key, amountMinor, mode }: { key: PlatformApiKey; amountMinor: number; mode: 'prepaid' | 'postpaid' }) => api.adjustApiBilling(key.id, mode, amountMinor),
+    onSuccess: () => { if (viewingKey) void queryClient.invalidateQueries({ queryKey: ['platform-api-billing', viewingKey.id] }); setBillingAdjustmentOpen(false); setToast('API billing balance or limit updated.') },
     onError: error => setToast(errorText(error)),
   })
   const saveAgentConfigMutation = useMutation({
@@ -278,7 +287,11 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (!apiName.trim()) { setToast('Enter a name for this API.'); return }
     if (!voiceAgentId && !postCallAgentId) { setToast('Select at least one agent for this API.'); return }
     if (!apiCredentials.trim()) { setToast('Add a Google Cloud service account JSON for this API.'); return }
-    issueMutation.mutate({ customerName: apiCustomerName.trim(), billingMode: apiBillingMode, name: apiName.trim(), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim() })
+    const configuredRate = (agentsQuery.data || []).filter(agent => agent.id === voiceAgentId || agent.id === postCallAgentId).reduce((sum, agent) => sum + agent.cost_per_minute_minor, 0)
+    if (configuredRate < 1) { setToast('Selected agents need a positive combined INR per-minute cost before billing can be enabled.'); return }
+    const amount = Number(apiBillingAmount)
+    if (!Number.isFinite(amount) || amount <= 0) { setToast('Enter a positive INR starting balance or credit limit.'); return }
+    issueMutation.mutate({ customerName: apiCustomerName.trim(), billingMode: apiBillingMode, billingAmountMinor: Math.round(amount * 100), name: apiName.trim(), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim() })
   }
   const handleCreateNumberSelection = (value: string[] | string) => {
     const values = typeof value === 'string' ? value.split(',') : value
@@ -290,7 +303,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setPostCallLocation(availableAgents.find(agent => agent.id === postCallAgentId)?.location || availableAgents.find(agent => agent.kind === 'post_call')?.location || 'us-central1')
   }
   const openCreateApi = () => {
-    setSelectedNumbers([]); setApiName(''); setApiCustomerName(''); setApiBillingMode('prepaid'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('us-central1'); setAssignmentOpen(true)
+    setSelectedNumbers([]); setApiName(''); setApiCustomerName(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('us-central1'); setAssignmentOpen(true)
   }
   const openEditApi = (key: PlatformApiKey) => {
     setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`))
@@ -393,6 +406,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <Alert severity="info" sx={{ fontSize: 12 }}>Each API represents a customer. Enter the customer name, assign phone numbers and agent templates, then provide this API's Google Cloud credentials.</Alert>
         <TextField label="Customer name" value={apiCustomerName} onChange={event => setApiCustomerName(event.target.value)} required fullWidth />
         <FormControl fullWidth><InputLabel id="api-billing-mode-label">Billing type</InputLabel><Select labelId="api-billing-mode-label" label="Billing type" value={apiBillingMode} onChange={event => setApiBillingMode(event.target.value as 'prepaid' | 'postpaid')}><MenuItem value="prepaid">Prepaid</MenuItem><MenuItem value="postpaid">Postpaid</MenuItem></Select></FormControl>
+        <TextField label={apiBillingMode === 'prepaid' ? 'Starting prepaid balance (INR)' : 'Postpaid credit limit (INR)'} type="number" value={apiBillingAmount} onChange={event => setApiBillingAmount(event.target.value)} inputProps={{ min: 0.01, step: 0.01 }} required fullWidth helperText="This balance or limit is isolated to this API customer." />
         <TextField label="API name" value={apiName} onChange={event => setApiName(event.target.value)} required fullWidth />
         <Typography variant="h6" sx={{ fontWeight: 800 }}>Phone numbers</Typography>
         <FormControl fullWidth disabled={!outboundNumbers.length}>
@@ -408,10 +422,11 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           {voiceAgentId && <TextField label="Calling Vertex location for this API" value={voiceLocation} onChange={event => setVoiceLocation(event.target.value)} fullWidth />}
           {postCallAgentId && <TextField label="Post-call Vertex location for this API" value={postCallLocation} onChange={event => setPostCallLocation(event.target.value)} fullWidth />}
         </> })()}
+        {(() => { const rate = (agentsQuery.data || []).filter(agent => agent.id === voiceAgentId || agent.id === postCallAgentId).reduce((sum, agent) => sum + agent.cost_per_minute_minor, 0); return <Alert severity={rate > 0 ? 'info' : 'warning'}>API billing rate: <b>{formatMoney(rate, 'INR')}/minute</b>. It is calculated from the selected calling and post-call agent template costs.</Alert> })()}
         <TextField label="Google Cloud service account JSON" value={apiCredentials} onChange={event => setApiCredentials(event.target.value)} multiline minRows={5} required fullWidth placeholder="Paste the service account JSON for this API's Vertex project" />
         {!voiceAgentId && postCallAgentId && <Alert severity="warning">This API has only a post-call agent assigned. Outbound phone calls require a calling agent.</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiCustomerName.trim() || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || !apiCredentials.trim()} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiCustomerName.trim() || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || !apiCredentials.trim() || Number(apiBillingAmount) <= 0} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={!!oneTimeKey} onClose={() => setOneTimeKey(null)} maxWidth="sm" fullWidth>
@@ -480,17 +495,27 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         {apiCallsQuery.isLoading ? <CircularProgress size={22} /> : apiCallsQuery.error ? <Alert severity="error">{errorText(apiCallsQuery.error)}</Alert> : apiCallsQuery.data?.items.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 900 }}><TableHead><TableRow>{['Started', 'Direction', 'From → To', 'Provider', 'Status', 'Duration', 'Post-call result', 'Session'].map(item => <TableCell className="table-head" key={item}>{item}</TableCell>)}</TableRow></TableHead><TableBody>{apiCallsQuery.data.items.map(call => <TableRow key={call.session_id}><TableCell className="table-cell">{new Date(call.started_at).toLocaleString()}</TableCell><TableCell className="table-cell">{call.direction || '—'}</TableCell><TableCell className="table-cell">{call.caller || '—'} → {call.callee || '—'}</TableCell><TableCell className="table-cell">{call.provider || '—'}</TableCell><TableCell className="table-cell"><StatusChip enabled={call.status === 'completed'} label={call.status} /></TableCell><TableCell className="table-cell">{call.duration_seconds == null ? '—' : `${call.duration_seconds}s`}</TableCell><TableCell className="table-cell">{call.post_call_status ? <><StatusChip enabled={call.post_call_status === 'completed'} label={call.post_call_status} />{call.post_call_result && <details style={{ marginTop: 6 }}><summary>View result</summary><pre style={{ whiteSpace: 'pre-wrap', maxWidth: 320, fontSize: 11 }}>{JSON.stringify(call.post_call_result, null, 2)}</pre></details>}</> : call.post_call_agent_enabled === false ? <StatusChip enabled={false} label="disabled" /> : 'Waiting for call to finish'}</TableCell><TableCell className="table-cell"><code>{call.session_id}</code></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state">No calls yet. Use the API key and the request example on the Docs page to place a test call.</div>}
         <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Billing for this API</Typography>
         {apiBillingQuery.isLoading ? <CircularProgress size={22} /> : apiBillingQuery.error ? <Alert severity="error">{errorText(apiBillingQuery.error)}</Alert> : apiBillingQuery.data?.configured ? <>
-          <Alert severity="info">Call charges below are attributed to this API key. The rate and prepaid balance or postpaid credit limit belong to this API customer.</Alert>
+          <Alert severity="info">Calls, rate, balance or credit limit, and ledger are isolated to this API customer. The per-minute rate is snapshotted from the selected agent costs when the API is created.</Alert>
           <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap">
             <UsageCard label="Calls" value={String(apiBillingQuery.data.calls ?? 0)} />
             <UsageCard label="Billable time" value={`${Math.floor((apiBillingQuery.data.billable_seconds || 0) / 60)}m ${(apiBillingQuery.data.billable_seconds || 0) % 60}s`} />
-            <UsageCard label="Attributed charges" value={formatMoney(apiBillingQuery.data.charges_minor || 0, apiBillingQuery.data.currency || 'USD')} />
-            <UsageCard label="Customer plan" value={`${apiBillingQuery.data.billing_mode} · ${formatMoney(apiBillingQuery.data.rate_per_minute_minor || 0, apiBillingQuery.data.currency || 'USD')}/min`} />
-            <UsageCard label="API customer balance" value={apiBillingQuery.data.billing_mode === 'prepaid' ? formatMoney(apiBillingQuery.data.customer_prepaid_balance_minor || 0, apiBillingQuery.data.currency || 'USD') : `${formatMoney(apiBillingQuery.data.customer_postpaid_used_minor || 0, apiBillingQuery.data.currency || 'USD')} used / ${formatMoney(apiBillingQuery.data.customer_postpaid_credit_limit_minor || 0, apiBillingQuery.data.currency || 'USD')} limit`} />
+            <UsageCard label="Attributed charges" value={formatMoney(apiBillingQuery.data.charges_minor || 0, apiBillingQuery.data.currency || 'INR')} />
+            <UsageCard label="API billing plan" value={`${apiBillingQuery.data.billing_mode} · ${formatMoney(apiBillingQuery.data.rate_per_minute_minor || 0, apiBillingQuery.data.currency || 'INR')}/min`} />
+            <UsageCard label="API customer balance" value={apiBillingQuery.data.billing_mode === 'prepaid' ? formatMoney(apiBillingQuery.data.customer_prepaid_balance_minor || 0, apiBillingQuery.data.currency || 'INR') : `${formatMoney(apiBillingQuery.data.customer_postpaid_used_minor || 0, apiBillingQuery.data.currency || 'INR')} used / ${formatMoney(apiBillingQuery.data.customer_postpaid_credit_limit_minor || 0, apiBillingQuery.data.currency || 'INR')} limit`} />
           </Stack>
+          <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} onClick={() => { const minor = apiBillingQuery.data?.billing_mode === 'prepaid' ? apiBillingQuery.data.customer_prepaid_balance_minor : apiBillingQuery.data?.customer_postpaid_credit_limit_minor; setBillingAdjustmentAmount(((minor || 0) / 100).toFixed(2)); setBillingAdjustmentOpen(true) }}>Adjust balance / credit limit</Button>
         </> : <Alert severity="warning">{apiBillingQuery.data?.message || 'No billing plan is configured for this API customer yet.'}</Alert>}
       </Stack></DialogContent>
       <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setViewingKey(null)}>Close</Button><Button onClick={() => { if (viewingKey) openEditApi(viewingKey); setViewingKey(null) }}>Edit API</Button></DialogActions>
+    </Dialog>
+
+    <Dialog open={billingAdjustmentOpen} onClose={() => setBillingAdjustmentOpen(false)} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>{apiBillingQuery.data?.billing_mode === 'prepaid' ? 'Set prepaid balance' : 'Set postpaid credit limit'}</DialogTitle>
+      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
+        <Alert severity="info">This updates billing for {viewingKey?.customer_name || 'this API customer'} only. Amounts are in INR.</Alert>
+        <TextField autoFocus fullWidth type="number" label={apiBillingQuery.data?.billing_mode === 'prepaid' ? 'Prepaid balance (INR)' : 'Credit limit (INR)'} value={billingAdjustmentAmount} onChange={event => setBillingAdjustmentAmount(event.target.value)} inputProps={{ min: 0, step: 0.01 }} />
+      </Stack></DialogContent>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setBillingAdjustmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={adjustBillingMutation.isPending || !billingAdjustmentAmount || Number(billingAdjustmentAmount) < 0 || !Number.isFinite(Number(billingAdjustmentAmount))} onClick={() => { if (!viewingKey || !apiBillingQuery.data?.billing_mode) return; adjustBillingMutation.mutate({ key: viewingKey, mode: apiBillingQuery.data.billing_mode, amountMinor: Math.round(Number(billingAdjustmentAmount) * 100) }) }}>{adjustBillingMutation.isPending ? 'Saving…' : 'Save billing'}</Button></DialogActions>
     </Dialog>
 
     <Snackbar open={Boolean(toast)} autoHideDuration={5000} onClose={() => setToast('')} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}><Alert onClose={() => setToast('')} severity={toast.toLowerCase().includes('error') || toast.toLowerCase().includes('failed') || toast.toLowerCase().includes('required') ? 'error' : 'success'} variant="filled">{toast}</Alert></Snackbar>
