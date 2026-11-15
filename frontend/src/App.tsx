@@ -275,8 +275,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setSelectedNumbers(values)
     const customerId = outboundNumbers.find(number => `${number.provider}|${number.phone_number}` === values[0])?.customer_id
     const availableAgents = (agentsQuery.data || []).filter(agent => agent.customer_id === customerId)
-    if (!voiceAgentId) setVoiceAgentId(availableAgents.find(agent => agent.kind === 'calling')?.id || '')
-    if (!postCallAgentId) setPostCallAgentId(availableAgents.find(agent => agent.kind === 'post_call')?.id || '')
+    if (!availableAgents.some(agent => agent.id === voiceAgentId && agent.kind === 'calling')) setVoiceAgentId(availableAgents.find(agent => agent.kind === 'calling')?.id || '')
+    if (!availableAgents.some(agent => agent.id === postCallAgentId && agent.kind === 'post_call')) setPostCallAgentId(availableAgents.find(agent => agent.kind === 'post_call')?.id || '')
   }
   const openCreateApi = () => {
     setSelectedNumbers([]); setApiName(''); setVoiceAgentId(''); setPostCallAgentId(''); setAssignmentOpen(true)
