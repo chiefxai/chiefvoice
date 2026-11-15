@@ -417,6 +417,36 @@ async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, requ
     return _agent_config_json(saved)
 
 
+@router.delete("/agent-configs/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_agent_config(
+    agent_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+):
+    _account_store, api_key_directory = _stores(request)
+    directory = _agent_config_directory(request)
+    current = await directory.get(PLATFORM_OWNER_ID, agent_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Agent configuration not found")
+
+    active_assignments = [
+        key.key_id
+        for key in await api_key_directory.list_all()
+        if key.revoked_at is None and agent_id in (key.voice_agent_id, key.post_call_agent_id)
+    ]
+    if active_assignments:
+        raise HTTPException(
+            status_code=409,
+            detail="This agent is assigned to an active API. Remove it from the API before deleting the agent.",
+        )
+    if not await directory.archive(PLATFORM_OWNER_ID, agent_id):
+        raise HTTPException(status_code=404, detail="Agent configuration not found")
+    logger.info(
+        "agent_provider_config_archived",
+        extra={"actor_subject": principal.subject, "agent_id": agent_id, "agent_kind": current.kind},
+    )
+
+
 def _validate_expiration(expires_at: datetime | None) -> datetime | None:
     if expires_at is None:
         return None
