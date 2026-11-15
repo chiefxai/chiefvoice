@@ -295,6 +295,7 @@ class SqlPostCallQueue:
             "time_zone": call.time_zone,
             "time_format": call.time_format,
             "live_agent_context": call.live_agent_context,
+            "api_key_id": call.api_key_id,
         }
         encrypted_payload = self._fernet.encrypt(
             json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -550,6 +551,7 @@ class SqlPostCallQueue:
             completed_call = CompletedCall(
                 session_id=job["session_id"],
                 tenant_id=job["tenant_id"],
+                api_key_id=payload.get("api_key_id"),
                 provider=job["provider"],
                 channel=job["channel"],
                 direction=job["direction"],

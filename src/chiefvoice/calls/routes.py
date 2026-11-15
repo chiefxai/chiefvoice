@@ -173,6 +173,7 @@ async def start_outbound_call(
                 provider=body.provider,
                 channel=body.channel,
                 tenant_id=principal.tenant_id,
+                api_key_id=principal.api_key_id,
                 destination=body.destination,
                 caller_id=caller_id,
                 bot_config_id=(

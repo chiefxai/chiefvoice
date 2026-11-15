@@ -378,6 +378,7 @@ class SqlCallSessionStore:
                     CompletedCall(
                         session_id=session.session_id,
                         tenant_id=session.tenant_id,
+                        api_key_id=session.api_key_id,
                         provider=session.provider,
                         channel=session.channel,
                         direction=session.direction.value,
@@ -497,6 +498,7 @@ class SqlCallSessionStore:
             "callee": session.callee,
             "provider_call_id": session.provider_call_id,
             "tenant_id": session.tenant_id,
+            "api_key_id": session.api_key_id,
             "bot_config_id": session.bot_config_id,
             "live_agent_context": session.live_agent_context,
             "post_call_context": session.post_call_context,
@@ -524,6 +526,7 @@ class SqlCallSessionStore:
             callee=payload.get("callee"),
             provider_call_id=payload.get("provider_call_id"),
             tenant_id=payload.get("tenant_id"),
+            api_key_id=payload.get("api_key_id"),
             bot_config_id=payload.get("bot_config_id"),
             live_agent_context=payload.get("live_agent_context"),
             post_call_context=payload.get("post_call_context"),

@@ -19,6 +19,7 @@ class AcceptedSession:
     callee: str | None = None
     provider_call_id: str | None = None
     tenant_id: str | None = None
+    api_key_id: str | None = None
     bot_config_id: str | None = None
     live_agent_context: dict[str, Any] | None = None
     post_call_context: str | None = None

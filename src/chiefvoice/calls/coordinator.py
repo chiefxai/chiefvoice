@@ -34,6 +34,7 @@ class OutboundCallCommand:
     channel: str
     tenant_id: str
     destination: str
+    api_key_id: str | None = None
     caller_id: str | None = None
     bot_config_id: str | None = None
     live_agent_context: dict[str, Any] | None = None
@@ -94,6 +95,7 @@ class CallCoordinator:
             caller=command.caller_id,
             callee=command.destination,
             tenant_id=command.tenant_id,
+            api_key_id=command.api_key_id,
             bot_config_id=command.bot_config_id,
             live_agent_context=command.live_agent_context,
             post_call_context=command.post_call_context,
@@ -107,6 +109,7 @@ class CallCoordinator:
             {
                 "provider": command.provider,
                 "channel": command.channel,
+                "api_key_id": command.api_key_id,
                 "destination": command.destination,
                 "caller_id": command.caller_id,
                 "bot_config_id": command.bot_config_id,
@@ -473,6 +476,7 @@ class CallCoordinator:
         call = CompletedCall(
             session_id=session.session_id,
             tenant_id=session.tenant_id,
+            api_key_id=session.api_key_id,
             provider=session.provider,
             channel=session.channel,
             direction=session.direction.value,
@@ -551,6 +555,7 @@ class _OutboundCallData:
     channel: str
     tenant_id: str
     destination: str
+    api_key_id: str | None = None
     caller_id: str | None
     bot_config_id: str | None
     live_agent_context: dict[str, Any] | None

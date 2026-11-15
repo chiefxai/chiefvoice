@@ -11,6 +11,7 @@ class CompletedCall:
     provider: str
     channel: str
     direction: str
+    api_key_id: str | None = None
     started_at: str | None = None
     ended_at: str | None = None
     transcript: str | None = None

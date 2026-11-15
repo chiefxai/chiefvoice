@@ -2,7 +2,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-CURRENT_SCHEMA_REVISION = "0012_phone_number_ownership"
+CURRENT_SCHEMA_REVISION = "0013_api_key_vertex_credentials"
 CONSTRAINT_NAMING = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",

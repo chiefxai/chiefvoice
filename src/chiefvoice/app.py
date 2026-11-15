@@ -25,6 +25,7 @@ from chiefvoice.agents.call.factory import create_realtime_pipeline_factory
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
+from chiefvoice.agents.post_call.providers.api_key_vertex import ApiKeyVertexPostCallAgent
 from chiefvoice.agents.post_call.lambda_dispatch import LambdaAsyncInvoker
 from chiefvoice.agents.post_call.gcp_function_dispatch import GoogleCloudFunctionInvoker
 from chiefvoice.agents.post_call.sqs_dispatch import SqsPostCallInvoker
@@ -235,6 +236,10 @@ def create_app(
     post_call_agent = None
     vertex_project_directory = None
     vertex_project_provisioner = None
+    if api_key_directory is None and settings.database_url:
+        api_key_directory = SqlApiKeyDirectory(
+            settings.database_url, settings.credentials_encryption_key
+        )
     if settings.vertex_project_isolation_enabled:
         required_gcp_config = {
             "DATABASE_URL": settings.database_url,
@@ -274,7 +279,7 @@ def create_app(
         if settings.vertex_project_isolation_enabled:
             post_call_agent = TenantVertexPostCallAgent(
                 vertex_project_directory,
-                location=settings.vertex_location,
+                location=settings.vertex_location or "us-central1",
                 model=settings.post_call_model,
                 credentials_json=settings.vertex_credentials_json,
                 credentials_path=settings.vertex_credentials_path,
@@ -282,11 +287,15 @@ def create_app(
         else:
             post_call_agent = create_vertex_post_call_agent(
                 project_id=settings.vertex_project_id,
-                location=settings.vertex_location,
+                location=settings.vertex_location or "us-central1",
                 model=settings.post_call_model,
                 credentials_json=settings.vertex_credentials_json,
                 credentials_path=settings.vertex_credentials_path,
             )
+    if settings.post_call_agent_provider == "langchain_vertex" and api_key_directory is not None:
+        post_call_agent = ApiKeyVertexPostCallAgent(
+            api_key_directory, model=settings.post_call_model, fallback=post_call_agent
+        )
     application.state.post_call_agent = post_call_agent
     if settings.post_call_execution_backend not in {"in_process", "lambda", "gcp_function", "sqs", "gcp_cloud_tasks"}:
         raise ValueError(
@@ -389,10 +398,10 @@ def create_app(
     application.state.recording_store = recording_store
     application.state.post_call_recovery_spool = post_call_recovery_spool
     if voice_pipeline_factory is None and settings.realtime_provider == "vertex":
-        if (settings.vertex_project_id or settings.vertex_project_isolation_enabled) and settings.vertex_location:
+        if (settings.vertex_project_id or settings.vertex_project_isolation_enabled or settings.google_ai_api_key or api_key_directory):
             vertex_provider = VertexGeminiLiveProvider(
                 project_id=settings.vertex_project_id,
-                location=settings.vertex_location,
+                location=settings.vertex_location or "us-central1",
                 model=settings.vertex_model,
                 voice=settings.vertex_voice,
                 system_instruction=settings.vertex_system_instruction,
@@ -401,6 +410,9 @@ def create_app(
                 credentials_path=settings.vertex_credentials_path,
                 project_directory=vertex_project_directory,
                 require_tenant_project=settings.vertex_project_isolation_enabled,
+                google_ai_api_key=settings.google_ai_api_key,
+                google_ai_model=settings.google_ai_live_model,
+                api_key_directory=api_key_directory,
             )
             voice_pipeline_factory = create_realtime_pipeline_factory(
                 RealtimeAgentRegistry([vertex_provider]),
@@ -426,8 +438,6 @@ def create_app(
         provider_integration_store = SqlProviderIntegrationStore(
             settings.database_url, settings.credentials_encryption_key
         )
-    if api_key_directory is None and settings.database_url:
-        api_key_directory = SqlApiKeyDirectory(settings.database_url)
     if (
         post_call_webhook_directory is None
         and settings.database_url

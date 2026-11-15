@@ -43,6 +43,9 @@ type PlatformApiKey = {
   customer_id: string
   customer_name: string
   assigned_numbers: { provider: string; phone_number: string }[]
+  vertex_project_id?: string | null
+  vertex_location?: string | null
+  vertex_credentials_configured?: boolean
 }
 type IssuedApiKey = { key: string; api_key_record: PlatformApiKey }
 
@@ -65,8 +68,8 @@ http.interceptors.response.use(response => response, error => {
 const api = {
   phoneNumbers: () => http.get<{ items: RegisteredNumber[] }>('/v1/admin/customers/phone-numbers').then(r => r.data.items),
   apiKeys: () => http.get<{ items: PlatformApiKey[] }>('/v1/admin/customers/api-keys').then(r => r.data.items),
-  createApiKey: (numbers: RegisteredNumber[]) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })) }).then(r => r.data),
-  replaceApiKeyNumbers: (id: string, numbers: RegisteredNumber[]) => http.put(`/v1/admin/customers/api-keys/${id}/phone-numbers`, { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })) }),
+  createApiKey: (numbers: RegisteredNumber[], credentials: string, location: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials, vertex_location: location }).then(r => r.data),
+  updateApiConfig: (id: string, numbers: RegisteredNumber[], credentials: string, location: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials || null, vertex_location: location }),
   revokeApiKey: (id: string) => http.delete(`/v1/admin/customers/api-keys/${id}`),
 }
 
@@ -84,6 +87,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [authError, setAuthError] = useState('')
   const [assignmentOpen, setAssignmentOpen] = useState(false)
   const [selectedNumbers, setSelectedNumbers] = useState<string[]>([])
+  const [gcpCredentials, setGcpCredentials] = useState('')
+  const [vertexLocation, setVertexLocation] = useState('us-central1')
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
   const [oneTimeKey, setOneTimeKey] = useState<IssuedApiKey | null>(null)
   const [toast, setToast] = useState('')
@@ -134,13 +139,15 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
   const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && page === 'API', retry: false })
   const issueMutation = useMutation({
-    mutationFn: (numbers: RegisteredNumber[]) => api.createApiKey(numbers),
+    mutationFn: ({ numbers, credentials, location }: { numbers: RegisteredNumber[]; credentials: string; location: string }) => api.createApiKey(numbers, credentials, location),
     onSuccess: result => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
       setOneTimeKey(result)
       setAssignmentOpen(false)
       setSelectedNumbers([])
+      setGcpCredentials('')
+      setVertexLocation('us-central1')
       setToast('API key created for the selected phone number.')
     },
     onError: error => setToast(errorText(error)),
@@ -155,7 +162,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onError: error => setToast(errorText(error)),
   })
   const manageNumbersMutation = useMutation({
-    mutationFn: ({ key, numbers }: { key: PlatformApiKey; numbers: RegisteredNumber[] }) => api.replaceApiKeyNumbers(key.id, numbers),
+    mutationFn: ({ key, numbers, credentials, location }: { key: PlatformApiKey; numbers: RegisteredNumber[]; credentials: string; location: string }) => api.updateApiConfig(key.id, numbers, credentials, location),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -208,14 +215,16 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       </header>
       <div className="content">
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} />}
-        {page === 'API' && <ApiPage connected={connected} onConnect={() => { void connect() }} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumbers([]); setAssignmentOpen(true) }} onManage={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)) }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
+        {page === 'API' && <ApiPage connected={connected} onConnect={() => { void connect() }} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1'); setAssignmentOpen(true) }} onManage={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)); setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1') }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
       </div>
     </main>
 
     <Dialog open={assignmentOpen} onClose={() => setAssignmentOpen(false)} maxWidth="sm" fullWidth>
       <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Create API for phone numbers</DialogTitle>
       <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        <Alert severity="info" sx={{ fontSize: 12 }}>Select one or more outbound-enabled numbers from the same customer. Each number can belong to only one API key.</Alert>
+        <Alert severity="info" sx={{ fontSize: 12 }}>Each API key has its own encrypted Google Cloud service account credentials and can own multiple phone numbers. A number can belong to only one API key.</Alert>
+        <TextField label="Google Cloud service account JSON" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={5} fullWidth placeholder={'Paste the downloaded service account JSON key'} />
+        <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth placeholder="us-central1" />
         <FormControl fullWidth disabled={!outboundNumbers.length}>
           <InputLabel id="assigned-number-label">Phone numbers</InputLabel>
           <Select multiple labelId="assigned-number-label" value={selectedNumbers} label="Phone numbers" onChange={event => setSelectedNumbers(typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value)} renderValue={values => `${values.length} phone number${values.length === 1 ? '' : 's'} selected`}>
@@ -224,7 +233,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         </FormControl>
         {!outboundNumbers.length && <Alert severity="warning">There are no unassigned outbound-enabled numbers. Register a number or manage an existing API assignment.</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={!selected.length || issueMutation.isPending} onClick={() => selected.length && issueMutation.mutate(selected)}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={!selected.length || !gcpCredentials.trim() || !vertexLocation.trim() || issueMutation.isPending} onClick={() => selected.length && issueMutation.mutate({ numbers: selected, credentials: gcpCredentials, location: vertexLocation })}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={!!oneTimeKey} onClose={() => setOneTimeKey(null)} maxWidth="sm" fullWidth>
@@ -238,9 +247,11 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     </Dialog>
 
     <Dialog open={!!managementKey} onClose={() => setManagementKey(null)} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Manage API phone numbers</DialogTitle>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Edit API configuration</DialogTitle>
       <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        <Alert severity="info" sx={{ fontSize: 12 }}>Each phone number can be assigned to only one API key. Saving replaces this key’s current assignments.</Alert>
+        <Alert severity="info" sx={{ fontSize: 12 }}>Saved service account credentials are encrypted. Leave the credential field blank to keep the current key; enter new JSON to rotate it.</Alert>
+        <TextField label="Replace Google Cloud service account JSON (optional)" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={4} fullWidth placeholder={managementKey?.vertex_credentials_configured ? 'Credentials are saved. Leave blank to keep them.' : 'Paste service account JSON'} />
+        <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth />
         <FormControl fullWidth disabled={!managementKey}>
           <InputLabel id="manage-number-label">Phone numbers</InputLabel>
           <Select multiple labelId="manage-number-label" value={selectedNumbers} label="Phone numbers" onChange={event => setSelectedNumbers(typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value)} renderValue={values => `${values.length} phone number${values.length === 1 ? '' : 's'} selected`}>
@@ -251,7 +262,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           </Select>
         </FormControl>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, numbers }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save assignments'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || (!gcpCredentials.trim() && !managementKey.vertex_credentials_configured) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, numbers, credentials: gcpCredentials, location: vertexLocation }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
     </Dialog>
 
     <Snackbar open={Boolean(toast)} autoHideDuration={5000} onClose={() => setToast('')} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}><Alert onClose={() => setToast('')} severity={toast.toLowerCase().includes('error') || toast.toLowerCase().includes('failed') ? 'error' : 'success'} variant="filled">{toast}</Alert></Snackbar>
@@ -269,7 +280,7 @@ function NumbersPage({ connected, onConnect, numbers, loading, error }: { connec
 function ApiPage({ connected, onConnect, numbers, keys, loading, error, onCreate, onManage, onRevoke }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; keys: PlatformApiKey[]; loading: boolean; error: unknown; onCreate: () => void; onManage: (key: PlatformApiKey) => void; onRevoke: (id: string) => void }) {
   return <><PageIntro eyebrow="DEVELOPER ACCESS" title="API" subtitle="Create a phone-number API key and manage existing keys." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate} disabled={!connected || !numbers.length}>Create API</Button>} />
     <Card className="surface-card" sx={{ mt: 3 }}>
-      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <Table size="small"><TableHead><TableRow>{['API key', 'Phone numbers', 'Providers', 'Customer', 'Created', 'Expires', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><code>{key.key_prefix}</code></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.assigned_numbers.length ? [...new Set(key.assigned_numbers.map(number => number.provider))].join(', ') : '—'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell">{key.expires_at ? new Date(key.expires_at).toLocaleDateString() : 'Never'}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell">{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Manage</Button><Button color="error" size="small" onClick={() => onRevoke(key.id)}>Revoke</Button></>}</TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No API keys created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API key and assign it to one or more outbound-enabled phone numbers.' : 'Register an outbound-enabled phone number first.'}</div></div>}
+      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <Table size="small"><TableHead><TableRow>{['API key', 'Phone numbers', 'Providers', 'Customer', 'Vertex AI', 'Created', 'Expires', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><code>{key.key_prefix}</code></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.assigned_numbers.length ? [...new Set(key.assigned_numbers.map(number => number.provider))].join(', ') : '—'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{key.vertex_credentials_configured ? `${key.vertex_project_id} · ${key.vertex_location}` : 'Not configured'}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell">{key.expires_at ? new Date(key.expires_at).toLocaleDateString() : 'Never'}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell">{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Edit</Button><Button color="error" size="small" onClick={() => onRevoke(key.id)}>Revoke</Button></>}</TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No API keys created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API key, configure its GCP credentials, and assign phone numbers.' : 'Register an outbound-enabled phone number first.'}</div></div>}
     </Card>
   </>
 }

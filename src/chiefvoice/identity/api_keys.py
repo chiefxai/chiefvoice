@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+from cryptography.fernet import Fernet
 from sqlalchemy import DateTime, ForeignKey, Index, String, Text, delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
@@ -44,6 +45,16 @@ class ApiKeySummary:
     last_used_at: datetime | None
     revoked_at: datetime | None
     assigned_numbers: tuple[tuple[str, str], ...] = ()
+    vertex_project_id: str | None = None
+    vertex_location: str | None = None
+    vertex_credentials_configured: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyVertexConfig:
+    project_id: str
+    location: str
+    credentials_json: str
 
 
 class ApiKeyDirectory(Protocol):
@@ -57,6 +68,9 @@ class ApiKeyDirectory(Protocol):
         created_by: str,
         expires_at: datetime | None,
         assigned_numbers: tuple[tuple[str, str], ...] = (),
+        vertex_project_id: str | None = None,
+        vertex_location: str | None = None,
+        vertex_credentials_json: str | None = None,
     ) -> tuple[str, ApiKeySummary]: ...
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
     async def list_all(self) -> list[ApiKeySummary]: ...
@@ -66,6 +80,15 @@ class ApiKeyDirectory(Protocol):
         tenant_id: str,
         key_id: str,
         assigned_numbers: tuple[tuple[str, str], ...],
+    ) -> bool: ...
+    async def get_vertex_config(self, key_id: str) -> ApiKeyVertexConfig | None: ...
+    async def update_vertex_config(
+        self, tenant_id: str, key_id: str, *, vertex_project_id: str,
+        vertex_location: str, vertex_credentials_json: str | None,
+    ) -> bool: ...
+    async def update_config_and_numbers(
+        self, tenant_id: str, key_id: str, *, assigned_numbers: tuple[tuple[str, str], ...],
+        vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
     ) -> bool: ...
     async def provision_customer(
         self,
@@ -93,6 +116,9 @@ class ApiKeyRow(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    vertex_project_id: Mapped[str | None] = mapped_column(String(128))
+    vertex_location: Mapped[str | None] = mapped_column(String(64))
+    encrypted_vertex_credentials: Mapped[str | None] = mapped_column(Text)
 
 
 class ApiKeyPhoneNumberRow(Base):
@@ -112,9 +138,10 @@ class ApiKeyPhoneNumberRow(Base):
 class SqlApiKeyDirectory:
     """Hash-only API key storage and verification backed by the shared Postgres schema."""
 
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, encryption_key: str | None = None):
         self._engine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
+        self._fernet = Fernet(encryption_key.encode("ascii")) if encryption_key else None
 
     async def initialize(self) -> None:
         await verify_schema_revision(self._engine)
@@ -163,6 +190,9 @@ class SqlApiKeyDirectory:
         created_by: str,
         expires_at: datetime | None,
         assigned_numbers: tuple[tuple[str, str], ...] = (),
+        vertex_project_id: str | None = None,
+        vertex_location: str | None = None,
+        vertex_credentials_json: str | None = None,
     ) -> tuple[str, ApiKeySummary]:
         normalized_numbers = tuple(sorted(set(assigned_numbers)))
         if len(normalized_numbers) != len(assigned_numbers) or len(
@@ -184,6 +214,9 @@ class SqlApiKeyDirectory:
             created_by=created_by,
             created_at=now,
             expires_at=expires_at,
+            vertex_project_id=vertex_project_id,
+            vertex_location=vertex_location,
+            encrypted_vertex_credentials=self._encrypt_credentials(vertex_credentials_json),
         )
         async with self._sessions.begin() as session:
             account = await session.get(TenantAccountRow, tenant_id)
@@ -199,6 +232,68 @@ class SqlApiKeyDirectory:
             )
             await session.flush()
         return token, _to_summary(row, normalized_numbers)
+
+    def _encrypt_credentials(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if self._fernet is None:
+            raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY is required to store GCP credentials")
+        return self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
+
+    async def get_vertex_config(self, key_id: str) -> ApiKeyVertexConfig | None:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(ApiKeyRow).where(ApiKeyRow.id == key_id)
+            )
+            if row is None or not row.encrypted_vertex_credentials or not row.vertex_project_id:
+                return None
+            if self._fernet is None:
+                raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY is not configured")
+            credentials = self._fernet.decrypt(row.encrypted_vertex_credentials.encode("ascii"))
+            return ApiKeyVertexConfig(
+                project_id=row.vertex_project_id,
+                location=row.vertex_location or "us-central1",
+                credentials_json=credentials.decode("utf-8"),
+            )
+
+    async def update_vertex_config(
+        self, tenant_id: str, key_id: str, *, vertex_project_id: str,
+        vertex_location: str, vertex_credentials_json: str | None,
+    ) -> bool:
+        values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location}
+        if vertex_credentials_json is not None:
+            values["encrypted_vertex_credentials"] = self._encrypt_credentials(vertex_credentials_json)
+        async with self._sessions.begin() as session:
+            result = await session.execute(
+                update(ApiKeyRow).where(
+                    ApiKeyRow.id == key_id, ApiKeyRow.tenant_id == tenant_id,
+                    ApiKeyRow.revoked_at.is_(None),
+                ).values(**values)
+            )
+            return result.rowcount == 1
+
+    async def update_config_and_numbers(
+        self, tenant_id: str, key_id: str, *, assigned_numbers: tuple[tuple[str, str], ...],
+        vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
+    ) -> bool:
+        normalized = tuple(sorted(set(assigned_numbers)))
+        if len(normalized) != len(assigned_numbers) or len({number for _, number in assigned_numbers}) != len(assigned_numbers):
+            raise ValueError("API key phone number assignments must be unique")
+        values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location}
+        if vertex_credentials_json is not None:
+            values["encrypted_vertex_credentials"] = self._encrypt_credentials(vertex_credentials_json)
+        async with self._sessions.begin() as session:
+            row = await session.scalar(select(ApiKeyRow).where(
+                ApiKeyRow.id == key_id, ApiKeyRow.tenant_id == tenant_id,
+                ApiKeyRow.revoked_at.is_(None),
+            ).with_for_update())
+            if row is None:
+                return False
+            await session.execute(delete(ApiKeyPhoneNumberRow).where(ApiKeyPhoneNumberRow.api_key_id == key_id))
+            session.add_all(ApiKeyPhoneNumberRow(api_key_id=key_id, provider=provider, phone_number=number) for provider, number in normalized)
+            await session.execute(update(ApiKeyRow).where(ApiKeyRow.id == key_id).values(**values))
+            await session.flush()
+            return True
 
     async def provision_customer(
         self,
@@ -348,4 +443,7 @@ def _to_summary(
         last_used_at=row.last_used_at,
         revoked_at=row.revoked_at,
         assigned_numbers=assigned_numbers,
+        vertex_project_id=row.vertex_project_id,
+        vertex_location=row.vertex_location,
+        vertex_credentials_configured=bool(row.encrypted_vertex_credentials),
     )

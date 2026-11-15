@@ -156,6 +156,7 @@ def _completed_call(payload: dict) -> CompletedCall:
         provider=payload["provider"],
         channel=payload["channel"],
         direction=payload["direction"],
+        api_key_id=payload.get("api_key_id"),
         started_at=payload.get("started_at"),
         ended_at=payload.get("ended_at"),
         transcript=payload.get("transcript"),

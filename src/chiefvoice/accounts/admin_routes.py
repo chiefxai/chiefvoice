@@ -1,5 +1,6 @@
 """Platform-admin customer provisioning and credential lifecycle APIs."""
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -97,6 +98,39 @@ class PhoneNumberAssignment(BaseModel):
 
 class CreatePhoneApiKeyBody(BaseModel):
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
+    gcp_credentials_json: str
+    vertex_location: str = Field(default="us-central1", min_length=1, max_length=64)
+
+    @field_validator("vertex_location")
+    @classmethod
+    def clean_location(cls, value: str) -> str:
+        return value.strip()
+
+class UpdatePhoneApiKeyConfigBody(BaseModel):
+    phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
+    vertex_location: str = Field(default="us-central1", min_length=1, max_length=64)
+    gcp_credentials_json: str | None = None
+
+    @field_validator("vertex_location")
+    @classmethod
+    def clean_location(cls, value: str) -> str:
+        return value.strip()
+
+
+
+def _parse_gcp_service_account(value: str) -> tuple[dict, str]:
+    if not value.strip() or len(value) > 20000:
+        raise HTTPException(status_code=422, detail="GCP service account JSON must be 1 to 20000 characters")
+    try:
+        credentials = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="GCP credentials must be valid service account JSON") from exc
+    required = ("type", "project_id", "client_email", "private_key", "token_uri")
+    if not isinstance(credentials, dict) or any(not credentials.get(key) for key in required):
+        raise HTTPException(status_code=422, detail="Provide a complete Google Cloud service account JSON key")
+    if credentials["type"] != "service_account":
+        raise HTTPException(status_code=422, detail="GCP credentials must be a service account key")
+    return credentials, json.dumps(credentials, separators=(",", ":"))
 
 
 class ReplacePhoneApiKeyNumbersBody(BaseModel):
@@ -180,6 +214,9 @@ def _key_json(key: ApiKeySummary) -> dict:
         "assigned_phone_number": (
             key.assigned_numbers[0][1] if len(key.assigned_numbers) == 1 else None
         ),
+        "vertex_project_id": key.vertex_project_id,
+        "vertex_location": key.vertex_location,
+        "vertex_credentials_configured": key.vertex_credentials_configured,
     }
 
 
@@ -338,6 +375,9 @@ async def issue_phone_api_key(
     if len(tenant_ids) != 1:
         raise HTTPException(status_code=422, detail="All phone numbers must belong to one customer")
     tenant_id = next(iter(tenant_ids))
+    credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
+    if not settings.credentials_encryption_key:
+        raise HTTPException(status_code=503, detail="Encrypted GCP credential storage is not configured")
     account = await account_store.get(tenant_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Phone number customer was not found")
@@ -350,6 +390,9 @@ async def issue_phone_api_key(
             created_by=principal.subject,
             expires_at=expires_at,
             assigned_numbers=tuple(requested),
+            vertex_project_id=credentials["project_id"],
+            vertex_location=body.vertex_location,
+            vertex_credentials_json=credentials_json,
         )
     except IntegrityError as exc:
         raise HTTPException(
@@ -370,6 +413,53 @@ async def issue_phone_api_key(
         "api_key_record": {**_key_json(key), "customer_name": account.display_name},
         "message": "Copy this API key now; its secret will not be shown again.",
     }
+
+
+@router.put("/api-keys/{key_id}/config")
+async def update_phone_api_key_config(
+    key_id: str,
+    body: UpdatePhoneApiKeyConfigBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+):
+    account_store, api_key_directory = _stores(request)
+    key = next((item for item in await api_key_directory.list_all() if item.key_id == key_id), None)
+    if key is None or key.revoked_at is not None:
+        raise HTTPException(status_code=404, detail="Active API key not found")
+    requested = [(item.provider, item.phone_number) for item in body.phone_numbers]
+    if len(requested) != len(set(requested)) or len({number for _, number in requested}) != len(requested):
+        raise HTTPException(status_code=422, detail="Phone number assignments must be unique")
+    registered = await _integration_store(request).list_phone_numbers()
+    for provider, number in requested:
+        phone = next((item for item in registered if item.tenant_id == key.tenant_id and item.provider == provider and item.number == number and item.outbound_enabled), None)
+        if phone is None:
+            raise HTTPException(status_code=404, detail="An outbound-enabled number for this customer was not found")
+    credentials_json = body.gcp_credentials_json
+    if credentials_json is not None:
+        if not settings.credentials_encryption_key:
+            raise HTTPException(status_code=503, detail="Encrypted GCP credential storage is not configured")
+        credentials, credentials_json = _parse_gcp_service_account(credentials_json)
+        project_id = credentials["project_id"]
+    else:
+        project_id = key.vertex_project_id
+        if not key.vertex_credentials_configured or not project_id:
+            raise HTTPException(status_code=422, detail="GCP credentials are required for this API")
+    try:
+        replaced = await api_key_directory.update_config_and_numbers(
+            key.tenant_id, key_id,
+            assigned_numbers=tuple(requested),
+            vertex_project_id=project_id,
+            vertex_location=body.vertex_location,
+            vertex_credentials_json=credentials_json,
+        )
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="A selected phone number is already assigned to another API") from exc
+    if not replaced:
+        raise HTTPException(status_code=404, detail="Active API key not found")
+    refreshed = next(item for item in await api_key_directory.list_for_tenant(key.tenant_id) if item.key_id == key_id)
+    account = await account_store.get(key.tenant_id)
+    logger.info("platform_api_config_updated", extra={"actor_subject": principal.subject, "api_key_id": key_id, "tenant_id": key.tenant_id})
+    return {**_key_json(refreshed), "customer_name": account.display_name if account else ""}
 
 
 @router.put("/api-keys/{key_id}/phone-numbers")
