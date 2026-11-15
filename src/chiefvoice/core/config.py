@@ -65,6 +65,8 @@ class Settings:
     )
     vertex_credentials_json: str | None = os.getenv("VERTEX_CREDENTIALS_JSON") or None
     vertex_credentials_path: str | None = os.getenv("VERTEX_CREDENTIALS_PATH") or None
+    google_ai_api_key: str | None = os.getenv("GOOGLE_AI_API_KEY") or None
+    google_ai_live_model: str = os.getenv("GOOGLE_AI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
     vertex_project_isolation_enabled: bool = os.getenv("VERTEX_PROJECT_ISOLATION_ENABLED", "false").lower() == "true"
     gcp_project_parent: str | None = os.getenv("GCP_PROJECT_PARENT") or None
     gcp_billing_account_id: str | None = os.getenv("GCP_BILLING_ACCOUNT_ID") or None
@@ -93,6 +95,8 @@ class Settings:
     vobiz_public_url: str | None = os.getenv("VOBIZ_PUBLIC_URL") or None
     vobiz_inbound_route_token: str | None = os.getenv("VOBIZ_INBOUND_ROUTE_TOKEN") or None
     vobiz_webhook_secret: str | None = os.getenv("VOBIZ_WEBHOOK_SECRET") or None
+    vobiz_auth_id: str | None = os.getenv("VOBIZ_AUTH_ID") or None
+    vobiz_auth_token: str | None = os.getenv("VOBIZ_AUTH_TOKEN") or None
     vobiz_encoding: str = os.getenv("VOBIZ_ENCODING", "audio/x-mulaw")
     vobiz_sample_rate: int = int(os.getenv("VOBIZ_SAMPLE_RATE", "8000"))
     vobiz_record_inbound: bool = os.getenv("VOBIZ_RECORD_INBOUND", "false").lower() == "true"

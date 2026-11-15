@@ -2,7 +2,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-CURRENT_SCHEMA_REVISION = "0014_api_key_call_billing"
+CURRENT_SCHEMA_REVISION = "0015_api_key_agent_providers"
 CONSTRAINT_NAMING = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",

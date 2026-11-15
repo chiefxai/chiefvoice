@@ -21,10 +21,12 @@ class ApiKeyVertexPostCallAgent:
         config = await self.directory.get_vertex_config(call.api_key_id)
         if config is None:
             raise RuntimeError("GCP credentials are not configured for this API key")
+        if config.post_call_provider != "vertex":
+            raise RuntimeError("The selected post-call provider is not available")
         agent = create_vertex_post_call_agent(
             project_id=config.project_id,
             location=config.location,
-            model=self.model,
+            model=config.post_call_model,
             credentials_json=config.credentials_json,
         )
         return await agent.process(call)

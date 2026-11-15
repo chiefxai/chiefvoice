@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
 from pydantic import BaseModel, Field, field_validator
@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from chiefvoice.accounts.models import AccountStore, TenantAccount
 from chiefvoice.billing import BillingMode
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
+from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
 from chiefvoice.core.config import settings
 from chiefvoice.identity.api_keys import ApiKeyDirectory, ApiKeySummary
 from chiefvoice.identity.auth import Principal, current_principal
@@ -100,21 +101,43 @@ class CreatePhoneApiKeyBody(BaseModel):
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     gcp_credentials_json: str
     vertex_location: str = Field(default="us-central1", min_length=1, max_length=64)
+    voice_provider: str = "vertex"
+    voice_model: str = Field(default="google/gemini-live-2.5-flash-native-audio", min_length=1, max_length=160)
+    post_call_provider: str = "vertex"
+    post_call_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=160)
 
     @field_validator("vertex_location")
     @classmethod
     def clean_location(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("voice_provider", "post_call_provider")
+    @classmethod
+    def supported_provider(cls, value: str) -> str:
+        if value.strip().lower() != "vertex":
+            raise ValueError("Only Vertex AI is currently supported")
+        return "vertex"
 
 class UpdatePhoneApiKeyConfigBody(BaseModel):
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     vertex_location: str = Field(default="us-central1", min_length=1, max_length=64)
     gcp_credentials_json: str | None = None
+    voice_provider: str = "vertex"
+    voice_model: str = Field(default="google/gemini-live-2.5-flash-native-audio", min_length=1, max_length=160)
+    post_call_provider: str = "vertex"
+    post_call_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=160)
 
     @field_validator("vertex_location")
     @classmethod
     def clean_location(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("voice_provider", "post_call_provider")
+    @classmethod
+    def supported_provider(cls, value: str) -> str:
+        if value.strip().lower() != "vertex":
+            raise ValueError("Only Vertex AI is currently supported")
+        return "vertex"
 
 
 
@@ -135,6 +158,42 @@ def _parse_gcp_service_account(value: str) -> tuple[dict, str]:
 
 class ReplacePhoneApiKeyNumbersBody(BaseModel):
     phone_numbers: list[PhoneNumberAssignment] = Field(max_length=100)
+
+
+class AddPlatformNumbersBody(BaseModel):
+    customer_id: str = Field(min_length=1, max_length=200)
+    credential_mode: Literal["platform", "custom"]
+    phone_numbers: list[str] = Field(min_length=1, max_length=100)
+    auth_id: str | None = Field(default=None, max_length=200)
+    auth_token: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("phone_numbers")
+    @classmethod
+    def normalize_phone_numbers(cls, values: list[str]) -> list[str]:
+        normalized = []
+        for value in values:
+            number = re.sub(r"[\s().-]", "", value)
+            if not re.fullmatch(r"\+[1-9]\d{4,14}", number):
+                raise ValueError("Phone numbers must be in international format, for example +15551234567")
+            normalized.append(number)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("Phone numbers must be unique")
+        return normalized
+
+
+class UpdatePlatformNumberBody(BaseModel):
+    inbound_enabled: bool
+    outbound_enabled: bool
+
+
+def _vobiz_credentials(credential_mode: str, auth_id: str | None, auth_token: str | None) -> dict[str, str]:
+    if credential_mode == "platform":
+        if not settings.vobiz_auth_id or not settings.vobiz_auth_token:
+            raise HTTPException(status_code=503, detail="Platform Vobiz credentials are not configured")
+        return {"auth_id": settings.vobiz_auth_id, "auth_token": settings.vobiz_auth_token}
+    if not auth_id or not auth_id.strip() or not auth_token or not auth_token.strip():
+        raise HTTPException(status_code=422, detail="Custom Vobiz auth ID and auth token are required")
+    return {"auth_id": auth_id.strip(), "auth_token": auth_token.strip()}
 
 
 def _platform_admin(required_scope: str):
@@ -217,6 +276,10 @@ def _key_json(key: ApiKeySummary) -> dict:
         "vertex_project_id": key.vertex_project_id,
         "vertex_location": key.vertex_location,
         "vertex_credentials_configured": key.vertex_credentials_configured,
+        "voice_provider": key.voice_provider,
+        "voice_model": key.voice_model,
+        "post_call_provider": key.post_call_provider,
+        "post_call_model": key.post_call_model,
     }
 
 
@@ -305,12 +368,21 @@ async def list_platform_phone_numbers(
     }
     items = []
     account_cache: dict[str, TenantAccount | None] = {}
+    vobiz_config_cache: dict[str, str | None] = {}
     for phone in records:
         if phone.tenant_id not in account_cache:
             account_cache[phone.tenant_id] = await account_store.get(phone.tenant_id)
         account = account_cache[phone.tenant_id]
         if account is None:
             continue
+        credential_mode = None
+        if phone.provider == "vobiz":
+            if phone.tenant_id not in vobiz_config_cache:
+                integration = await _integration_store(request).get("vobiz", phone.tenant_id)
+                vobiz_config_cache[phone.tenant_id] = (
+                    integration.settings.get("credential_mode") if integration else None
+                )
+            credential_mode = vobiz_config_cache[phone.tenant_id]
         owner = number_owners.get(phone.number)
         items.append(
             {
@@ -323,9 +395,119 @@ async def list_platform_phone_numbers(
                 "agent_id": phone.agent_id,
                 "api_key_id": owner.key_id if owner else None,
                 "api_key_name": owner.name if owner else None,
+                "credential_mode": credential_mode,
             }
         )
     return {"items": items}
+
+
+@router.post("/phone-numbers", status_code=status.HTTP_201_CREATED)
+async def add_platform_phone_numbers(
+    body: AddPlatformNumbersBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+):
+    account_store, _ = _stores(request)
+    account = await account_store.get(body.customer_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    credentials = _vobiz_credentials(body.credential_mode, body.auth_id, body.auth_token)
+    store = _integration_store(request)
+    integration = await store.get("vobiz", body.customer_id)
+    existing_numbers = list(integration.phone_numbers) if integration else []
+    if integration and existing_numbers:
+        current_mode = integration.settings.get("credential_mode", "custom")
+        if current_mode != body.credential_mode:
+            raise HTTPException(
+                status_code=409,
+                detail="Vobiz credential mode is shared by this customer’s numbers. Edit the existing Vobiz configuration to change it.",
+            )
+    existing_values = {item.number for item in existing_numbers}
+    if existing_values.intersection(body.phone_numbers):
+        raise HTTPException(status_code=409, detail="A selected number is already registered for this customer")
+    merged_numbers = [*existing_numbers, *(ProviderPhoneNumber(number) for number in body.phone_numbers)]
+    integration_settings = dict(integration.settings) if integration else {}
+    integration_settings["credential_mode"] = body.credential_mode
+    if integration_settings.get("default_caller_id") not in {
+        item.number for item in merged_numbers if item.outbound_enabled
+    }:
+        integration_settings["default_caller_id"] = next(
+            (item.number for item in merged_numbers if item.outbound_enabled), None
+        )
+    integration_settings = {key: value for key, value in integration_settings.items() if value is not None}
+    try:
+        await store.save(ProviderIntegration(
+            provider="vobiz", tenant_id=body.customer_id, credentials=credentials,
+            settings=integration_settings, phone_numbers=tuple(merged_numbers),
+        ))
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="A phone number is already registered") from exc
+    logger.info("platform_vobiz_numbers_added", extra={
+        "actor_subject": principal.subject, "tenant_id": body.customer_id,
+        "phone_number_count": len(body.phone_numbers), "credential_mode": body.credential_mode,
+    })
+    return {"provider": "vobiz", "customer_id": body.customer_id, "credential_mode": body.credential_mode,
+            "phone_numbers": body.phone_numbers}
+
+
+@router.put("/phone-numbers/{provider}/{phone_number:path}")
+async def update_platform_phone_number(
+    provider: str,
+    phone_number: str,
+    body: UpdatePlatformNumberBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+    customer_id: str = Query(min_length=1, max_length=200),
+):
+    del principal
+    if provider != "vobiz":
+        raise HTTPException(status_code=404, detail="Provider is not supported for number management")
+    store = _integration_store(request)
+    integration = await store.get(provider, customer_id)
+    if integration is None:
+        raise HTTPException(status_code=404, detail="Provider configuration not found")
+    numbers = [
+        ProviderPhoneNumber(item.number, body.inbound_enabled, body.outbound_enabled, item.agent_id)
+        if item.number == phone_number else item
+        for item in integration.phone_numbers
+    ]
+    if len(numbers) == len(integration.phone_numbers):
+        raise HTTPException(status_code=404, detail="Phone number not found")
+    integration_settings = dict(integration.settings)
+    outbound_numbers = {item.number for item in numbers if item.outbound_enabled}
+    if integration_settings.get("default_caller_id") not in outbound_numbers:
+        integration_settings["default_caller_id"] = next(iter(outbound_numbers), None)
+    integration_settings = {key: value for key, value in integration_settings.items() if value is not None}
+    await store.save(ProviderIntegration(provider, customer_id, integration.credentials, integration_settings, tuple(numbers)))
+    return {"status": "updated", "phone_number": phone_number}
+
+
+@router.delete("/phone-numbers/{provider}/{phone_number:path}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_platform_phone_number(
+    provider: str,
+    phone_number: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+    customer_id: str = Query(min_length=1, max_length=200),
+):
+    del principal
+    if provider != "vobiz":
+        raise HTTPException(status_code=404, detail="Provider is not supported for number management")
+    store = _integration_store(request)
+    integration = await store.get(provider, customer_id)
+    if integration is None:
+        raise HTTPException(status_code=404, detail="Provider configuration not found")
+    numbers = tuple(item for item in integration.phone_numbers if item.number != phone_number)
+    if len(numbers) == len(integration.phone_numbers):
+        raise HTTPException(status_code=404, detail="Phone number not found")
+    if not numbers:
+        await store.delete(provider, customer_id)
+        return
+    integration_settings = dict(integration.settings)
+    if integration_settings.get("default_caller_id") == phone_number:
+        integration_settings["default_caller_id"] = next((item.number for item in numbers if item.outbound_enabled), None)
+    integration_settings = {key: value for key, value in integration_settings.items() if value is not None}
+    await store.save(ProviderIntegration(provider, customer_id, integration.credentials, integration_settings, numbers))
 
 
 @router.get("/api-keys")
@@ -440,6 +622,10 @@ async def issue_phone_api_key(
             vertex_project_id=credentials["project_id"],
             vertex_location=body.vertex_location,
             vertex_credentials_json=credentials_json,
+            voice_provider=body.voice_provider,
+            voice_model=body.voice_model.strip(),
+            post_call_provider=body.post_call_provider,
+            post_call_model=body.post_call_model.strip(),
         )
     except IntegrityError as exc:
         raise HTTPException(
@@ -498,6 +684,10 @@ async def update_phone_api_key_config(
             vertex_project_id=project_id,
             vertex_location=body.vertex_location,
             vertex_credentials_json=credentials_json,
+            voice_provider=body.voice_provider,
+            voice_model=body.voice_model.strip(),
+            post_call_provider=body.post_call_provider,
+            post_call_model=body.post_call_model.strip(),
         )
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="A selected phone number is already assigned to another API") from exc

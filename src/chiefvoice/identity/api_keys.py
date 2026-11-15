@@ -48,6 +48,10 @@ class ApiKeySummary:
     vertex_project_id: str | None = None
     vertex_location: str | None = None
     vertex_credentials_configured: bool = False
+    voice_provider: str = "vertex"
+    voice_model: str = "google/gemini-live-2.5-flash-native-audio"
+    post_call_provider: str = "vertex"
+    post_call_model: str = "gemini-2.5-flash"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +59,10 @@ class ApiKeyVertexConfig:
     project_id: str
     location: str
     credentials_json: str
+    voice_provider: str = "vertex"
+    voice_model: str = "google/gemini-live-2.5-flash-native-audio"
+    post_call_provider: str = "vertex"
+    post_call_model: str = "gemini-2.5-flash"
 
 
 class ApiKeyDirectory(Protocol):
@@ -71,6 +79,10 @@ class ApiKeyDirectory(Protocol):
         vertex_project_id: str | None = None,
         vertex_location: str | None = None,
         vertex_credentials_json: str | None = None,
+        voice_provider: str = "vertex",
+        voice_model: str = "google/gemini-live-2.5-flash-native-audio",
+        post_call_provider: str = "vertex",
+        post_call_model: str = "gemini-2.5-flash",
     ) -> tuple[str, ApiKeySummary]: ...
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
     async def list_all(self) -> list[ApiKeySummary]: ...
@@ -89,6 +101,8 @@ class ApiKeyDirectory(Protocol):
     async def update_config_and_numbers(
         self, tenant_id: str, key_id: str, *, assigned_numbers: tuple[tuple[str, str], ...],
         vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
+        voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
+        post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
     ) -> bool: ...
     async def provision_customer(
         self,
@@ -119,6 +133,10 @@ class ApiKeyRow(Base):
     vertex_project_id: Mapped[str | None] = mapped_column(String(128))
     vertex_location: Mapped[str | None] = mapped_column(String(64))
     encrypted_vertex_credentials: Mapped[str | None] = mapped_column(Text)
+    voice_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="vertex", server_default="vertex")
+    voice_model: Mapped[str] = mapped_column(String(160), nullable=False, default="google/gemini-live-2.5-flash-native-audio", server_default="google/gemini-live-2.5-flash-native-audio")
+    post_call_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="vertex", server_default="vertex")
+    post_call_model: Mapped[str] = mapped_column(String(160), nullable=False, default="gemini-2.5-flash", server_default="gemini-2.5-flash")
 
 
 class ApiKeyPhoneNumberRow(Base):
@@ -193,6 +211,10 @@ class SqlApiKeyDirectory:
         vertex_project_id: str | None = None,
         vertex_location: str | None = None,
         vertex_credentials_json: str | None = None,
+        voice_provider: str = "vertex",
+        voice_model: str = "google/gemini-live-2.5-flash-native-audio",
+        post_call_provider: str = "vertex",
+        post_call_model: str = "gemini-2.5-flash",
     ) -> tuple[str, ApiKeySummary]:
         normalized_numbers = tuple(sorted(set(assigned_numbers)))
         if len(normalized_numbers) != len(assigned_numbers) or len(
@@ -217,6 +239,8 @@ class SqlApiKeyDirectory:
             vertex_project_id=vertex_project_id,
             vertex_location=vertex_location,
             encrypted_vertex_credentials=self._encrypt_credentials(vertex_credentials_json),
+            voice_provider=voice_provider, voice_model=voice_model,
+            post_call_provider=post_call_provider, post_call_model=post_call_model,
         )
         async with self._sessions.begin() as session:
             account = await session.get(TenantAccountRow, tenant_id)
@@ -254,13 +278,19 @@ class SqlApiKeyDirectory:
                 project_id=row.vertex_project_id,
                 location=row.vertex_location or "us-central1",
                 credentials_json=credentials.decode("utf-8"),
+                voice_provider=row.voice_provider, voice_model=row.voice_model,
+                post_call_provider=row.post_call_provider, post_call_model=row.post_call_model,
             )
 
     async def update_vertex_config(
         self, tenant_id: str, key_id: str, *, vertex_project_id: str,
         vertex_location: str, vertex_credentials_json: str | None,
+        voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
+        post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
     ) -> bool:
-        values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location}
+        values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location,
+                  "voice_provider": voice_provider, "voice_model": voice_model,
+                  "post_call_provider": post_call_provider, "post_call_model": post_call_model}
         if vertex_credentials_json is not None:
             values["encrypted_vertex_credentials"] = self._encrypt_credentials(vertex_credentials_json)
         async with self._sessions.begin() as session:
@@ -275,11 +305,15 @@ class SqlApiKeyDirectory:
     async def update_config_and_numbers(
         self, tenant_id: str, key_id: str, *, assigned_numbers: tuple[tuple[str, str], ...],
         vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
+        voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
+        post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
     ) -> bool:
         normalized = tuple(sorted(set(assigned_numbers)))
         if len(normalized) != len(assigned_numbers) or len({number for _, number in assigned_numbers}) != len(assigned_numbers):
             raise ValueError("API key phone number assignments must be unique")
-        values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location}
+        values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location,
+                  "voice_provider": voice_provider, "voice_model": voice_model,
+                  "post_call_provider": post_call_provider, "post_call_model": post_call_model}
         if vertex_credentials_json is not None:
             values["encrypted_vertex_credentials"] = self._encrypt_credentials(vertex_credentials_json)
         async with self._sessions.begin() as session:
@@ -446,4 +480,6 @@ def _to_summary(
         vertex_project_id=row.vertex_project_id,
         vertex_location=row.vertex_location,
         vertex_credentials_configured=bool(row.encrypted_vertex_credentials),
+        voice_provider=row.voice_provider, voice_model=row.voice_model,
+        post_call_provider=row.post_call_provider, post_call_model=row.post_call_model,
     )

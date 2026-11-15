@@ -4,7 +4,7 @@ import axios from 'axios'
 import {
   Alert, Avatar, Button, Card, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Drawer, FormControl, IconButton, InputAdornment,
-  InputLabel, ListItemText, MenuItem, Select, Snackbar, Stack, Table, TableBody, TableCell,
+  InputLabel, ListItemText, Menu, MenuItem, Select, Snackbar, Stack, Table, TableBody, TableCell,
   TableHead, TableRow, TextField, Tooltip, Typography,
 } from '@mui/material'
 import HubRoundedIcon from '@mui/icons-material/HubRounded'
@@ -30,6 +30,7 @@ type RegisteredNumber = {
   agent_id: string | null
   api_key_id: string | null
   api_key_name: string | null
+  credential_mode: 'platform' | 'custom' | null
 }
 type PlatformApiKey = {
   id: string
@@ -46,8 +47,13 @@ type PlatformApiKey = {
   vertex_project_id?: string | null
   vertex_location?: string | null
   vertex_credentials_configured?: boolean
+  voice_provider?: string
+  voice_model?: string
+  post_call_provider?: string
+  post_call_model?: string
 }
 type IssuedApiKey = { key: string; api_key_record: PlatformApiKey }
+type Customer = { customer_id: string; display_name: string }
 type ApiCallLog = {
   session_id: string; provider: string | null; channel: string | null; direction: string | null
   caller: string | null; callee: string | null; status: string; end_reason: string | null
@@ -84,8 +90,12 @@ const api = {
   apiKeys: () => http.get<{ items: PlatformApiKey[] }>('/v1/admin/customers/api-keys').then(r => r.data.items),
   apiCalls: (id: string) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`).then(r => r.data),
   apiBilling: (id: string) => http.get<ApiBillingUsage>(`/v1/admin/customers/api-keys/${id}/billing`).then(r => r.data),
-  createApiKey: (numbers: RegisteredNumber[], credentials: string, location: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials, vertex_location: location }).then(r => r.data),
-  updateApiConfig: (id: string, numbers: RegisteredNumber[], credentials: string, location: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials || null, vertex_location: location }),
+  customers: () => http.get<{ items: Customer[] }>('/v1/admin/customers').then(r => r.data.items),
+  addNumbers: (data: { customer_id: string; credential_mode: 'platform' | 'custom'; phone_numbers: string[]; auth_id?: string; auth_token?: string }) => http.post('/v1/admin/customers/phone-numbers', data),
+  updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound }, { params: { customer_id: number.customer_id } }),
+  deleteNumber: (number: RegisteredNumber) => http.delete(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { params: { customer_id: number.customer_id } }),
+  createApiKey: (numbers: RegisteredNumber[], credentials: string, location: string, voiceModel: string, postCallModel: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials, vertex_location: location, voice_provider: 'vertex', voice_model: voiceModel, post_call_provider: 'vertex', post_call_model: postCallModel }).then(r => r.data),
+  updateApiConfig: (id: string, numbers: RegisteredNumber[], credentials: string, location: string, voiceModel: string, postCallModel: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials || null, vertex_location: location, voice_provider: 'vertex', voice_model: voiceModel, post_call_provider: 'vertex', post_call_model: postCallModel }),
   revokeApiKey: (id: string) => http.delete(`/v1/admin/customers/api-keys/${id}`),
 }
 
@@ -105,6 +115,17 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [selectedNumbers, setSelectedNumbers] = useState<string[]>([])
   const [gcpCredentials, setGcpCredentials] = useState('')
   const [vertexLocation, setVertexLocation] = useState('us-central1')
+  const [voiceModel, setVoiceModel] = useState('google/gemini-live-2.5-flash-native-audio')
+  const [postCallModel, setPostCallModel] = useState('gemini-2.5-flash')
+  const [addNumberAnchor, setAddNumberAnchor] = useState<HTMLElement | null>(null)
+  const [addNumberMode, setAddNumberMode] = useState<'platform' | 'custom' | null>(null)
+  const [numberCustomerId, setNumberCustomerId] = useState('')
+  const [numberInput, setNumberInput] = useState('')
+  const [vobizAuthId, setVobizAuthId] = useState('')
+  const [vobizAuthToken, setVobizAuthToken] = useState('')
+  const [managedNumber, setManagedNumber] = useState<RegisteredNumber | null>(null)
+  const [managedInbound, setManagedInbound] = useState(true)
+  const [managedOutbound, setManagedOutbound] = useState(true)
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
   const [viewingKey, setViewingKey] = useState<PlatformApiKey | null>(null)
   const [oneTimeKey, setOneTimeKey] = useState<IssuedApiKey | null>(null)
@@ -155,10 +176,11 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   }, [queryClient])
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
   const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && page === 'API', retry: false })
+  const customersQuery = useQuery({ queryKey: ['platform-customers'], queryFn: api.customers, enabled: connected && Boolean(addNumberMode), retry: false })
   const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', viewingKey?.id], queryFn: () => api.apiCalls(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', viewingKey?.id], queryFn: () => api.apiBilling(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 10000 : false })
   const issueMutation = useMutation({
-    mutationFn: ({ numbers, credentials, location }: { numbers: RegisteredNumber[]; credentials: string; location: string }) => api.createApiKey(numbers, credentials, location),
+    mutationFn: ({ numbers, credentials, location, voiceModel, postCallModel }: { numbers: RegisteredNumber[]; credentials: string; location: string; voiceModel: string; postCallModel: string }) => api.createApiKey(numbers, credentials, location, voiceModel, postCallModel),
     onSuccess: result => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -167,6 +189,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       setSelectedNumbers([])
       setGcpCredentials('')
       setVertexLocation('us-central1')
+      setVoiceModel('google/gemini-live-2.5-flash-native-audio')
+      setPostCallModel('gemini-2.5-flash')
       setToast('API key created for the selected phone number.')
     },
     onError: error => setToast(errorText(error)),
@@ -181,7 +205,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onError: error => setToast(errorText(error)),
   })
   const manageNumbersMutation = useMutation({
-    mutationFn: ({ key, numbers, credentials, location }: { key: PlatformApiKey; numbers: RegisteredNumber[]; credentials: string; location: string }) => api.updateApiConfig(key.id, numbers, credentials, location),
+    mutationFn: ({ key, numbers, credentials, location, voiceModel, postCallModel }: { key: PlatformApiKey; numbers: RegisteredNumber[]; credentials: string; location: string; voiceModel: string; postCallModel: string }) => api.updateApiConfig(key.id, numbers, credentials, location, voiceModel, postCallModel),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -189,6 +213,26 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       setSelectedNumbers([])
       setToast('API phone number assignments updated.')
     },
+    onError: error => setToast(errorText(error)),
+  })
+  const addNumbersMutation = useMutation({
+    mutationFn: api.addNumbers,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
+      void queryClient.invalidateQueries({ queryKey: ['platform-customers'] })
+      setAddNumberMode(null); setNumberInput(''); setVobizAuthId(''); setVobizAuthToken('')
+      setToast('Vobiz phone numbers added.')
+    },
+    onError: error => setToast(errorText(error)),
+  })
+  const updateNumberMutation = useMutation({
+    mutationFn: ({ number, inbound, outbound }: { number: RegisteredNumber; inbound: boolean; outbound: boolean }) => api.updateNumber(number, inbound, outbound),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] }); setManagedNumber(null); setToast('Phone number settings updated.') },
+    onError: error => setToast(errorText(error)),
+  })
+  const deleteNumberMutation = useMutation({
+    mutationFn: api.deleteNumber,
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] }); void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] }); setManagedNumber(null); setToast('Phone number removed.') },
     onError: error => setToast(errorText(error)),
   })
   const currentNumbers = numbersQuery.data || []
@@ -233,18 +277,65 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         </div>
       </header>
       <div className="content">
-        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} />}
-        {page === 'API' && <ApiPage connected={connected} onConnect={() => { void connect() }} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1'); setAssignmentOpen(true) }} onView={key => setViewingKey(key)} onManage={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)); setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1') }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
+        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled) }} />}
+        {page === 'API' && <ApiPage connected={connected} onConnect={() => { void connect() }} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1'); setVoiceModel('google/gemini-live-2.5-flash-native-audio'); setPostCallModel('gemini-2.5-flash'); setAssignmentOpen(true) }} onView={key => setViewingKey(key)} onManage={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)); setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1'); setVoiceModel(key.voice_model || 'google/gemini-live-2.5-flash-native-audio'); setPostCallModel(key.post_call_model || 'gemini-2.5-flash') }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
         {page === 'Docs' && <DocsPage />}
       </div>
     </main>
 
-    <Dialog open={assignmentOpen} onClose={() => setAssignmentOpen(false)} maxWidth="sm" fullWidth>
+    <Menu anchorEl={addNumberAnchor} open={Boolean(addNumberAnchor)} onClose={() => setAddNumberAnchor(null)}>
+      <MenuItem onClick={() => { setAddNumberAnchor(null); setNumberCustomerId(''); setAddNumberMode('platform') }}><ListItemText primary="Add number with platform Vobiz account" secondary="Enter phone numbers; the server uses its configured Vobiz credentials." /></MenuItem>
+      <MenuItem onClick={() => { setAddNumberAnchor(null); setNumberCustomerId(''); setAddNumberMode('custom') }}><ListItemText primary="Set up customer Vobiz account" secondary="Choose Vobiz, enter credentials, then add one or more numbers." /></MenuItem>
+    </Menu>
+
+    <Dialog open={Boolean(addNumberMode)} onClose={() => setAddNumberMode(null)} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>{addNumberMode === 'custom' ? 'Configure Vobiz numbers' : 'Add phone numbers'}</DialogTitle>
+      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
+        {addNumberMode === 'custom' && <Alert severity="info">Provider selection: <b>Vobiz</b>. Credentials are stored encrypted and apply to this customer’s Vobiz numbers.</Alert>}
+        {addNumberMode === 'platform' && <Alert severity="info">The server’s Vobiz account credentials will be used. Configure <code>VOBIZ_AUTH_ID</code> and <code>VOBIZ_AUTH_TOKEN</code> on the backend.</Alert>}
+        <FormControl fullWidth>
+          <InputLabel id="number-customer-label">Customer</InputLabel>
+          <Select labelId="number-customer-label" label="Customer" value={numberCustomerId} onChange={event => setNumberCustomerId(event.target.value)}>
+            {(customersQuery.data || []).map(customer => <MenuItem key={customer.customer_id} value={customer.customer_id}>{customer.display_name}</MenuItem>)}
+          </Select>
+        </FormControl>
+        {addNumberMode === 'custom' && <>
+          <TextField label="Vobiz Auth ID" value={vobizAuthId} onChange={event => setVobizAuthId(event.target.value)} fullWidth autoComplete="off" />
+          <TextField label="Vobiz Auth Token" type="password" value={vobizAuthToken} onChange={event => setVobizAuthToken(event.target.value)} fullWidth autoComplete="new-password" />
+        </>}
+        <TextField label="Phone numbers" value={numberInput} onChange={event => setNumberInput(event.target.value)} multiline minRows={4} fullWidth placeholder={'+15551234567\n+15557654321'} helperText="Enter one number per line in international format. You can add several numbers at once." />
+      </Stack></DialogContent>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAddNumberMode(null)}>Cancel</Button><Button variant="contained" disabled={!numberCustomerId || !numberInput.trim() || (addNumberMode === 'custom' && (!vobizAuthId.trim() || !vobizAuthToken.trim())) || addNumbersMutation.isPending} onClick={() => {
+        const phoneNumbers = [...new Set(numberInput.split(/[\n,;\s]+/).map(value => value.trim()).filter(Boolean))]
+        addNumbersMutation.mutate({ customer_id: numberCustomerId, credential_mode: addNumberMode || 'platform', phone_numbers: phoneNumbers, ...(addNumberMode === 'custom' ? { auth_id: vobizAuthId, auth_token: vobizAuthToken } : {}) })
+      }}>{addNumbersMutation.isPending ? 'Adding…' : 'Add numbers'}</Button></DialogActions>
+    </Dialog>
+
+    <Dialog open={Boolean(managedNumber)} onClose={() => setManagedNumber(null)} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Manage phone number</DialogTitle>
+      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
+        <Typography><b>{managedNumber?.phone_number}</b> · {managedNumber?.provider} · {managedNumber?.customer_name}</Typography>
+        <FormControl fullWidth><InputLabel id="inbound-number-label">Inbound calls</InputLabel><Select labelId="inbound-number-label" label="Inbound calls" value={managedInbound ? 'enabled' : 'disabled'} onChange={event => setManagedInbound(event.target.value === 'enabled')}><MenuItem value="enabled">Enabled</MenuItem><MenuItem value="disabled">Disabled</MenuItem></Select></FormControl>
+        <FormControl fullWidth><InputLabel id="outbound-number-label">Outbound calls</InputLabel><Select labelId="outbound-number-label" label="Outbound calls" value={managedOutbound ? 'enabled' : 'disabled'} onChange={event => setManagedOutbound(event.target.value === 'enabled')}><MenuItem value="enabled">Enabled</MenuItem><MenuItem value="disabled">Disabled</MenuItem></Select></FormControl>
+        <Typography variant="caption">Credential mode: {managedNumber?.credential_mode || 'Vobiz integration'}</Typography>
+      </Stack></DialogContent>
+      <DialogActions sx={{ p: 2.5, justifyContent: 'space-between' }}><Button color="error" disabled={!managedNumber || deleteNumberMutation.isPending} onClick={() => { if (managedNumber && window.confirm(`Remove ${managedNumber.phone_number}? This will release the number from any API key.`)) deleteNumberMutation.mutate(managedNumber) }}>Remove number</Button><Stack direction="row" gap={1}><Button onClick={() => setManagedNumber(null)}>Cancel</Button><Button variant="contained" disabled={!managedNumber || (!managedInbound && !managedOutbound) || updateNumberMutation.isPending} onClick={() => managedNumber && updateNumberMutation.mutate({ number: managedNumber, inbound: managedInbound, outbound: managedOutbound })}>{updateNumberMutation.isPending ? 'Saving…' : 'Save settings'}</Button></Stack></DialogActions>
+    </Dialog>
+
+    <Dialog open={assignmentOpen} onClose={() => setAssignmentOpen(false)} maxWidth="md" fullWidth>
       <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Create API for phone numbers</DialogTitle>
       <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
         <Alert severity="info" sx={{ fontSize: 12 }}>Each API key has its own encrypted Google Cloud service account credentials and can own multiple phone numbers. A number can belong to only one API key.</Alert>
         <TextField label="Google Cloud service account JSON" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={5} fullWidth placeholder={'Paste the downloaded service account JSON key'} />
         <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth placeholder="us-central1" />
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+          <FormControl fullWidth><InputLabel id="create-voice-provider-label">Live voice provider</InputLabel><Select labelId="create-voice-provider-label" label="Live voice provider" value="vertex"><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
+          <TextField label="Live voice model ID" value={voiceModel} onChange={event => setVoiceModel(event.target.value)} fullWidth />
+        </Stack>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+          <FormControl fullWidth><InputLabel id="create-post-provider-label">Post-call provider</InputLabel><Select labelId="create-post-provider-label" label="Post-call provider" value="vertex"><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
+          <TextField label="Post-call model ID" value={postCallModel} onChange={event => setPostCallModel(event.target.value)} fullWidth />
+        </Stack>
         <FormControl fullWidth disabled={!outboundNumbers.length}>
           <InputLabel id="assigned-number-label">Phone numbers</InputLabel>
           <Select multiple labelId="assigned-number-label" value={selectedNumbers} label="Phone numbers" onChange={event => setSelectedNumbers(typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value)} renderValue={values => `${values.length} phone number${values.length === 1 ? '' : 's'} selected`}>
@@ -253,7 +344,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         </FormControl>
         {!outboundNumbers.length && <Alert severity="warning">There are no unassigned outbound-enabled numbers. Register a number or manage an existing API assignment.</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={!selected.length || !gcpCredentials.trim() || !vertexLocation.trim() || issueMutation.isPending} onClick={() => selected.length && issueMutation.mutate({ numbers: selected, credentials: gcpCredentials, location: vertexLocation })}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={!selected.length || !gcpCredentials.trim() || !vertexLocation.trim() || !voiceModel.trim() || !postCallModel.trim() || issueMutation.isPending} onClick={() => selected.length && issueMutation.mutate({ numbers: selected, credentials: gcpCredentials, location: vertexLocation, voiceModel, postCallModel })}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={!!oneTimeKey} onClose={() => setOneTimeKey(null)} maxWidth="sm" fullWidth>
@@ -269,9 +360,17 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     <Dialog open={!!managementKey} onClose={() => setManagementKey(null)} maxWidth="sm" fullWidth>
       <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Edit API configuration</DialogTitle>
       <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        <Alert severity="info" sx={{ fontSize: 12 }}>Saved service account credentials are encrypted. Leave the credential field blank to keep the current key; enter new JSON to rotate it.</Alert>
+        <Alert severity="info" sx={{ fontSize: 12 }}>Saved service account credentials are encrypted. Leave the credential field blank to keep the current key; enter new JSON to rotate it. Provider choices reflect the integrations currently supported by the backend.</Alert>
         <TextField label="Replace Google Cloud service account JSON (optional)" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={4} fullWidth placeholder={managementKey?.vertex_credentials_configured ? 'Credentials are saved. Leave blank to keep them.' : 'Paste service account JSON'} />
         <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth />
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+          <FormControl fullWidth><InputLabel id="edit-voice-provider-label">Live voice provider</InputLabel><Select labelId="edit-voice-provider-label" label="Live voice provider" value="vertex"><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
+          <TextField label="Live voice model ID" value={voiceModel} onChange={event => setVoiceModel(event.target.value)} fullWidth />
+        </Stack>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+          <FormControl fullWidth><InputLabel id="edit-post-provider-label">Post-call provider</InputLabel><Select labelId="edit-post-provider-label" label="Post-call provider" value="vertex"><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
+          <TextField label="Post-call model ID" value={postCallModel} onChange={event => setPostCallModel(event.target.value)} fullWidth />
+        </Stack>
         <FormControl fullWidth disabled={!managementKey}>
           <InputLabel id="manage-number-label">Phone numbers</InputLabel>
           <Select multiple labelId="manage-number-label" value={selectedNumbers} label="Phone numbers" onChange={event => setSelectedNumbers(typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value)} renderValue={values => `${values.length} phone number${values.length === 1 ? '' : 's'} selected`}>
@@ -282,7 +381,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           </Select>
         </FormControl>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || (!gcpCredentials.trim() && !managementKey.vertex_credentials_configured) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, numbers, credentials: gcpCredentials, location: vertexLocation }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || (!gcpCredentials.trim() && !managementKey.vertex_credentials_configured) || !voiceModel.trim() || !postCallModel.trim() || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, numbers, credentials: gcpCredentials, location: vertexLocation, voiceModel, postCallModel }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={Boolean(viewingKey)} onClose={() => setViewingKey(null)} maxWidth="lg" fullWidth>
@@ -314,10 +413,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   </div>
 }
 
-function NumbersPage({ connected, onConnect, numbers, loading, error }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; loading: boolean; error: unknown }) {
-  return <><PageIntro eyebrow="PHONE INVENTORY" title="Numbers" subtitle="Phone numbers registered across providers and customer accounts." />
+function NumbersPage({ connected, onConnect, numbers, loading, error, onAddNumber, onManageNumber }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; loading: boolean; error: unknown; onAddNumber: (event: React.MouseEvent<HTMLButtonElement>) => void; onManageNumber: (number: RegisteredNumber) => void }) {
+  return <><PageIntro eyebrow="PHONE INVENTORY" title="Numbers" subtitle="Phone numbers registered across providers and customer accounts." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onAddNumber} disabled={!connected}>Add number</Button>} />
     <Card className="surface-card" sx={{ mt: 3 }}>
-      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : numbers.length ? <Table size="small"><TableHead><TableRow>{['Phone number', 'Provider', 'Customer', 'Inbound', 'Outbound', 'Agent', 'API access'].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{numbers.map(number => <TableRow key={`${number.provider}|${number.phone_number}|${number.customer_id}`} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{number.phone_number}</TableCell><TableCell className="table-cell"><Chip size="small" label={number.provider} variant="outlined" sx={{ textTransform: 'capitalize' }} /></TableCell><TableCell className="table-cell">{number.customer_name}</TableCell><TableCell className="table-cell"><StatusChip enabled={number.inbound_enabled} /></TableCell><TableCell className="table-cell"><StatusChip enabled={number.outbound_enabled} /></TableCell><TableCell className="table-cell">{number.agent_id || 'Default agent'}</TableCell><TableCell className="table-cell">{number.api_key_name || 'Unassigned'}</TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><HubRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No phone numbers registered</b><div style={{ fontSize: 12, marginTop: 6 }}>Numbers appear here when customer provider integrations register them.</div></div>}
+      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : numbers.length ? <Table size="small"><TableHead><TableRow>{['Phone number', 'Provider', 'Customer', 'Credentials', 'Inbound', 'Outbound', 'Agent', 'API access', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{numbers.map(number => <TableRow key={`${number.provider}|${number.phone_number}|${number.customer_id}`} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{number.phone_number}</TableCell><TableCell className="table-cell"><Chip size="small" label={number.provider} variant="outlined" sx={{ textTransform: 'capitalize' }} /></TableCell><TableCell className="table-cell">{number.customer_name}</TableCell><TableCell className="table-cell">{number.credential_mode === 'platform' ? 'Platform' : number.credential_mode === 'custom' ? 'Customer' : '—'}</TableCell><TableCell className="table-cell"><StatusChip enabled={number.inbound_enabled} /></TableCell><TableCell className="table-cell"><StatusChip enabled={number.outbound_enabled} /></TableCell><TableCell className="table-cell">{number.agent_id || 'Default agent'}</TableCell><TableCell className="table-cell">{number.api_key_name || 'Unassigned'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onManageNumber(number)}>Manage</Button></TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><HubRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No phone numbers registered</b><div style={{ fontSize: 12, marginTop: 6 }}>Add a number to get started. You can use the platform Vobiz account or configure customer credentials.</div></div>}
     </Card>
   </>
 }

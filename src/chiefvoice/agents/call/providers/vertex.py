@@ -64,6 +64,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         voice = self.voice
         system_instruction = self.system_instruction
         params = None
+        language_tag = None
         if session.bot_config_id is not None:
             if self.profile_directory is None or session.tenant_id is None:
                 raise HTTPException(
@@ -111,10 +112,17 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             config = await self.api_key_directory.get_vertex_config(session.api_key_id)
             if config is None:
                 raise HTTPException(status_code=503, detail="Configure GCP credentials for this API before placing calls")
+            if config.voice_provider != "vertex":
+                raise HTTPException(status_code=503, detail="The selected live voice provider is not available")
             project_id = config.project_id
             credentials_json = config.credentials_json
             credentials_path = None
             location = config.location
+            model = config.voice_model
+            if service_type == "vertex" and language_tag is not None:
+                params = GeminiLiveVertexLLMService.Settings(
+                    model=model, voice=voice, language=language_tag
+                )
         if service_type == "vertex":
             if self.require_tenant_project and session.api_key_id is None:
                 project_id = None
