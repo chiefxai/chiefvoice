@@ -61,6 +61,7 @@ class VoiceReservationRow(Base):
 
     session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    api_key_id: Mapped[str | None] = mapped_column(String(32), index=True)
     billing_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     channel: Mapped[str] = mapped_column(String(40), nullable=False)
     direction: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -84,6 +85,7 @@ class BillingLedgerEntryRow(Base):
 
     entry_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    api_key_id: Mapped[str | None] = mapped_column(String(32), index=True)
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     billing_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
@@ -252,13 +254,45 @@ class SqlBillingDirectory:
             )
             return self._serialize(row) if row else None
 
-    async def reserve_prepaid_voice(self, tenant_id, session_id, channel, direction):
-        return await self._reserve(tenant_id, session_id, channel, direction, BillingMode.PREPAID)
+    async def get_usage_for_api_key(self, tenant_id: str, api_key_id: str) -> dict | None:
+        async with self._sessions() as session:
+            plan = await session.scalar(
+                select(TenantVoicePlanRow).where(TenantVoicePlanRow.tenant_id == tenant_id)
+            )
+            if plan is None:
+                return None
+            row = await session.execute(
+                select(
+                    func.count(VoiceReservationRow.session_id),
+                    func.coalesce(func.sum(VoiceReservationRow.billable_seconds), 0),
+                    func.coalesce(func.sum(VoiceReservationRow.charged_minor), 0),
+                    func.count().filter(VoiceReservationRow.status == "reserved"),
+                ).where(
+                    VoiceReservationRow.tenant_id == tenant_id,
+                    VoiceReservationRow.api_key_id == api_key_id,
+                )
+            )
+            calls, seconds, charges, active = row.one()
+            return {
+                "billing_mode": plan.billing_mode,
+                "currency": plan.currency,
+                "rate_per_minute_minor": plan.rate_per_minute_minor,
+                "calls": int(calls or 0),
+                "billable_seconds": int(seconds or 0),
+                "charges_minor": int(charges or 0),
+                "active_reservations": int(active or 0),
+                "customer_prepaid_balance_minor": plan.prepaid_balance_minor,
+                "customer_postpaid_used_minor": plan.postpaid_used_minor,
+                "customer_postpaid_credit_limit_minor": plan.postpaid_credit_limit_minor,
+            }
 
-    async def authorize_postpaid_voice(self, tenant_id, session_id, channel, direction):
-        return await self._reserve(tenant_id, session_id, channel, direction, BillingMode.POSTPAID)
+    async def reserve_prepaid_voice(self, tenant_id, session_id, channel, direction, api_key_id=None):
+        return await self._reserve(tenant_id, session_id, channel, direction, BillingMode.PREPAID, api_key_id)
 
-    async def _reserve(self, tenant_id, session_id, channel, direction, mode):
+    async def authorize_postpaid_voice(self, tenant_id, session_id, channel, direction, api_key_id=None):
+        return await self._reserve(tenant_id, session_id, channel, direction, BillingMode.POSTPAID, api_key_id)
+
+    async def _reserve(self, tenant_id, session_id, channel, direction, mode, api_key_id=None):
         now = datetime.now(UTC)
         await self.reconcile_expired_reservations(now=now)
         async with self._sessions.begin() as session:
@@ -268,7 +302,11 @@ class SqlBillingDirectory:
                 .with_for_update()
             )
             if existing:
-                if existing.tenant_id == tenant_id and existing.status == "reserved":
+                if (
+                    existing.tenant_id == tenant_id
+                    and existing.api_key_id == api_key_id
+                    and existing.status == "reserved"
+                ):
                     if existing.billing_mode != mode.value or existing.channel != channel:
                         return None
                     plan = await session.scalar(
@@ -325,6 +363,7 @@ class SqlBillingDirectory:
                 VoiceReservationRow(
                     session_id=session_id,
                     tenant_id=tenant_id,
+                    api_key_id=api_key_id,
                     billing_mode=mode.value,
                     channel=channel,
                     direction=direction.value,
@@ -609,6 +648,7 @@ class SqlBillingDirectory:
                 BillingLedgerEntryRow(
                     entry_id=str(uuid4()),
                     tenant_id=tenant_id,
+                    api_key_id=reservation.api_key_id,
                     session_id=session_id,
                     billing_mode=mode.value,
                     currency=reservation.currency,

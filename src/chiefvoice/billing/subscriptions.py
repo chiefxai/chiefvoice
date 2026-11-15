@@ -24,15 +24,21 @@ class SubscriptionAuthorizer:
         self.policies = policies
 
     async def authorize_voice(
-        self, tenant_id: str, session_id: str, channel: str, direction: Direction
+        self, tenant_id: str, session_id: str, channel: str, direction: Direction,
+        api_key_id: str | None = None,
     ) -> VoiceEntitlement:
         billing_mode = await self.billing_accounts.get_billing_mode(tenant_id)
         if billing_mode is None:
             raise HTTPException(status_code=402, detail="A billing account is required")
         policy = self.policies.get(billing_mode)
-        entitlement = await policy.reserve_voice_session(
-            tenant_id, session_id, channel, direction
-        )
+        if api_key_id is None:
+            entitlement = await policy.reserve_voice_session(
+                tenant_id, session_id, channel, direction
+            )
+        else:
+            entitlement = await policy.reserve_voice_session(
+                tenant_id, session_id, channel, direction, api_key_id
+            )
         if entitlement is None:
             raise HTTPException(status_code=402, detail="An active voice subscription is required")
         if entitlement.billing_mode != billing_mode:

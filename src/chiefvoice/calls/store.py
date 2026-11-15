@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from cryptography.fernet import Fernet
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, select, update
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,6 +26,7 @@ class CallSessionRow(Base):
 
     session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    api_key_id: Mapped[str | None] = mapped_column(String(32), index=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
@@ -85,6 +86,7 @@ class SqlCallSessionStore:
             stmt = insert(CallSessionRow).values(
                 session_id=session.session_id,
                 tenant_id=session.tenant_id,
+                api_key_id=session.api_key_id,
                 idempotency_key=idempotency_key,
                 request_fingerprint=fingerprint,
                 status="starting",
@@ -158,6 +160,7 @@ class SqlCallSessionStore:
                 .values(
                     session_id=session.session_id,
                     tenant_id=session.tenant_id,
+                    api_key_id=session.api_key_id,
                     idempotency_key=None,
                     request_fingerprint=fingerprint,
                     status="starting",
@@ -210,6 +213,7 @@ class SqlCallSessionStore:
         session_blob = self._encrypt_session(session)
         values: dict[str, Any] = {
             "status": status,
+            "api_key_id": session.api_key_id,
             "encrypted_session": session_blob,
             "transcript_persistence_failed": bool(
                 session.metadata.get("transcript_persistence_error")
@@ -427,6 +431,50 @@ class SqlCallSessionStore:
                 "transcript_persistence_failed": row.transcript_persistence_failed,
                 "post_call_enqueued": row.post_call_enqueued_at is not None,
             }
+
+    async def list_for_api_key(
+        self, tenant_id: str, api_key_id: str, *, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        async with self._sessions() as db:
+            count = await db.scalar(
+                select(func.count()).select_from(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.api_key_id == api_key_id,
+                )
+            )
+            rows = await db.scalars(
+                select(CallSessionRow)
+                .where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.api_key_id == api_key_id,
+                )
+                .order_by(CallSessionRow.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            items = []
+            for row in rows:
+                session = self._decrypt_session(row.encrypted_session) if row.encrypted_session else None
+                duration = None
+                if row.answered_at and row.ended_at:
+                    duration = max(0, int((row.ended_at - row.answered_at).total_seconds()))
+                items.append({
+                    "session_id": row.session_id,
+                    "provider": session.provider if session else None,
+                    "channel": session.channel if session else None,
+                    "direction": session.direction.value if session else None,
+                    "caller": session.caller if session else None,
+                    "callee": session.callee if session else None,
+                    "status": row.status,
+                    "end_reason": row.end_reason,
+                    "started_at": row.started_at.isoformat(),
+                    "answered_at": row.answered_at.isoformat() if row.answered_at else None,
+                    "ended_at": row.ended_at.isoformat() if row.ended_at else None,
+                    "duration_seconds": duration,
+                    "transcript_available": bool(row.encrypted_transcript),
+                    "recording_available": bool(session and session.metadata.get("recording_uri")),
+                })
+            return {"items": items, "total": int(count or 0), "limit": limit, "offset": offset}
 
     async def matches_phone_binding(
         self, tenant_id: str, session_id: str, provider: str, phone_number: str

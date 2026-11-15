@@ -7,7 +7,8 @@ from chiefvoice.sessions import Direction
 
 class PrepaidLedger(Protocol):
     async def reserve_prepaid_voice(
-        self, tenant_id: str, session_id: str, channel: str, direction: Direction
+        self, tenant_id: str, session_id: str, channel: str, direction: Direction,
+        api_key_id: str | None = None,
     ) -> VoiceEntitlement | None: ...
 
     async def release_prepaid_voice(self, tenant_id: str, session_id: str) -> None: ...
@@ -40,10 +41,15 @@ class PrepaidBillingPolicy:
         self.ledger = ledger
 
     async def reserve_voice_session(
-        self, tenant_id: str, session_id: str, channel: str, direction: Direction
+        self, tenant_id: str, session_id: str, channel: str, direction: Direction,
+        api_key_id: str | None = None,
     ) -> VoiceEntitlement | None:
+        if api_key_id is None:
+            return await self.ledger.reserve_prepaid_voice(
+                tenant_id, session_id, channel, direction
+            )
         return await self.ledger.reserve_prepaid_voice(
-            tenant_id, session_id, channel, direction
+            tenant_id, session_id, channel, direction, api_key_id
         )
 
     async def release_voice_session(self, tenant_id: str, session_id: str) -> None:

@@ -150,9 +150,15 @@ class CallCoordinator:
         self.attach_session_persistence(session)
         session.metadata["call_status"] = "starting"
         try:
-            entitlement = await self.subscriptions.authorize_voice(
-                command.tenant_id, session.session_id, command.channel, Direction.OUTBOUND
-            )
+            if command.api_key_id is None:
+                entitlement = await self.subscriptions.authorize_voice(
+                    command.tenant_id, session.session_id, command.channel, Direction.OUTBOUND
+                )
+            else:
+                entitlement = await self.subscriptions.authorize_voice(
+                    command.tenant_id, session.session_id, command.channel,
+                    Direction.OUTBOUND, command.api_key_id,
+                )
         except BaseException:
             if self.call_session_store is not None:
                 await self.call_session_store.update_state(

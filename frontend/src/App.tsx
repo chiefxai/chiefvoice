@@ -19,7 +19,7 @@ import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded'
 import LoginPage from './LoginPage'
 import { clearLoginCallbackFromUrl, currentUser, finishLogin, login, logout } from './auth'
 
-type Page = 'Numbers' | 'API'
+type Page = 'Numbers' | 'API' | 'Docs'
 type RegisteredNumber = {
   provider: string
   phone_number: string
@@ -48,6 +48,20 @@ type PlatformApiKey = {
   vertex_credentials_configured?: boolean
 }
 type IssuedApiKey = { key: string; api_key_record: PlatformApiKey }
+type ApiCallLog = {
+  session_id: string; provider: string | null; channel: string | null; direction: string | null
+  caller: string | null; callee: string | null; status: string; end_reason: string | null
+  started_at: string; answered_at: string | null; ended_at: string | null
+  duration_seconds: number | null; transcript_available: boolean; recording_available: boolean
+  post_call_status?: string | null; post_call_result?: Record<string, unknown> | null
+  webhook_status?: string | null
+}
+type ApiBillingUsage = {
+  configured: boolean; billing_mode?: string; currency?: string; rate_per_minute_minor?: number
+  calls?: number; billable_seconds?: number; charges_minor?: number; active_reservations?: number
+  customer_prepaid_balance_minor?: number; customer_postpaid_used_minor?: number
+  customer_postpaid_credit_limit_minor?: number; message?: string
+}
 
 const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 const http = axios.create({ baseURL: API_BASE, timeout: 30000 })
@@ -68,6 +82,8 @@ http.interceptors.response.use(response => response, error => {
 const api = {
   phoneNumbers: () => http.get<{ items: RegisteredNumber[] }>('/v1/admin/customers/phone-numbers').then(r => r.data.items),
   apiKeys: () => http.get<{ items: PlatformApiKey[] }>('/v1/admin/customers/api-keys').then(r => r.data.items),
+  apiCalls: (id: string) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`).then(r => r.data),
+  apiBilling: (id: string) => http.get<ApiBillingUsage>(`/v1/admin/customers/api-keys/${id}/billing`).then(r => r.data),
   createApiKey: (numbers: RegisteredNumber[], credentials: string, location: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials, vertex_location: location }).then(r => r.data),
   updateApiConfig: (id: string, numbers: RegisteredNumber[], credentials: string, location: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials || null, vertex_location: location }),
   revokeApiKey: (id: string) => http.delete(`/v1/admin/customers/api-keys/${id}`),
@@ -90,6 +106,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [gcpCredentials, setGcpCredentials] = useState('')
   const [vertexLocation, setVertexLocation] = useState('us-central1')
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
+  const [viewingKey, setViewingKey] = useState<PlatformApiKey | null>(null)
   const [oneTimeKey, setOneTimeKey] = useState<IssuedApiKey | null>(null)
   const [toast, setToast] = useState('')
   const connected = Boolean(token)
@@ -138,6 +155,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   }, [queryClient])
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
   const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && page === 'API', retry: false })
+  const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', viewingKey?.id], queryFn: () => api.apiCalls(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 5000 : false })
+  const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', viewingKey?.id], queryFn: () => api.apiBilling(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 10000 : false })
   const issueMutation = useMutation({
     mutationFn: ({ numbers, credentials, location }: { numbers: RegisteredNumber[]; credentials: string; location: string }) => api.createApiKey(numbers, credentials, location),
     onSuccess: result => {
@@ -194,7 +213,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setAuthError('')
     void queryClient.clear()
   }
-  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'API'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { setPage(item); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : <KeyRoundedIcon />}>{item}</Button>)}</div></>
+  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'API', 'Docs'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { setPage(item); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : <ContentCopyRoundedIcon />}>{item}</Button>)}</div></>
 
   if (!authReady || !connected) {
     return <LoginPage loading={!authReady} signingIn={signingIn} error={authError} onSignIn={() => { void connect() }} />
@@ -215,7 +234,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       </header>
       <div className="content">
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} />}
-        {page === 'API' && <ApiPage connected={connected} onConnect={() => { void connect() }} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1'); setAssignmentOpen(true) }} onManage={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)); setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1') }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
+        {page === 'API' && <ApiPage connected={connected} onConnect={() => { void connect() }} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1'); setAssignmentOpen(true) }} onView={key => setViewingKey(key)} onManage={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)); setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1') }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
+        {page === 'Docs' && <DocsPage />}
       </div>
     </main>
 
@@ -265,6 +285,31 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || (!gcpCredentials.trim() && !managementKey.vertex_credentials_configured) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, numbers, credentials: gcpCredentials, location: vertexLocation }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
     </Dialog>
 
+    <Dialog open={Boolean(viewingKey)} onClose={() => setViewingKey(null)} maxWidth="lg" fullWidth>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>API details · {viewingKey?.name}</DialogTitle>
+      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap">
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">API key</Typography><Typography><code>{viewingKey?.key_prefix}</code></Typography></Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Assigned numbers</Typography><Typography>{viewingKey?.assigned_numbers.map(item => item.phone_number).join(', ') || 'None'}</Typography></Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Vertex AI</Typography><Typography>{viewingKey?.vertex_credentials_configured ? `${viewingKey.vertex_project_id} · ${viewingKey.vertex_location}` : 'Not configured'}</Typography></Card>
+        </Stack>
+        <Typography variant="h6" sx={{ fontWeight: 800 }}>Calls for this API</Typography>
+        {apiCallsQuery.isLoading ? <CircularProgress size={22} /> : apiCallsQuery.error ? <Alert severity="error">{errorText(apiCallsQuery.error)}</Alert> : apiCallsQuery.data?.items.length ? <Table size="small"><TableHead><TableRow>{['Started', 'Direction', 'From → To', 'Provider', 'Status', 'Duration', 'Post-call result', 'Session'].map(item => <TableCell className="table-head" key={item}>{item}</TableCell>)}</TableRow></TableHead><TableBody>{apiCallsQuery.data.items.map(call => <TableRow key={call.session_id}><TableCell className="table-cell">{new Date(call.started_at).toLocaleString()}</TableCell><TableCell className="table-cell">{call.direction || '—'}</TableCell><TableCell className="table-cell">{call.caller || '—'} → {call.callee || '—'}</TableCell><TableCell className="table-cell">{call.provider || '—'}</TableCell><TableCell className="table-cell"><StatusChip enabled={call.status === 'completed'} label={call.status} /></TableCell><TableCell className="table-cell">{call.duration_seconds == null ? '—' : `${call.duration_seconds}s`}</TableCell><TableCell className="table-cell">{call.post_call_status ? <><StatusChip enabled={call.post_call_status === 'completed'} label={call.post_call_status} />{call.post_call_result && <details style={{ marginTop: 6 }}><summary>View result</summary><pre style={{ whiteSpace: 'pre-wrap', maxWidth: 320, fontSize: 11 }}>{JSON.stringify(call.post_call_result, null, 2)}</pre></details>}</> : 'Waiting for call to finish'}</TableCell><TableCell className="table-cell"><code>{call.session_id}</code></TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state">No calls yet. Use the API key and the request example on the Docs page to place a test call.</div>}
+        <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Billing for this API</Typography>
+        {apiBillingQuery.isLoading ? <CircularProgress size={22} /> : apiBillingQuery.error ? <Alert severity="error">{errorText(apiBillingQuery.error)}</Alert> : apiBillingQuery.data?.configured ? <>
+          <Alert severity="info">Call charges below are attributed to this API key. Pricing and the prepaid balance or postpaid credit limit are managed on the customer billing plan and shared by API keys under that customer.</Alert>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap">
+            <UsageCard label="Calls" value={String(apiBillingQuery.data.calls ?? 0)} />
+            <UsageCard label="Billable time" value={`${Math.floor((apiBillingQuery.data.billable_seconds || 0) / 60)}m ${(apiBillingQuery.data.billable_seconds || 0) % 60}s`} />
+            <UsageCard label="Attributed charges" value={formatMoney(apiBillingQuery.data.charges_minor || 0, apiBillingQuery.data.currency || 'USD')} />
+            <UsageCard label="Customer plan" value={`${apiBillingQuery.data.billing_mode} · ${formatMoney(apiBillingQuery.data.rate_per_minute_minor || 0, apiBillingQuery.data.currency || 'USD')}/min`} />
+            <UsageCard label="Shared customer balance" value={apiBillingQuery.data.billing_mode === 'prepaid' ? formatMoney(apiBillingQuery.data.customer_prepaid_balance_minor || 0, apiBillingQuery.data.currency || 'USD') : `${formatMoney(apiBillingQuery.data.customer_postpaid_used_minor || 0, apiBillingQuery.data.currency || 'USD')} used / ${formatMoney(apiBillingQuery.data.customer_postpaid_credit_limit_minor || 0, apiBillingQuery.data.currency || 'USD')} limit`} />
+          </Stack>
+        </> : <Alert severity="warning">{apiBillingQuery.data?.message || 'No billing plan is configured for this customer yet.'}</Alert>}
+      </Stack></DialogContent>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setViewingKey(null)}>Close</Button><Button onClick={() => { if (viewingKey) { setManagementKey(viewingKey); setSelectedNumbers(viewingKey.assigned_numbers.map(item => `${item.provider}|${item.phone_number}`)); setGcpCredentials(''); setVertexLocation(viewingKey.vertex_location || 'us-central1') } setViewingKey(null) }}>Edit API</Button></DialogActions>
+    </Dialog>
+
     <Snackbar open={Boolean(toast)} autoHideDuration={5000} onClose={() => setToast('')} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}><Alert onClose={() => setToast('')} severity={toast.toLowerCase().includes('error') || toast.toLowerCase().includes('failed') ? 'error' : 'success'} variant="filled">{toast}</Alert></Snackbar>
   </div>
 }
@@ -277,14 +322,57 @@ function NumbersPage({ connected, onConnect, numbers, loading, error }: { connec
   </>
 }
 
-function ApiPage({ connected, onConnect, numbers, keys, loading, error, onCreate, onManage, onRevoke }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; keys: PlatformApiKey[]; loading: boolean; error: unknown; onCreate: () => void; onManage: (key: PlatformApiKey) => void; onRevoke: (id: string) => void }) {
+function ApiPage({ connected, onConnect, numbers, keys, loading, error, onCreate, onView, onManage, onRevoke }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; keys: PlatformApiKey[]; loading: boolean; error: unknown; onCreate: () => void; onView: (key: PlatformApiKey) => void; onManage: (key: PlatformApiKey) => void; onRevoke: (id: string) => void }) {
   return <><PageIntro eyebrow="DEVELOPER ACCESS" title="API" subtitle="Create a phone-number API key and manage existing keys." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate} disabled={!connected || !numbers.length}>Create API</Button>} />
     <Card className="surface-card" sx={{ mt: 3 }}>
-      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <Table size="small"><TableHead><TableRow>{['API key', 'Phone numbers', 'Providers', 'Customer', 'Vertex AI', 'Created', 'Expires', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><code>{key.key_prefix}</code></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.assigned_numbers.length ? [...new Set(key.assigned_numbers.map(number => number.provider))].join(', ') : '—'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{key.vertex_credentials_configured ? `${key.vertex_project_id} · ${key.vertex_location}` : 'Not configured'}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell">{key.expires_at ? new Date(key.expires_at).toLocaleDateString() : 'Never'}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell">{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Edit</Button><Button color="error" size="small" onClick={() => onRevoke(key.id)}>Revoke</Button></>}</TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No API keys created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API key, configure its GCP credentials, and assign phone numbers.' : 'Register an outbound-enabled phone number first.'}</div></div>}
+      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <Table size="small"><TableHead><TableRow>{['API key', 'Phone numbers', 'Providers', 'Customer', 'Vertex AI', 'Created', 'Expires', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><code>{key.key_prefix}</code></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.assigned_numbers.length ? [...new Set(key.assigned_numbers.map(number => number.provider))].join(', ') : '—'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{key.vertex_credentials_configured ? `${key.vertex_project_id} · ${key.vertex_location}` : 'Not configured'}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell">{key.expires_at ? new Date(key.expires_at).toLocaleDateString() : 'Never'}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onView(key)}>View</Button>{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Edit</Button><Button color="error" size="small" onClick={() => onRevoke(key.id)}>Revoke</Button></>}</TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No API keys created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API key, configure its GCP credentials, and assign phone numbers.' : 'Register an outbound-enabled phone number first.'}</div></div>}
     </Card>
   </>
 }
 
 function ConnectPrompt({ onConnect }: { onConnect: () => void }) { return <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>Sign in to manage the platform</b><div style={{ fontSize: 12, marginTop: 6 }}>Use your allowlisted platform administrator identity.</div><Button sx={{ mt: 1.5 }} variant="contained" onClick={onConnect}>Sign in with OIDC</Button></div> }
+function UsageCard({ label, value }: { label: string; value: string }) { return <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 150 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography sx={{ fontWeight: 800, mt: 0.4 }}>{value}</Typography></Card> }
+function formatMoney(amountMinor: number, currency: string) { return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amountMinor / 100) }
+function DocsPage() {
+  const callBody = `curl -X POST "$CHIEFVOICE_URL/v1/calls/outbound" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: appointment-123" \\
+  -d '{
+    "provider": "vobiz",
+    "channel": "phone",
+    "destination": "+15551234567",
+    "caller_id": "+15557654321",
+    "live_agent": {
+      "agent_id": "agent-profile-id",
+      "context": {"patient_name": "Avery", "appointment": "Tuesday 10:30"}
+    },
+    "post_call": {
+      "context": "Extract the appointment confirmation. Use unknown when not stated.",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "confirmed": {"type": "boolean"},
+          "preferred_time": {"type": "string", "enum": ["morning", "afternoon", "unknown"]}
+        },
+        "required": ["confirmed", "preferred_time"],
+        "additionalProperties": false
+      },
+      "tools": ["time"],
+      "time_zone": "Asia/Kolkata",
+      "time_format": "%Y-%m-%dT%H:%M:%S%z",
+      "include_live_agent_context": true
+    }
+  }'`
+  return <><PageIntro eyebrow="DEVELOPER GUIDE" title="API documentation" subtitle="Start a call, check its progress, and receive structured post-call results." />
+    <Stack gap={2} sx={{ mt: 3 }}>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Authentication and phone numbers</Typography><Typography sx={{ mt: 1 }}>Use the full API key shown once when the API was created. Send it as a Bearer token. It can only call from phone numbers assigned to that API. If you assigned multiple numbers for a provider, include <code>caller_id</code>.</Typography><Typography sx={{ mt: 1 }}>Create the API key in the API page. Credentials and phone number assignments are editable from the API’s detail view.</Typography></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Start an outbound call</Typography><Typography sx={{ mt: 1, mb: 1.5 }}>The call request returns an accepted session ID quickly; it does not hold the HTTP connection open while the conversation runs.</Typography><TextField value={callBody} fullWidth multiline minRows={20} InputProps={{ readOnly: true }} /></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Check call status and results</Typography><Typography sx={{ mt: 1 }}>Poll <code>GET /v1/calls/{'{session_id}'}</code> for lifecycle status and <code>GET /v1/calls/{'{session_id}'}/post-call</code> for analysis status and result. Post-call processing starts after the call finishes. The API view refreshes its call log automatically while open.</Typography><TextField value={`curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID" \\\n  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`} fullWidth multiline minRows={2} sx={{ mt: 1.5 }} InputProps={{ readOnly: true }} /></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Context, output schema, and tools</Typography><Typography sx={{ mt: 1 }}>Keep live conversation context in <code>live_agent.context</code>. Put extraction instructions and the JSON output schema in <code>post_call</code>. The schema is validated with strict types before the result is stored or delivered. Supported post-call tools are <code>calculator</code> and <code>time</code>; when using the time tool, set an IANA timezone and a format containing <code>%z</code>.</Typography><Typography sx={{ mt: 1 }}>Use <code>include_live_agent_context</code> only when post-call extraction needs the live context too. Treat supplied context as reference data and provide an “unknown” option for facts the agent cannot establish.</Typography></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Webhooks and polling</Typography><Typography sx={{ mt: 1 }}>Polling is available for call and post-call status. If a post-call webhook is configured, the platform sends a signed callback when analysis is ready. The recipient should deduplicate deliveries by event ID because failed delivery attempts are retried.</Typography></Card>
+    </Stack>
+  </>
+}
 function StatusChip({ enabled, label }: { enabled: boolean; label?: string }) { return <Chip size="small" label={label || (enabled ? 'Enabled' : 'Disabled')} color={enabled ? 'success' : 'default'} variant={enabled ? 'filled' : 'outlined'} sx={{ fontSize: 10, height: 22 }} /> }
 function PageIntro({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: React.ReactNode }) { return <div style={{ display: 'flex', alignItems: 'end', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}><div><div className="eyebrow">{eyebrow}</div><Typography className="page-title" variant="h4">{title}</Typography><div className="page-subtitle">{subtitle}</div></div>{action}</div> }

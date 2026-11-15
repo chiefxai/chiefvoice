@@ -344,6 +344,53 @@ async def list_platform_api_keys(
     return {"items": items}
 
 
+@router.get("/api-keys/{key_id}/calls")
+async def list_platform_api_calls(
+    key_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    del principal
+    _, api_keys = _stores(request)
+    key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    call_store = getattr(request.app.state, "call_session_store", None)
+    if call_store is None or not hasattr(call_store, "list_for_api_key"):
+        raise HTTPException(status_code=503, detail="Call history storage is not configured")
+    result = await call_store.list_for_api_key(key.tenant_id, key_id, limit=limit, offset=offset)
+    dispatcher = getattr(request.app.state, "post_call_dispatcher", None)
+    if dispatcher is not None and hasattr(dispatcher, "get_status"):
+        for call in result["items"]:
+            post_call = await dispatcher.get_status(key.tenant_id, call["session_id"])
+            call["post_call_status"] = post_call["status"] if post_call else None
+            call["post_call_result"] = post_call["result"] if post_call else None
+            call["webhook_status"] = post_call["webhook_status"] if post_call else None
+    return result
+
+
+@router.get("/api-keys/{key_id}/billing")
+async def get_platform_api_billing(
+    key_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
+):
+    del principal
+    _, api_keys = _stores(request)
+    key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    billing = getattr(request.app.state, "billing_directory", None)
+    if billing is None or not hasattr(billing, "get_usage_for_api_key"):
+        raise HTTPException(status_code=503, detail="Billing storage is not configured")
+    usage = await billing.get_usage_for_api_key(key.tenant_id, key_id)
+    if usage is None:
+        return {"configured": False, "api_key_id": key_id, "message": "No customer voice plan is configured."}
+    return {"configured": True, "api_key_id": key_id, **usage}
+
+
 @router.post("/api-keys", status_code=status.HTTP_201_CREATED)
 async def issue_phone_api_key(
     body: CreatePhoneApiKeyBody,

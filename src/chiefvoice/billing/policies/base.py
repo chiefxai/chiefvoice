@@ -16,7 +16,8 @@ class VoiceBillingPolicy(Protocol):
     mode: BillingMode
 
     async def reserve_voice_session(
-        self, tenant_id: str, session_id: str, channel: str, direction: Direction
+        self, tenant_id: str, session_id: str, channel: str, direction: Direction,
+        api_key_id: str | None = None,
     ) -> VoiceEntitlement | None: ...
 
     async def release_voice_session(self, tenant_id: str, session_id: str) -> None: ...
