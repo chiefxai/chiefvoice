@@ -83,6 +83,9 @@ class VobizAdapter:
             b"chiefvoice-vobiz-state-encryption-v1:" + settings.vobiz_webhook_secret.encode()
         ).digest()
         self._state_cipher = Fernet(base64.urlsafe_b64encode(state_key))
+        self._state_key_id = hashlib.sha256(
+            settings.vobiz_webhook_secret.encode("utf-8")
+        ).hexdigest()[:16]
 
     @property
     def configured(self) -> bool:
@@ -588,13 +591,31 @@ class VobizAdapter:
         token = self._state_cipher.encrypt(signed_token.encode("ascii")).decode("ascii")
         if len(token) > MAX_CALL_STATE_TOKEN_LENGTH:
             raise HTTPException(status_code=422, detail="Call state exceeds the supported size")
+        logger.info(
+            "vobiz_callback_state_created",
+            extra={
+                "session_id": session.session_id,
+                "provider": self.provider,
+                "state_fingerprint": hashlib.sha256(token.encode("ascii")).hexdigest()[:16],
+                "state_key_id": self._state_key_id,
+                "state_length": len(token),
+            },
+        )
         return token
 
     def _read_state(self, token: str) -> dict[str, Any]:
+        state_fingerprint = hashlib.sha256(token.encode("utf-8", errors="replace")).hexdigest()[:16]
+
         def reject(reason: str) -> None:
             logger.warning(
                 "vobiz_callback_state_rejected",
-                extra={"provider": self.provider, "reason": reason, "state_length": len(token)},
+                extra={
+                    "provider": self.provider,
+                    "reason": reason,
+                    "state_length": len(token),
+                    "state_fingerprint": state_fingerprint,
+                    "state_key_id": self._state_key_id,
+                },
             )
             raise HTTPException(status_code=404, detail="Not found")
 
@@ -691,6 +712,16 @@ class VobizAdapter:
             reject(exc.reason)
         except (AttributeError, TypeError, ValueError):
             reject("claims_invalid")
+        logger.info(
+            "vobiz_callback_state_accepted",
+            extra={
+                "session_id": claims["session_id"],
+                "provider": self.provider,
+                "state_fingerprint": state_fingerprint,
+                "state_key_id": self._state_key_id,
+                "state_length": len(token),
+            },
+        )
         return claims
 
     async def _integration_for_caller(self, caller: str | None):

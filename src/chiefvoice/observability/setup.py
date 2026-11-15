@@ -36,6 +36,8 @@ class JsonFormatter(logging.Formatter):
             "error_type",
             "reason",
             "state_length",
+            "state_fingerprint",
+            "state_key_id",
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
