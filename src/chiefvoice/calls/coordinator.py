@@ -170,6 +170,7 @@ class CallCoordinator:
             channel=command.channel,
             tenant_id=command.tenant_id,
             destination=command.destination,
+            api_key_id=command.api_key_id,
             caller_id=command.caller_id,
             bot_config_id=command.bot_config_id,
             live_agent_context=command.live_agent_context,
@@ -561,7 +562,6 @@ class _OutboundCallData:
     channel: str
     tenant_id: str
     destination: str
-    api_key_id: str | None = None
     caller_id: str | None
     bot_config_id: str | None
     live_agent_context: dict[str, Any] | None
@@ -573,6 +573,7 @@ class _OutboundCallData:
     include_live_agent_context: bool
     recording_allowed: bool
     session_id: str
+    api_key_id: str | None = None
 
 
 def _billable_seconds(started_at: datetime, ended_at: datetime) -> int:
