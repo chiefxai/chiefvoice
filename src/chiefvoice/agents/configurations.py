@@ -16,6 +16,8 @@ class AgentConfiguration:
     provider: str
     model: str
     location: str
+    cost_per_minute_minor: int
+    currency: str
     enabled: bool
     created_at: datetime
     updated_at: datetime

@@ -231,6 +231,8 @@ class AgentProviderConfigBody(BaseModel):
     provider: Literal["vertex"] = "vertex"
     model: str = Field(min_length=1, max_length=160)
     location: str = Field(default="us-central1", min_length=1, max_length=64)
+    cost_per_minute_minor: int = Field(default=0, ge=0, le=1_000_000_000)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
 
     @field_validator("name", "model", "location")
     @classmethod
@@ -238,6 +240,14 @@ class AgentProviderConfigBody(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("Value cannot be blank")
+        return value
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str) -> str:
+        value = value.strip().upper()
+        if len(value) != 3 or not value.isalpha():
+            raise ValueError("Currency must be a three-letter ISO code")
         return value
 
 
@@ -264,6 +274,7 @@ def _agent_config_json(agent: AgentConfiguration, customer_name: str = "") -> di
         "id": agent.agent_id, "customer_id": agent.tenant_id,
         "customer_name": customer_name, "name": agent.name, "kind": agent.kind,
         "provider": agent.provider, "model": agent.model, "location": agent.location,
+        "cost_per_minute_minor": agent.cost_per_minute_minor, "currency": agent.currency,
         "enabled": agent.enabled, "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
     }
@@ -287,6 +298,7 @@ async def create_agent_config(body: AgentProviderConfigBody, request: Request, p
     agent = AgentConfiguration(
         agent_id=uuid4().hex, tenant_id=body.customer_id, name=body.name.strip(),
         kind=body.kind, provider=body.provider, model=body.model.strip(), location=body.location.strip(),
+        cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
         enabled=True, created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
     )
     try:
@@ -307,6 +319,7 @@ async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, requ
     replacement = AgentConfiguration(
         agent_id=agent_id, tenant_id=body.customer_id, name=body.name.strip(), kind=body.kind,
         provider=body.provider, model=body.model.strip(), location=body.location.strip(),
+        cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
         enabled=True, created_at=current.created_at, updated_at=datetime.now(UTC),
     )
     try:

@@ -22,6 +22,8 @@ class AgentConfigurationRow(Base):
     provider: Mapped[str] = mapped_column(String(40), nullable=False)
     model: Mapped[str] = mapped_column(String(160), nullable=False)
     location: Mapped[str] = mapped_column(String(64), nullable=False)
+    cost_per_minute_minor: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD", server_default="USD")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -43,7 +45,8 @@ class SqlAgentConfigurationDirectory:
         row = AgentConfigurationRow(
             id=agent.agent_id, tenant_id=agent.tenant_id, name=agent.name,
             kind=agent.kind, provider=agent.provider, model=agent.model,
-            location=agent.location, enabled=True,
+            location=agent.location, cost_per_minute_minor=agent.cost_per_minute_minor,
+            currency=agent.currency, enabled=True,
             created_at=now, updated_at=now,
         )
         async with self._sessions.begin() as session:
@@ -86,6 +89,8 @@ class SqlAgentConfigurationDirectory:
             row.provider = agent.provider
             row.model = agent.model
             row.location = agent.location
+            row.cost_per_minute_minor = agent.cost_per_minute_minor
+            row.currency = agent.currency
             row.updated_at = datetime.now(UTC)
             await session.flush()
             return self._to_agent(row)
@@ -107,5 +112,6 @@ class SqlAgentConfigurationDirectory:
         return AgentConfiguration(
             agent_id=row.id, tenant_id=row.tenant_id, name=row.name, kind=row.kind,
             provider=row.provider, model=row.model, location=row.location,
+            cost_per_minute_minor=row.cost_per_minute_minor, currency=row.currency,
             enabled=row.enabled, created_at=row.created_at, updated_at=row.updated_at,
         )
