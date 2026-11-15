@@ -16,8 +16,6 @@ class AgentConfiguration:
     provider: str
     model: str
     location: str
-    project_id: str
-    credentials_json: str | None
     enabled: bool
     created_at: datetime
     updated_at: datetime

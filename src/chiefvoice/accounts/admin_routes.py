@@ -104,6 +104,9 @@ class CreatePhoneApiKeyBody(BaseModel):
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
     post_call_agent_id: str | None = None
+    gcp_credentials_json: str = Field(min_length=1, max_length=20000)
+    voice_location: str | None = Field(default=None, max_length=64)
+    post_call_location: str | None = Field(default=None, max_length=64)
 
     @field_validator("name")
     @classmethod
@@ -118,6 +121,9 @@ class UpdatePhoneApiKeyConfigBody(BaseModel):
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
     post_call_agent_id: str | None = None
+    gcp_credentials_json: str | None = Field(default=None, max_length=20000)
+    voice_location: str | None = Field(default=None, max_length=64)
+    post_call_location: str | None = Field(default=None, max_length=64)
 
     @field_validator("name")
     @classmethod
@@ -225,7 +231,6 @@ class AgentProviderConfigBody(BaseModel):
     provider: Literal["vertex"] = "vertex"
     model: str = Field(min_length=1, max_length=160)
     location: str = Field(default="us-central1", min_length=1, max_length=64)
-    gcp_credentials_json: str | None = None
 
     @field_validator("name", "model", "location")
     @classmethod
@@ -259,7 +264,6 @@ def _agent_config_json(agent: AgentConfiguration, customer_name: str = "") -> di
         "id": agent.agent_id, "customer_id": agent.tenant_id,
         "customer_name": customer_name, "name": agent.name, "kind": agent.kind,
         "provider": agent.provider, "model": agent.model, "location": agent.location,
-        "project_id": agent.project_id, "credentials_configured": bool(agent.credentials_json),
         "enabled": agent.enabled, "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
     }
@@ -280,16 +284,10 @@ async def create_agent_config(body: AgentProviderConfigBody, request: Request, p
     account = await accounts.get(body.customer_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Customer not found")
-    if body.gcp_credentials_json is None:
-        raise HTTPException(status_code=422, detail="GCP credentials are required for an agent")
-    credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
-    if not settings.credentials_encryption_key:
-        raise HTTPException(status_code=503, detail="Encrypted GCP credential storage is not configured")
     agent = AgentConfiguration(
         agent_id=uuid4().hex, tenant_id=body.customer_id, name=body.name.strip(),
         kind=body.kind, provider=body.provider, model=body.model.strip(), location=body.location.strip(),
-        project_id=credentials["project_id"], credentials_json=credentials_json, enabled=True,
-        created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+        enabled=True, created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
     )
     try:
         saved = await _agent_config_directory(request).create(agent)
@@ -306,16 +304,10 @@ async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, requ
     current = await directory.get(body.customer_id, agent_id)
     if current is None:
         raise HTTPException(status_code=404, detail="Agent configuration not found")
-    credentials_json = current.credentials_json
-    project_id = current.project_id
-    if body.gcp_credentials_json:
-        credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
-        project_id = credentials["project_id"]
     replacement = AgentConfiguration(
         agent_id=agent_id, tenant_id=body.customer_id, name=body.name.strip(), kind=body.kind,
         provider=body.provider, model=body.model.strip(), location=body.location.strip(),
-        project_id=project_id, credentials_json=credentials_json, enabled=True,
-        created_at=current.created_at, updated_at=datetime.now(UTC),
+        enabled=True, created_at=current.created_at, updated_at=datetime.now(UTC),
     )
     try:
         saved = await directory.update(replacement)
@@ -372,6 +364,8 @@ def _key_json(key: ApiKeySummary) -> dict:
         ),
         "vertex_project_id": key.vertex_project_id,
         "vertex_location": key.vertex_location,
+        "voice_location": key.voice_location,
+        "post_call_location": key.post_call_location,
         "vertex_credentials_configured": key.vertex_credentials_configured,
         "voice_provider": key.voice_provider,
         "voice_model": key.voice_model,
@@ -718,6 +712,9 @@ async def issue_phone_api_key(
     if account is None:
         raise HTTPException(status_code=404, detail="Phone number customer was not found")
     expires_at = datetime.now(UTC) + MAX_API_KEY_LIFETIME
+    credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
+    if not settings.credentials_encryption_key:
+        raise HTTPException(status_code=503, detail="Credential encryption is not configured")
     try:
         token, key = await api_key_directory.create(
             tenant_id=tenant_id,
@@ -726,9 +723,11 @@ async def issue_phone_api_key(
             created_by=principal.subject,
             expires_at=expires_at,
             assigned_numbers=tuple(requested),
-            vertex_project_id=voice_agent.project_id if voice_agent else (post_call_agent.project_id if post_call_agent else None),
-            vertex_location=voice_agent.location if voice_agent else (post_call_agent.location if post_call_agent else None),
-            vertex_credentials_json=None,
+            vertex_project_id=credentials["project_id"],
+            vertex_location=body.voice_location or (voice_agent.location if voice_agent else None) or (post_call_agent.location if post_call_agent else None) or "us-central1",
+            vertex_credentials_json=credentials_json,
+            voice_location=body.voice_location or (voice_agent.location if voice_agent else None) or "us-central1",
+            post_call_location=body.post_call_location or (post_call_agent.location if post_call_agent else None) or "us-central1",
             voice_provider=voice_agent.provider if voice_agent else "vertex",
             voice_model=voice_agent.model if voice_agent else "google/gemini-live-2.5-flash-native-audio",
             post_call_provider=post_call_agent.provider if post_call_agent else "vertex",
@@ -782,15 +781,23 @@ async def update_phone_api_key_config(
             raise HTTPException(status_code=404, detail="An outbound-enabled number for this customer was not found")
     voice_agent = await _assigned_agent(request, body.voice_agent_id, key.tenant_id, "calling")
     post_call_agent = await _assigned_agent(request, body.post_call_agent_id, key.tenant_id, "post_call")
-    primary_agent = voice_agent or post_call_agent
+    credentials_json = None
+    project_id = key.vertex_project_id
+    if body.gcp_credentials_json and body.gcp_credentials_json.strip():
+        credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
+        project_id = credentials["project_id"]
+    if not project_id or (not key.vertex_credentials_configured and credentials_json is None):
+        raise HTTPException(status_code=422, detail="GCP service account JSON is required for this API")
     try:
         replaced = await api_key_directory.update_config_and_numbers(
             key.tenant_id, key_id,
             name=body.name.strip(),
             assigned_numbers=tuple(requested),
-            vertex_project_id=primary_agent.project_id if primary_agent else key.vertex_project_id,
-            vertex_location=primary_agent.location if primary_agent else (key.vertex_location or "us-central1"),
-            vertex_credentials_json=None,
+            vertex_project_id=project_id,
+            vertex_location=body.voice_location or (voice_agent.location if voice_agent else None) or (body.post_call_location or (post_call_agent.location if post_call_agent else None)) or key.vertex_location or "us-central1",
+            vertex_credentials_json=credentials_json,
+            voice_location=body.voice_location or (voice_agent.location if voice_agent else None) or key.voice_location or "us-central1",
+            post_call_location=body.post_call_location or (post_call_agent.location if post_call_agent else None) or key.post_call_location or "us-central1",
             voice_provider=voice_agent.provider if voice_agent else "vertex",
             voice_model=voice_agent.model if voice_agent else "google/gemini-live-2.5-flash-native-audio",
             post_call_provider=post_call_agent.provider if post_call_agent else "vertex",

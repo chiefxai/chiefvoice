@@ -2,8 +2,7 @@
 
 from datetime import UTC, datetime
 
-from cryptography.fernet import Fernet
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,18 +22,15 @@ class AgentConfigurationRow(Base):
     provider: Mapped[str] = mapped_column(String(40), nullable=False)
     model: Mapped[str] = mapped_column(String(160), nullable=False)
     location: Mapped[str] = mapped_column(String(64), nullable=False)
-    project_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    encrypted_credentials: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class SqlAgentConfigurationDirectory:
-    def __init__(self, database_url: str, encryption_key: str | None):
+    def __init__(self, database_url: str):
         self._engine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
-        self._fernet = Fernet(encryption_key.encode("ascii")) if encryption_key else None
 
     async def initialize(self) -> None:
         await verify_schema_revision(self._engine)
@@ -42,23 +38,12 @@ class SqlAgentConfigurationDirectory:
     async def close(self) -> None:
         await self._engine.dispose()
 
-    def _encrypt(self, value: str) -> str:
-        if self._fernet is None:
-            raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY is required to store agent credentials")
-        return self._fernet.encrypt(value.encode()).decode("ascii")
-
-    def _decrypt(self, value: str) -> str:
-        if self._fernet is None:
-            raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY is required to read agent credentials")
-        return self._fernet.decrypt(value.encode("ascii")).decode()
-
     async def create(self, agent: AgentConfiguration) -> AgentConfiguration:
         now = datetime.now(UTC)
         row = AgentConfigurationRow(
             id=agent.agent_id, tenant_id=agent.tenant_id, name=agent.name,
             kind=agent.kind, provider=agent.provider, model=agent.model,
-            location=agent.location, project_id=agent.project_id,
-            encrypted_credentials=self._encrypt(agent.credentials_json or ""), enabled=True,
+            location=agent.location, enabled=True,
             created_at=now, updated_at=now,
         )
         async with self._sessions.begin() as session:
@@ -101,9 +86,6 @@ class SqlAgentConfigurationDirectory:
             row.provider = agent.provider
             row.model = agent.model
             row.location = agent.location
-            row.project_id = agent.project_id
-            if agent.credentials_json:
-                row.encrypted_credentials = self._encrypt(agent.credentials_json)
             row.updated_at = datetime.now(UTC)
             await session.flush()
             return self._to_agent(row)
@@ -125,6 +107,5 @@ class SqlAgentConfigurationDirectory:
         return AgentConfiguration(
             agent_id=row.id, tenant_id=row.tenant_id, name=row.name, kind=row.kind,
             provider=row.provider, model=row.model, location=row.location,
-            project_id=row.project_id, credentials_json=self._decrypt(row.encrypted_credentials),
             enabled=row.enabled, created_at=row.created_at, updated_at=row.updated_at,
         )

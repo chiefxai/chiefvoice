@@ -47,6 +47,8 @@ class ApiKeySummary:
     assigned_numbers: tuple[tuple[str, str], ...] = ()
     vertex_project_id: str | None = None
     vertex_location: str | None = None
+    voice_location: str | None = None
+    post_call_location: str | None = None
     vertex_credentials_configured: bool = False
     voice_provider: str = "vertex"
     voice_model: str = "google/gemini-live-2.5-flash-native-audio"
@@ -88,6 +90,8 @@ class ApiKeyDirectory(Protocol):
         vertex_project_id: str | None = None,
         vertex_location: str | None = None,
         vertex_credentials_json: str | None = None,
+        voice_location: str | None = None,
+        post_call_location: str | None = None,
         voice_provider: str = "vertex",
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
@@ -118,6 +122,7 @@ class ApiKeyDirectory(Protocol):
         voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
+        voice_location: str | None = None, post_call_location: str | None = None,
     ) -> bool: ...
     async def provision_customer(
         self,
@@ -147,6 +152,8 @@ class ApiKeyRow(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     vertex_project_id: Mapped[str | None] = mapped_column(String(128))
     vertex_location: Mapped[str | None] = mapped_column(String(64))
+    voice_location: Mapped[str | None] = mapped_column(String(64))
+    post_call_location: Mapped[str | None] = mapped_column(String(64))
     encrypted_vertex_credentials: Mapped[str | None] = mapped_column(Text)
     voice_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="vertex", server_default="vertex")
     voice_model: Mapped[str] = mapped_column(String(160), nullable=False, default="google/gemini-live-2.5-flash-native-audio", server_default="google/gemini-live-2.5-flash-native-audio")
@@ -230,6 +237,8 @@ class SqlApiKeyDirectory:
         vertex_project_id: str | None = None,
         vertex_location: str | None = None,
         vertex_credentials_json: str | None = None,
+        voice_location: str | None = None,
+        post_call_location: str | None = None,
         voice_provider: str = "vertex",
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
@@ -261,6 +270,8 @@ class SqlApiKeyDirectory:
             expires_at=expires_at,
             vertex_project_id=vertex_project_id,
             vertex_location=vertex_location,
+            voice_location=voice_location,
+            post_call_location=post_call_location,
             encrypted_vertex_credentials=self._encrypt_credentials(vertex_credentials_json),
             voice_provider=voice_provider, voice_model=voice_model,
             post_call_provider=post_call_provider, post_call_model=post_call_model,
@@ -308,18 +319,12 @@ class SqlApiKeyDirectory:
             return ApiKeyVertexConfig(
                 voice_agent_enabled=row.voice_agent_enabled,
                 post_call_agent_enabled=row.post_call_agent_enabled,
-                post_call_project_id=post_call_agent.project_id if post_call_agent else None,
-                post_call_location=post_call_agent.location if post_call_agent else None,
-                post_call_credentials_json=(
-                    self._fernet.decrypt(post_call_agent.encrypted_credentials.encode("ascii")).decode("utf-8")
-                    if post_call_agent and self._fernet else None
-                ),
-                project_id=voice_agent.project_id if voice_agent else row.vertex_project_id,
-                location=voice_agent.location if voice_agent else (row.vertex_location or "us-central1"),
-                credentials_json=(
-                    self._fernet.decrypt(voice_agent.encrypted_credentials.encode("ascii")).decode("utf-8")
-                    if voice_agent and self._fernet else credentials.decode("utf-8") if credentials else None
-                ),
+                post_call_project_id=row.vertex_project_id,
+                post_call_location=row.post_call_location or (post_call_agent.location if post_call_agent else None) or row.vertex_location or "us-central1",
+                post_call_credentials_json=credentials.decode("utf-8") if credentials else None,
+                project_id=row.vertex_project_id,
+                location=row.voice_location or (voice_agent.location if voice_agent else None) or row.vertex_location or "us-central1",
+                credentials_json=credentials.decode("utf-8") if credentials else None,
                 voice_provider=voice_agent.provider if voice_agent else row.voice_provider,
                 voice_model=voice_agent.model if voice_agent else row.voice_model,
                 post_call_provider=post_call_agent.provider if post_call_agent else row.post_call_provider,
@@ -333,8 +338,10 @@ class SqlApiKeyDirectory:
         post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None, post_call_agent_id: str | None = None,
+        voice_location: str | None = None, post_call_location: str | None = None,
     ) -> bool:
         values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location,
+                  "voice_location": voice_location, "post_call_location": post_call_location,
                   "voice_provider": voice_provider, "voice_model": voice_model,
                   "post_call_provider": post_call_provider, "post_call_model": post_call_model}
         values.update(voice_agent_enabled=voice_agent_enabled, post_call_agent_enabled=post_call_agent_enabled)
@@ -358,11 +365,13 @@ class SqlApiKeyDirectory:
         post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None, post_call_agent_id: str | None = None,
+        voice_location: str | None = None, post_call_location: str | None = None,
     ) -> bool:
         normalized = tuple(sorted(set(assigned_numbers)))
         if len(normalized) != len(assigned_numbers) or len({number for _, number in assigned_numbers}) != len(assigned_numbers):
             raise ValueError("API key phone number assignments must be unique")
         values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location,
+                  "voice_location": voice_location, "post_call_location": post_call_location,
                   "voice_provider": voice_provider, "voice_model": voice_model,
                   "post_call_provider": post_call_provider, "post_call_model": post_call_model}
         values.update(voice_agent_enabled=voice_agent_enabled, post_call_agent_enabled=post_call_agent_enabled)
@@ -533,6 +542,8 @@ def _to_summary(
         assigned_numbers=assigned_numbers,
         vertex_project_id=row.vertex_project_id,
         vertex_location=row.vertex_location,
+        voice_location=row.voice_location,
+        post_call_location=row.post_call_location,
         vertex_credentials_configured=bool(row.encrypted_vertex_credentials),
         voice_provider=row.voice_provider, voice_model=row.voice_model,
         post_call_provider=row.post_call_provider, post_call_model=row.post_call_model,

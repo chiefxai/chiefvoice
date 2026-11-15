@@ -249,7 +249,7 @@ def create_app(
         )
     if agent_configuration_directory is None and settings.database_url:
         agent_configuration_directory = SqlAgentConfigurationDirectory(
-            settings.database_url, settings.credentials_encryption_key
+            settings.database_url
         )
     if settings.vertex_project_isolation_enabled:
         required_gcp_config = {
