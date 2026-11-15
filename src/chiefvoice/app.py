@@ -20,6 +20,7 @@ from chiefvoice.accounts.admin_routes import router as admin_customers_router
 from chiefvoice.accounts.store import SqlAccountStore
 from chiefvoice.agents.call.configs.routes import router as agent_profiles_router
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
+from chiefvoice.agents.configuration_store import SqlAgentConfigurationDirectory
 from chiefvoice.agents.call.configs.store import SqlAgentProfileDirectory
 from chiefvoice.agents.call.factory import create_realtime_pipeline_factory
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
@@ -80,6 +81,7 @@ async def lifespan(_app: FastAPI):
     integration_store = getattr(_app.state, "provider_integration_store", None)
     account_store = getattr(_app.state, "account_store", None)
     api_key_directory = getattr(_app.state, "api_key_directory", None)
+    agent_configuration_directory = getattr(_app.state, "agent_configuration_directory", None)
     post_call_webhook_directory = getattr(_app.state, "post_call_webhook_directory", None)
     agent_profile_directory = getattr(_app.state, "agent_profile_directory", None)
     post_call_dispatcher = getattr(_app.state, "post_call_dispatcher", None)
@@ -118,6 +120,8 @@ async def lifespan(_app: FastAPI):
             await integration_store.initialize()
         if api_key_directory is not None:
             await api_key_directory.initialize()
+        if agent_configuration_directory is not None:
+            await agent_configuration_directory.initialize()
         if post_call_webhook_directory is not None:
             await post_call_webhook_directory.initialize()
         if agent_profile_directory is not None:
@@ -204,6 +208,8 @@ async def lifespan(_app: FastAPI):
             await agent_profile_directory.close()
         if api_key_directory is not None:
             await api_key_directory.close()
+        if agent_configuration_directory is not None:
+            await agent_configuration_directory.close()
         if account_store is not None:
             await account_store.close()
         if call_session_store is not None:
@@ -223,6 +229,7 @@ def create_app(
     provider_integration_store: SqlProviderIntegrationStore | None = None,
     account_store: SqlAccountStore | None = None,
     api_key_directory: SqlApiKeyDirectory | None = None,
+    agent_configuration_directory: SqlAgentConfigurationDirectory | None = None,
     post_call_webhook_directory: SqlPostCallWebhookDirectory | None = None,
     agent_profile_directory: AgentProfileDirectory | None = None,
     billing_directory: SqlBillingDirectory | None = None,
@@ -238,6 +245,10 @@ def create_app(
     vertex_project_provisioner = None
     if api_key_directory is None and settings.database_url:
         api_key_directory = SqlApiKeyDirectory(
+            settings.database_url, settings.credentials_encryption_key
+        )
+    if agent_configuration_directory is None and settings.database_url:
+        agent_configuration_directory = SqlAgentConfigurationDirectory(
             settings.database_url, settings.credentials_encryption_key
         )
     if settings.vertex_project_isolation_enabled:
@@ -532,6 +543,7 @@ def create_app(
     application.state.vobiz_callback_nonce_store = vobiz_callback_nonce_store
     application.state.billing_directory = billing_directory
     application.state.api_key_directory = api_key_directory
+    application.state.agent_configuration_directory = agent_configuration_directory
     application.state.post_call_webhook_directory = post_call_webhook_directory
     application.state.agent_profile_directory = agent_profile_directory
     application.state.object_storage_checks = object_storage_checks

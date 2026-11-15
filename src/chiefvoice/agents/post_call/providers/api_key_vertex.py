@@ -24,9 +24,9 @@ class ApiKeyVertexPostCallAgent:
         if config.post_call_provider != "vertex":
             raise RuntimeError("The selected post-call provider is not available")
         agent = create_vertex_post_call_agent(
-            project_id=config.project_id,
-            location=config.location,
+            project_id=config.post_call_project_id or config.project_id,
+            location=config.post_call_location or config.location,
             model=config.post_call_model,
-            credentials_json=config.credentials_json,
+            credentials_json=config.post_call_credentials_json or config.credentials_json,
         )
         return await agent.process(call)
