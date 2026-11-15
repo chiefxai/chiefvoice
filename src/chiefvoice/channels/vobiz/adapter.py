@@ -24,7 +24,11 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
-
+from chiefvoice.agents.call.audio_diagnostics import (
+    CallAudioDiagnostics,
+    ObservedVobizSerializer,
+    diagnostics_for_session,
+)
 from chiefvoice.calls.store import SqlCallSessionStore
 from chiefvoice.channels.base import AmbiguousCallStart, InboundCall, OutboundCall
 from chiefvoice.channels.integrations import ProviderIntegrationStore
@@ -365,13 +369,14 @@ class VobizAdapter:
             "vobiz_media_connected",
             extra={"session_id": session.session_id, "provider": self.provider},
         )
+        diagnostics = diagnostics_for_session(session)
         return FastAPIWebsocketTransport(
             websocket=connection,
             params=FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
                 add_wav_header=False,
-                serializer=serializer,
+                serializer=ObservedVobizSerializer(serializer, diagnostics),
             ),
         )
 
@@ -503,6 +508,9 @@ class VobizAdapter:
                     pass
             raise
         finally:
+            diagnostics = session.metadata.get("call_audio_diagnostics")
+            if isinstance(diagnostics, CallAudioDiagnostics):
+                diagnostics.log_summary()
             await end_session(session, end_reason)
 
     async def hangup(self, session: AcceptedSession, reason: str | None = None) -> None:

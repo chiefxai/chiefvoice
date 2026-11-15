@@ -6,6 +6,7 @@ from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.transports.base_transport import BaseTransport
 
 from chiefvoice.agents.call.pipeline import build_pipeline
+from chiefvoice.agents.call.audio_diagnostics import diagnostics_for_session
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.post_call.transcript import TranscriptCollector
 from chiefvoice.recordings.storage import (
@@ -52,6 +53,7 @@ def create_voice_pipeline_factory(
             recording_processor=recorder,
             transcript_processor=caller_transcript,
             assistant_transcript_processor=assistant_transcript,
+            audio_diagnostics=diagnostics_for_session(session),
         )
 
     return factory
