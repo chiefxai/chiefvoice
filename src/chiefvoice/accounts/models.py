@@ -4,6 +4,8 @@ from typing import Protocol
 
 from chiefvoice.billing import BillingMode
 
+PLATFORM_OWNER_ID = "platform"
+
 
 @dataclass(frozen=True, slots=True)
 class TenantAccount:

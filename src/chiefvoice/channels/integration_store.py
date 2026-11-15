@@ -87,6 +87,16 @@ class SqlProviderIntegrationStore:
             )
             return self._to_integration(row) if row else None
 
+    async def get_for_phone_number(self, provider: str, number: str) -> ProviderIntegration | None:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(IntegrationRow)
+                .join(PhoneNumberRow)
+                .where(PhoneNumberRow.provider == provider, PhoneNumberRow.number == number)
+                .options(selectinload(IntegrationRow.phone_numbers))
+            )
+            return self._to_integration(row) if row else None
+
     async def list_phone_numbers(self) -> list[RegisteredPhoneNumber]:
         async with self._sessions() as session:
             rows = await session.scalars(

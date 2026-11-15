@@ -133,6 +133,20 @@ class ApiKeyDirectory(Protocol):
         key_name: str,
         scopes: tuple[str, ...],
         expires_at: datetime | None,
+        assigned_numbers: tuple[tuple[str, str], ...] = (),
+        vertex_project_id: str | None = None,
+        vertex_location: str | None = None,
+        vertex_credentials_json: str | None = None,
+        voice_location: str | None = None,
+        post_call_location: str | None = None,
+        voice_provider: str = "vertex",
+        voice_model: str = "google/gemini-live-2.5-flash-native-audio",
+        post_call_provider: str = "vertex",
+        post_call_model: str = "gemini-2.5-flash",
+        voice_agent_enabled: bool = True,
+        post_call_agent_enabled: bool = True,
+        voice_agent_id: str | None = None,
+        post_call_agent_id: str | None = None,
     ) -> tuple[TenantAccount, str, ApiKeySummary]: ...
 
 
@@ -401,6 +415,20 @@ class SqlApiKeyDirectory:
         key_name: str,
         scopes: tuple[str, ...],
         expires_at: datetime | None,
+        assigned_numbers: tuple[tuple[str, str], ...] = (),
+        vertex_project_id: str | None = None,
+        vertex_location: str | None = None,
+        vertex_credentials_json: str | None = None,
+        voice_location: str | None = None,
+        post_call_location: str | None = None,
+        voice_provider: str = "vertex",
+        voice_model: str = "google/gemini-live-2.5-flash-native-audio",
+        post_call_provider: str = "vertex",
+        post_call_model: str = "gemini-2.5-flash",
+        voice_agent_enabled: bool = True,
+        post_call_agent_enabled: bool = True,
+        voice_agent_id: str | None = None,
+        post_call_agent_id: str | None = None,
     ) -> tuple[TenantAccount, str, ApiKeySummary]:
         """Atomically create a stable customer tenant and its first API credential."""
         from uuid import uuid4
@@ -425,10 +453,31 @@ class SqlApiKeyDirectory:
             created_by=created_by,
             created_at=now,
             expires_at=expires_at,
+            vertex_project_id=vertex_project_id,
+            vertex_location=vertex_location,
+            voice_location=voice_location,
+            post_call_location=post_call_location,
+            encrypted_vertex_credentials=self._encrypt_credentials(vertex_credentials_json),
+            voice_provider=voice_provider,
+            voice_model=voice_model,
+            post_call_provider=post_call_provider,
+            post_call_model=post_call_model,
+            voice_agent_enabled=voice_agent_enabled,
+            post_call_agent_enabled=post_call_agent_enabled,
+            voice_agent_id=voice_agent_id,
+            post_call_agent_id=post_call_agent_id,
         )
+        normalized_numbers = tuple(sorted(set(assigned_numbers)))
+        if len(normalized_numbers) != len(assigned_numbers) or len({number for _, number in assigned_numbers}) != len(assigned_numbers):
+            raise ValueError("API key phone number assignments must be unique")
         async with self._sessions.begin() as session:
             session.add(account_row)
             session.add(key_row)
+            await session.flush()
+            session.add_all(
+                ApiKeyPhoneNumberRow(api_key_id=key_id, provider=provider, phone_number=number)
+                for provider, number in normalized_numbers
+            )
             await session.flush()
         account = TenantAccount(
             tenant_id=tenant_id,
@@ -437,7 +486,7 @@ class SqlApiKeyDirectory:
             created_by=created_by,
             created_at=now,
         )
-        return account, token, _to_summary(key_row)
+        return account, token, _to_summary(key_row, normalized_numbers)
 
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]:
         async with self._sessions() as session:

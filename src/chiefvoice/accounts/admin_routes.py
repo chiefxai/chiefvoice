@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security,
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
-from chiefvoice.accounts.models import AccountStore, TenantAccount
+from chiefvoice.accounts.models import AccountStore, PLATFORM_OWNER_ID, TenantAccount
 from chiefvoice.agents.configurations import AgentConfiguration
 from chiefvoice.billing import BillingMode
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
@@ -101,6 +101,7 @@ class PhoneNumberAssignment(BaseModel):
 
 class CreatePhoneApiKeyBody(BaseModel):
     customer_name: str = Field(min_length=1, max_length=200)
+    billing_mode: BillingMode = BillingMode.PREPAID
     name: str = Field(default="Phone API", min_length=1, max_length=100)
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
@@ -156,7 +157,6 @@ class ReplacePhoneApiKeyNumbersBody(BaseModel):
 
 
 class AddPlatformNumbersBody(BaseModel):
-    customer_id: str = Field(min_length=1, max_length=200)
     credential_mode: Literal["platform", "custom"]
     phone_numbers: list[str] = Field(min_length=1, max_length=100)
     auth_id: str | None = Field(default=None, max_length=200)
@@ -226,7 +226,6 @@ def _integration_store(request: Request) -> SqlProviderIntegrationStore:
 
 
 class AgentProviderConfigBody(BaseModel):
-    customer_id: str = Field(min_length=1, max_length=200)
     name: str = Field(min_length=1, max_length=100)
     kind: Literal["calling", "post_call"]
     provider: Literal["vertex"] = "vertex"
@@ -256,16 +255,16 @@ async def _assigned_agent(request: Request, agent_id: str | None, tenant_id: str
         return None
     agent = await _agent_config_directory(request).get(tenant_id, agent_id)
     if agent is None:
-        raise HTTPException(status_code=404, detail=f"Selected {kind} agent was not found for this customer")
+        raise HTTPException(status_code=404, detail=f"Selected platform {kind} agent was not found")
     if agent.kind != kind:
         raise HTTPException(status_code=422, detail=f"Selected agent must be configured as {kind}")
     return agent
 
 
-def _agent_config_json(agent: AgentConfiguration, customer_name: str = "") -> dict:
+def _agent_config_json(agent: AgentConfiguration) -> dict:
     return {
-        "id": agent.agent_id, "customer_id": agent.tenant_id,
-        "customer_name": customer_name, "name": agent.name, "kind": agent.kind,
+        "id": agent.agent_id, "owner": "platform",
+        "name": agent.name, "kind": agent.kind,
         "provider": agent.provider, "model": agent.model, "location": agent.location,
         "cost_per_minute_minor": agent.cost_per_minute_minor, "currency": agent.currency,
         "enabled": agent.enabled, "created_at": agent.created_at.isoformat(),
@@ -276,20 +275,15 @@ def _agent_config_json(agent: AgentConfiguration, customer_name: str = "") -> di
 @router.get("/agent-configs")
 async def list_agent_configs(request: Request, principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))]):
     del principal
-    accounts, _ = _stores(request)
     agents = await _agent_config_directory(request).list_all()
-    names = {account.tenant_id: account.display_name for account in await accounts.list(limit=500, offset=0)}
-    return {"items": [_agent_config_json(agent, names.get(agent.tenant_id, "")) for agent in agents]}
+    return {"items": [_agent_config_json(agent) for agent in agents]}
 
 
 @router.post("/agent-configs", status_code=status.HTTP_201_CREATED)
 async def create_agent_config(body: AgentProviderConfigBody, request: Request, principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))]):
-    accounts, _ = _stores(request)
-    account = await accounts.get(body.customer_id)
-    if account is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    _accounts, _ = _stores(request)
     agent = AgentConfiguration(
-        agent_id=uuid4().hex, tenant_id=body.customer_id, name=body.name.strip(),
+        agent_id=uuid4().hex, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(),
         kind=body.kind, provider=body.provider, model=body.model.strip(), location=body.location.strip(),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
         enabled=True, created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
@@ -297,20 +291,19 @@ async def create_agent_config(body: AgentProviderConfigBody, request: Request, p
     try:
         saved = await _agent_config_directory(request).create(agent)
     except IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="An agent with this name already exists for this customer and type") from exc
-    logger.info("agent_provider_config_created", extra={"actor_subject": principal.subject, "tenant_id": body.customer_id, "agent_id": saved.agent_id, "agent_kind": saved.kind})
-    return _agent_config_json(saved, account.display_name)
+        raise HTTPException(status_code=409, detail="An agent with this name already exists for this type") from exc
+    logger.info("agent_provider_config_created", extra={"actor_subject": principal.subject, "agent_id": saved.agent_id, "agent_kind": saved.kind})
+    return _agent_config_json(saved)
 
 
 @router.put("/agent-configs/{agent_id}")
 async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, request: Request, principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))]):
-    accounts, _ = _stores(request)
     directory = _agent_config_directory(request)
-    current = await directory.get(body.customer_id, agent_id)
+    current = await directory.get(PLATFORM_OWNER_ID, agent_id)
     if current is None:
         raise HTTPException(status_code=404, detail="Agent configuration not found")
     replacement = AgentConfiguration(
-        agent_id=agent_id, tenant_id=body.customer_id, name=body.name.strip(), kind=body.kind,
+        agent_id=agent_id, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(), kind=body.kind,
         provider=body.provider, model=body.model.strip(), location=body.location.strip(),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
         enabled=True, created_at=current.created_at, updated_at=datetime.now(UTC),
@@ -318,11 +311,10 @@ async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, requ
     try:
         saved = await directory.update(replacement)
     except IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="An agent with this name already exists for this customer and type") from exc
-    account = await accounts.get(body.customer_id)
+        raise HTTPException(status_code=409, detail="An agent with this name already exists for this type") from exc
     if saved is None:
         raise HTTPException(status_code=404, detail="Agent configuration not found")
-    return _agent_config_json(saved, account.display_name if account else "")
+    return _agent_config_json(saved)
 
 
 def _validate_expiration(expires_at: datetime | None) -> datetime | None:
@@ -459,23 +451,17 @@ async def list_platform_phone_numbers(
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
 ):
     del principal
-    account_store, _ = _stores(request)
+    _, _ = _stores(request)
     records = await _integration_store(request).list_phone_numbers()
     api_keys = await _stores(request)[1].list_all()
     number_owners = {
-        number: key
+        (provider, number): key
         for key in api_keys
-        for _, number in key.assigned_numbers
+        for provider, number in key.assigned_numbers
     }
     items = []
-    account_cache: dict[str, TenantAccount | None] = {}
     vobiz_config_cache: dict[str, str | None] = {}
     for phone in records:
-        if phone.tenant_id not in account_cache:
-            account_cache[phone.tenant_id] = await account_store.get(phone.tenant_id)
-        account = account_cache[phone.tenant_id]
-        if account is None:
-            continue
         credential_mode = None
         if phone.provider == "vobiz":
             if phone.tenant_id not in vobiz_config_cache:
@@ -484,13 +470,13 @@ async def list_platform_phone_numbers(
                     integration.settings.get("credential_mode") if integration else None
                 )
             credential_mode = vobiz_config_cache[phone.tenant_id]
-        owner = number_owners.get(phone.number)
+        owner = number_owners.get((phone.provider, phone.number))
         items.append(
             {
                 "provider": phone.provider,
                 "phone_number": phone.number,
                 "customer_id": phone.tenant_id,
-                "customer_name": account.display_name,
+                "customer_name": "Platform",
                 "inbound_enabled": phone.inbound_enabled,
                 "outbound_enabled": phone.outbound_enabled,
                 "agent_id": phone.agent_id,
@@ -508,24 +494,21 @@ async def add_platform_phone_numbers(
     request: Request,
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
 ):
-    account_store, _ = _stores(request)
-    account = await account_store.get(body.customer_id)
-    if account is None:
-        raise HTTPException(status_code=404, detail="Customer not found")
+    _account_store, _ = _stores(request)
     credentials = _vobiz_credentials(body.credential_mode, body.auth_id, body.auth_token)
     store = _integration_store(request)
-    integration = await store.get("vobiz", body.customer_id)
+    integration = await store.get("vobiz", PLATFORM_OWNER_ID)
     existing_numbers = list(integration.phone_numbers) if integration else []
     if integration and existing_numbers:
         current_mode = integration.settings.get("credential_mode", "custom")
         if current_mode != body.credential_mode:
             raise HTTPException(
                 status_code=409,
-                detail="Vobiz credential mode is shared by this customer’s numbers. Edit the existing Vobiz configuration to change it.",
+                detail="Vobiz credential mode is shared by platform numbers. Edit the existing Vobiz configuration to change it.",
             )
     existing_values = {item.number for item in existing_numbers}
     if existing_values.intersection(body.phone_numbers):
-        raise HTTPException(status_code=409, detail="A selected number is already registered for this customer")
+        raise HTTPException(status_code=409, detail="A selected number is already registered")
     merged_numbers = [*existing_numbers, *(ProviderPhoneNumber(number) for number in body.phone_numbers)]
     integration_settings = dict(integration.settings) if integration else {}
     integration_settings["credential_mode"] = body.credential_mode
@@ -538,16 +521,16 @@ async def add_platform_phone_numbers(
     integration_settings = {key: value for key, value in integration_settings.items() if value is not None}
     try:
         await store.save(ProviderIntegration(
-            provider="vobiz", tenant_id=body.customer_id, credentials=credentials,
+            provider="vobiz", tenant_id=PLATFORM_OWNER_ID, credentials=credentials,
             settings=integration_settings, phone_numbers=tuple(merged_numbers),
         ))
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="A phone number is already registered") from exc
     logger.info("platform_vobiz_numbers_added", extra={
-        "actor_subject": principal.subject, "tenant_id": body.customer_id,
+        "actor_subject": principal.subject, "resource_owner": "platform",
         "phone_number_count": len(body.phone_numbers), "credential_mode": body.credential_mode,
     })
-    return {"provider": "vobiz", "customer_id": body.customer_id, "credential_mode": body.credential_mode,
+    return {"provider": "vobiz", "owner": "platform", "credential_mode": body.credential_mode,
             "phone_numbers": body.phone_numbers}
 
 
@@ -708,25 +691,22 @@ async def issue_phone_api_key(
         raise HTTPException(
             status_code=404, detail="An outbound-enabled phone number was not found"
         )
-    tenant_ids = {item.tenant_id for item in selected if item is not None}
-    if len(tenant_ids) != 1:
-        raise HTTPException(status_code=422, detail="All phone numbers must belong to one customer")
-    tenant_id = next(iter(tenant_ids))
-    voice_agent = await _assigned_agent(request, body.voice_agent_id, tenant_id, "calling")
-    post_call_agent = await _assigned_agent(request, body.post_call_agent_id, tenant_id, "post_call")
-    account = await account_store.get(tenant_id)
-    if account is None:
-        raise HTTPException(status_code=404, detail="Phone number customer was not found")
+    voice_agent = await _assigned_agent(request, body.voice_agent_id, PLATFORM_OWNER_ID, "calling")
+    post_call_agent = await _assigned_agent(request, body.post_call_agent_id, PLATFORM_OWNER_ID, "post_call")
     expires_at = datetime.now(UTC) + MAX_API_KEY_LIFETIME
     credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
     if not settings.credentials_encryption_key:
         raise HTTPException(status_code=503, detail="Credential encryption is not configured")
     try:
-        token, key = await api_key_directory.create(
-            tenant_id=tenant_id,
-            name=body.name.strip(),
-            scopes=tuple(DEFAULT_CUSTOMER_API_KEY_SCOPES),
+        provision = getattr(api_key_directory, "provision_customer", None)
+        if provision is None:
+            raise HTTPException(status_code=503, detail="Atomic API customer provisioning is unavailable")
+        account, token, key = await provision(
+            display_name=body.customer_name.strip(),
+            billing_mode=body.billing_mode,
             created_by=principal.subject,
+            key_name=body.name.strip(),
+            scopes=tuple(DEFAULT_CUSTOMER_API_KEY_SCOPES),
             expires_at=expires_at,
             assigned_numbers=tuple(requested),
             vertex_project_id=credentials["project_id"],
@@ -747,9 +727,8 @@ async def issue_phone_api_key(
         raise HTTPException(
             status_code=409, detail="A selected phone number is already assigned to another API"
         ) from exc
-    if not await account_store.update_display_name(tenant_id, body.customer_name.strip()):
-        raise HTTPException(status_code=404, detail="Customer account was not found")
-    account = await account_store.get(tenant_id)
+    tenant_id = account.tenant_id
+    vertex_project = await _request_vertex_project(request, account)
     logger.info(
         "phone_api_key_issued",
         extra={
@@ -760,11 +739,14 @@ async def issue_phone_api_key(
             "providers": sorted({provider for provider, _ in requested}),
         },
     )
-    return {
+    response = {
         "key": token,
         "api_key_record": {**_key_json(key), "customer_name": account.display_name},
         "message": "Copy this API key now; its secret will not be shown again.",
     }
+    if vertex_project is not None:
+        response["vertex_project"] = vertex_project
+    return response
 
 
 @router.put("/api-keys/{key_id}/config")
@@ -785,11 +767,11 @@ async def update_phone_api_key_config(
         raise HTTPException(status_code=422, detail="Phone number assignments must be unique")
     registered = await _integration_store(request).list_phone_numbers()
     for provider, number in requested:
-        phone = next((item for item in registered if item.tenant_id == key.tenant_id and item.provider == provider and item.number == number and item.outbound_enabled), None)
+        phone = next((item for item in registered if item.provider == provider and item.number == number and item.outbound_enabled), None)
         if phone is None:
-            raise HTTPException(status_code=404, detail="An outbound-enabled number for this customer was not found")
-    voice_agent = await _assigned_agent(request, body.voice_agent_id, key.tenant_id, "calling")
-    post_call_agent = await _assigned_agent(request, body.post_call_agent_id, key.tenant_id, "post_call")
+            raise HTTPException(status_code=404, detail="An outbound-enabled platform number was not found")
+    voice_agent = await _assigned_agent(request, body.voice_agent_id, PLATFORM_OWNER_ID, "calling")
+    post_call_agent = await _assigned_agent(request, body.post_call_agent_id, PLATFORM_OWNER_ID, "post_call")
     credentials_json = None
     project_id = key.vertex_project_id
     if body.gcp_credentials_json and body.gcp_credentials_json.strip():
@@ -848,8 +830,7 @@ async def replace_phone_api_key_numbers(
         phone = next(
             (
                 item for item in registered
-                if item.tenant_id == key.tenant_id
-                and item.provider == provider
+                if item.provider == provider
                 and item.number == number
                 and item.outbound_enabled
             ),
@@ -857,7 +838,7 @@ async def replace_phone_api_key_numbers(
         )
         if phone is None:
             raise HTTPException(
-                status_code=404, detail="An outbound-enabled number for this customer was not found"
+                status_code=404, detail="An outbound-enabled platform number was not found"
             )
     try:
         replaced = await api_key_directory.replace_phone_numbers(

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -13,8 +13,6 @@ from chiefvoice.core.db_schema import verify_schema_revision
 
 class AgentConfigurationRow(Base):
     __tablename__ = "agent_provider_configs"
-    __table_args__ = (UniqueConstraint("tenant_id", "kind", "name"),)
-
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(200), ForeignKey("tenant_accounts.tenant_id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)

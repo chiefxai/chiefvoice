@@ -92,7 +92,8 @@ class VobizAdapter:
         self, call: OutboundCall, session: AcceptedSession
     ) -> AcceptedSession:
         self._require_configured()
-        integration = await self.integration_store.get(self.provider, call.tenant_id)
+        integration = await self.integration_store.get_for_phone_number(self.provider, call.caller_id) if call.caller_id else None
+        integration = integration or await self.integration_store.get(self.provider, "platform")
         if integration is None:
             raise HTTPException(status_code=403, detail="Vobiz is not connected to this account")
         auth_id = integration.credentials.get("auth_id", "")
@@ -318,7 +319,7 @@ class VobizAdapter:
         if not isinstance(connection, WebSocket):
             raise TypeError("Vobiz media transport requires a FastAPI WebSocket")
         self._require_configured()
-        integration = await self.integration_store.get(self.provider, session.tenant_id)
+        integration = await self.integration_store.get_for_phone_number(self.provider, session.caller)
         if integration is None:
             raise HTTPException(status_code=404, detail="Vobiz account is no longer configured")
         auth_id = integration.credentials.get("auth_id", "")
@@ -484,7 +485,7 @@ class VobizAdapter:
         if not session.provider_call_id:
             return
         self._require_configured()
-        integration = await self.integration_store.get(self.provider, session.tenant_id)
+        integration = await self.integration_store.get_for_phone_number(self.provider, session.caller)
         if integration is None:
             return
         auth_id = integration.credentials.get("auth_id", "")
