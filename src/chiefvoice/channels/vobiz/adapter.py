@@ -529,15 +529,27 @@ class VobizAdapter:
 
     async def hangup(self, session: AcceptedSession, reason: str | None = None) -> None:
         if not session.provider_call_id:
-            return
+            logger.error(
+                "vobiz_hangup_missing_call_id",
+                extra={"session_id": session.session_id, "provider": self.provider},
+            )
+            raise RuntimeError("Vobiz call ID is unavailable; cannot end the call")
         self._require_configured()
         integration = await self._integration_for_caller(session.caller)
         if integration is None:
-            return
+            logger.error(
+                "vobiz_hangup_integration_missing",
+                extra={"session_id": session.session_id, "provider": self.provider},
+            )
+            raise RuntimeError("Vobiz integration is unavailable; cannot end the call")
         auth_id = integration.credentials.get("auth_id", "")
         auth_token = integration.credentials.get("auth_token", "")
         if not auth_id or not auth_token:
-            return
+            logger.error(
+                "vobiz_hangup_credentials_missing",
+                extra={"session_id": session.session_id, "provider": self.provider},
+            )
+            raise RuntimeError("Vobiz credentials are unavailable; cannot end the call")
         endpoint = (
             f"{VOBIZ_API}/api/v1/Account/{auth_id}/Call/"
             f"{urllib.parse.quote(session.provider_call_id, safe='')}/"
@@ -547,6 +559,14 @@ class VobizAdapter:
                 endpoint, headers=self._auth_headers(auth_id, auth_token)
             )
             response.raise_for_status()
+        logger.info(
+            "vobiz_call_hangup_completed",
+            extra={
+                "session_id": session.session_id,
+                "provider": self.provider,
+                "reason": reason,
+            },
+        )
 
     async def transfer(self, session: AcceptedSession, destination: str) -> None:
         raise HTTPException(status_code=501, detail="Vobiz transfer is not implemented yet")

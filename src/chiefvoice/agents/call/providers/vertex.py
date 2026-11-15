@@ -162,6 +162,10 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
         tools = None
         if session.auto_hangup_when_complete:
+            logger.info(
+                "call_agent_hangup_tool_registered",
+                extra={"session_id": session.session_id, "provider": session.provider},
+            )
             system_instruction = (
                 f"{system_instruction.strip()}\n\n"
                 "When the caller's requested information has been collected, briefly thank them, "
@@ -172,6 +176,10 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             async def hang_up_call(params: FunctionCallParams) -> None:
                 callback = session.metadata.get("hang_up_call")
+                logger.info(
+                    "call_agent_hangup_tool_invoked",
+                    extra={"session_id": session.session_id, "provider": session.provider},
+                )
                 if not callable(callback):
                     logger.warning(
                         "call_agent_hangup_unavailable",
