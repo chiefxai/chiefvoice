@@ -124,6 +124,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const queryClient = useQueryClient()
   const [page, setPage] = useState<Page>('Numbers')
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null)
   const [token, setToken] = useState(sessionStorage.getItem('chiefvoice.token') || '')
   const [authReady, setAuthReady] = useState(false)
   const [signingIn, setSigningIn] = useState(false)
@@ -339,9 +340,14 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <Stack direction="row" alignItems="center" gap={1}><IconButton className="mobile-menu" onClick={() => setDrawerOpen(true)}><MenuRoundedIcon /></IconButton><div className="eyebrow">Platform console</div></Stack>
         <div className="auth-bar">
           <Chip size="small" icon={connected ? <CheckCircleRoundedIcon /> : <ErrorOutlineRoundedIcon />} label={connected ? 'Signed in' : 'Not connected'} color={connected ? 'success' : 'default'} variant="outlined" sx={{ fontSize: 11, height: 27 }} />
-          <Tooltip title={`Switch to ${mode === 'light' ? 'dark' : 'light'} theme`}><IconButton size="small" onClick={onToggleTheme} aria-label="Toggle color theme">{mode === 'light' ? <DarkModeRoundedIcon fontSize="small" /> : <LightModeRoundedIcon fontSize="small" />}</IconButton></Tooltip>
-          <Button size="small" onClick={() => { void disconnect() }} color="inherit">Sign out</Button>
-          <Avatar sx={{ width: 31, height: 31, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar>
+          <Tooltip title="Profile menu"><IconButton size="small" onClick={event => setProfileAnchor(event.currentTarget)} aria-label="Open profile menu"><Avatar sx={{ width: 31, height: 31, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar></IconButton></Tooltip>
+          <Menu anchorEl={profileAnchor} open={Boolean(profileAnchor)} onClose={() => setProfileAnchor(null)} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
+            <MenuItem onClick={() => { onToggleTheme(); setProfileAnchor(null) }}>
+              {mode === 'light' ? <DarkModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} /> : <LightModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} />}
+              Switch to {mode === 'light' ? 'dark' : 'light'} theme
+            </MenuItem>
+            <MenuItem onClick={() => { setProfileAnchor(null); void disconnect() }}>Sign out</MenuItem>
+          </Menu>
         </div>
       </header>
       <div className="content">
