@@ -473,6 +473,7 @@ class SqlCallSessionStore:
                     "duration_seconds": duration,
                     "transcript_available": bool(row.encrypted_transcript),
                     "recording_available": bool(session and session.metadata.get("recording_uri")),
+                    "post_call_agent_enabled": session.post_call_agent_enabled if session else True,
                 })
             return {"items": items, "total": int(count or 0), "limit": limit, "offset": offset}
 
@@ -555,6 +556,7 @@ class SqlCallSessionStore:
             "post_call_time_zone": session.post_call_time_zone,
             "post_call_time_format": session.post_call_time_format,
             "include_live_agent_context": session.include_live_agent_context,
+            "post_call_agent_enabled": session.post_call_agent_enabled,
             "max_call_seconds": session.max_call_seconds,
             "recording_allowed": session.recording_allowed,
             "recording_uri": session.metadata.get("recording_uri"),
@@ -583,6 +585,7 @@ class SqlCallSessionStore:
             post_call_time_zone=payload.get("post_call_time_zone"),
             post_call_time_format=payload.get("post_call_time_format"),
             include_live_agent_context=payload.get("include_live_agent_context", False),
+            post_call_agent_enabled=payload.get("post_call_agent_enabled", True),
             max_call_seconds=payload.get("max_call_seconds"),
             recording_allowed=payload.get("recording_allowed", False),
             started_at=datetime.fromisoformat(payload["started_at"]),

@@ -4,7 +4,7 @@ import axios from 'axios'
 import {
   Alert, Avatar, Button, Card, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Drawer, FormControl, IconButton, InputAdornment,
-  InputLabel, ListItemText, Menu, MenuItem, Select, Snackbar, Stack, Table, TableBody, TableCell,
+  FormControlLabel, InputLabel, ListItemText, Menu, MenuItem, Select, Snackbar, Stack, Switch, Table, TableBody, TableCell,
   TableHead, TableRow, TextField, Tooltip, Typography,
 } from '@mui/material'
 import HubRoundedIcon from '@mui/icons-material/HubRounded'
@@ -52,6 +52,8 @@ type PlatformApiKey = {
   voice_model?: string
   post_call_provider?: string
   post_call_model?: string
+  voice_agent_enabled?: boolean
+  post_call_agent_enabled?: boolean
 }
 type IssuedApiKey = { key: string; api_key_record: PlatformApiKey }
 type Customer = { customer_id: string; display_name: string }
@@ -61,6 +63,7 @@ type ApiCallLog = {
   started_at: string; answered_at: string | null; ended_at: string | null
   duration_seconds: number | null; transcript_available: boolean; recording_available: boolean
   post_call_status?: string | null; post_call_result?: Record<string, unknown> | null
+  post_call_agent_enabled?: boolean
   webhook_status?: string | null
 }
 type ApiBillingUsage = {
@@ -95,8 +98,8 @@ const api = {
   addNumbers: (data: { customer_id: string; credential_mode: 'platform' | 'custom'; phone_numbers: string[]; auth_id?: string; auth_token?: string }) => http.post('/v1/admin/customers/phone-numbers', data),
   updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound }, { params: { customer_id: number.customer_id } }),
   deleteNumber: (number: RegisteredNumber) => http.delete(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { params: { customer_id: number.customer_id } }),
-  createApiKey: (numbers: RegisteredNumber[], credentials: string, location: string, voiceProvider: string, voiceModel: string, postCallProvider: string, postCallModel: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials, vertex_location: location, voice_provider: voiceProvider, voice_model: voiceModel, post_call_provider: postCallProvider, post_call_model: postCallModel }).then(r => r.data),
-  updateApiConfig: (id: string, numbers: RegisteredNumber[], credentials: string, location: string, voiceProvider: string, voiceModel: string, postCallProvider: string, postCallModel: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials || null, vertex_location: location, voice_provider: voiceProvider, voice_model: voiceModel, post_call_provider: postCallProvider, post_call_model: postCallModel }),
+  createApiKey: (numbers: RegisteredNumber[], credentials: string, location: string, voiceProvider: string, voiceModel: string, postCallProvider: string, postCallModel: string, voiceAgentEnabled: boolean, postCallAgentEnabled: boolean) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials || null, vertex_location: location, voice_provider: voiceProvider, voice_model: voiceModel, post_call_provider: postCallProvider, post_call_model: postCallModel, voice_agent_enabled: voiceAgentEnabled, post_call_agent_enabled: postCallAgentEnabled }).then(r => r.data),
+  updateApiConfig: (id: string, numbers: RegisteredNumber[], credentials: string, location: string, voiceProvider: string, voiceModel: string, postCallProvider: string, postCallModel: string, voiceAgentEnabled: boolean, postCallAgentEnabled: boolean) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), gcp_credentials_json: credentials || null, vertex_location: location, voice_provider: voiceProvider, voice_model: voiceModel, post_call_provider: postCallProvider, post_call_model: postCallModel, voice_agent_enabled: voiceAgentEnabled, post_call_agent_enabled: postCallAgentEnabled }),
   revokeApiKey: (id: string) => http.delete(`/v1/admin/customers/api-keys/${id}`),
 }
 
@@ -120,6 +123,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [postCallModel, setPostCallModel] = useState('gemini-2.5-flash')
   const [voiceProvider, setVoiceProvider] = useState('vertex')
   const [postCallProvider, setPostCallProvider] = useState('vertex')
+  const [voiceAgentEnabled, setVoiceAgentEnabled] = useState(true)
+  const [postCallAgentEnabled, setPostCallAgentEnabled] = useState(true)
   const [addNumberAnchor, setAddNumberAnchor] = useState<HTMLElement | null>(null)
   const [addNumberMode, setAddNumberMode] = useState<'platform' | 'custom' | null>(null)
   const [numberCustomerId, setNumberCustomerId] = useState('')
@@ -183,7 +188,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', viewingKey?.id], queryFn: () => api.apiCalls(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', viewingKey?.id], queryFn: () => api.apiBilling(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 10000 : false })
   const issueMutation = useMutation({
-    mutationFn: ({ numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel }: { numbers: RegisteredNumber[]; credentials: string; location: string; voiceProvider: string; voiceModel: string; postCallProvider: string; postCallModel: string }) => api.createApiKey(numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel),
+    mutationFn: ({ numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel, voiceAgentEnabled, postCallAgentEnabled }: { numbers: RegisteredNumber[]; credentials: string; location: string; voiceProvider: string; voiceModel: string; postCallProvider: string; postCallModel: string; voiceAgentEnabled: boolean; postCallAgentEnabled: boolean }) => api.createApiKey(numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel, voiceAgentEnabled, postCallAgentEnabled),
     onSuccess: result => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -208,7 +213,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onError: error => setToast(errorText(error)),
   })
   const manageNumbersMutation = useMutation({
-    mutationFn: ({ key, numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel }: { key: PlatformApiKey; numbers: RegisteredNumber[]; credentials: string; location: string; voiceProvider: string; voiceModel: string; postCallProvider: string; postCallModel: string }) => api.updateApiConfig(key.id, numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel),
+    mutationFn: ({ key, numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel, voiceAgentEnabled, postCallAgentEnabled }: { key: PlatformApiKey; numbers: RegisteredNumber[]; credentials: string; location: string; voiceProvider: string; voiceModel: string; postCallProvider: string; postCallModel: string; voiceAgentEnabled: boolean; postCallAgentEnabled: boolean }) => api.updateApiConfig(key.id, numbers, credentials, location, voiceProvider, voiceModel, postCallProvider, postCallModel, voiceAgentEnabled, postCallAgentEnabled),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -245,10 +250,24 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const selected = outboundNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`))
   const submitCreateApi = () => {
     if (!selected.length) { setToast('Required: select at least one unassigned outbound phone number.'); return }
-    if (!gcpCredentials.trim()) { setToast('Required: paste the Google Cloud service account JSON for this API.'); return }
-    if (!vertexLocation.trim()) { setToast('Required: enter the Vertex AI location.'); return }
-    if (!voiceModel.trim() || !postCallModel.trim()) { setToast('Required: enter a model ID for both agents.'); return }
-    issueMutation.mutate({ numbers: selected, credentials: gcpCredentials, location: vertexLocation, voiceProvider, voiceModel, postCallProvider, postCallModel })
+    if (!voiceAgentEnabled && !postCallAgentEnabled) { setToast('Enable at least one agent for this API.'); return }
+    if ((voiceAgentEnabled || postCallAgentEnabled) && !gcpCredentials.trim()) { setToast('Required: paste the Google Cloud service account JSON for enabled agents.'); return }
+    if ((voiceAgentEnabled || postCallAgentEnabled) && !vertexLocation.trim()) { setToast('Required: enter the Vertex AI location.'); return }
+    if ((voiceAgentEnabled && !voiceModel.trim()) || (postCallAgentEnabled && !postCallModel.trim())) { setToast('Required: enter a model ID for each enabled agent.'); return }
+    issueMutation.mutate({ numbers: selected, credentials: gcpCredentials, location: vertexLocation, voiceProvider, voiceModel, postCallProvider, postCallModel, voiceAgentEnabled, postCallAgentEnabled })
+  }
+  const openCreateApi = () => {
+    setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1')
+    setVoiceProvider('vertex'); setVoiceModel('google/gemini-live-2.5-flash-native-audio')
+    setPostCallProvider('vertex'); setPostCallModel('gemini-2.5-flash')
+    setVoiceAgentEnabled(true); setPostCallAgentEnabled(true); setAssignmentOpen(true)
+  }
+  const openEditApi = (key: PlatformApiKey) => {
+    setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`))
+    setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1')
+    setVoiceProvider(key.voice_provider || 'vertex'); setVoiceModel(key.voice_model || 'google/gemini-live-2.5-flash-native-audio')
+    setPostCallProvider(key.post_call_provider || 'vertex'); setPostCallModel(key.post_call_model || 'gemini-2.5-flash')
+    setVoiceAgentEnabled(key.voice_agent_enabled ?? true); setPostCallAgentEnabled(key.post_call_agent_enabled ?? true)
   }
   const connect = async () => {
     setSigningIn(true)
@@ -288,8 +307,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       </header>
       <div className="content">
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled) }} />}
-        {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1'); setVoiceProvider('vertex'); setVoiceModel('google/gemini-live-2.5-flash-native-audio'); setPostCallProvider('vertex'); setPostCallModel('gemini-2.5-flash'); setAssignmentOpen(true) }} onView={key => setViewingKey(key)} onManage={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)); setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1'); setVoiceProvider(key.voice_provider || 'vertex'); setVoiceModel(key.voice_model || 'google/gemini-live-2.5-flash-native-audio'); setPostCallProvider(key.post_call_provider || 'vertex'); setPostCallModel(key.post_call_model || 'gemini-2.5-flash') }} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
-        {page === 'Agents' && <AgentsPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setPage('API'); setSelectedNumbers([]); setGcpCredentials(''); setVertexLocation('us-central1'); setVoiceProvider('vertex'); setVoiceModel('google/gemini-live-2.5-flash-native-audio'); setPostCallProvider('vertex'); setPostCallModel('gemini-2.5-flash'); setAssignmentOpen(true) }} onEdit={key => { setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`)); setGcpCredentials(''); setVertexLocation(key.vertex_location || 'us-central1'); setVoiceProvider(key.voice_provider || 'vertex'); setVoiceModel(key.voice_model || 'google/gemini-live-2.5-flash-native-audio'); setPostCallProvider(key.post_call_provider || 'vertex'); setPostCallModel(key.post_call_model || 'gemini-2.5-flash') }} />}
+        {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => setViewingKey(key)} onManage={openEditApi} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
+        {page === 'Agents' && <AgentsPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={() => { setPage('API'); openCreateApi() }} onEdit={openEditApi} />}
         {page === 'Docs' && <DocsPage />}
       </div>
     </main>
@@ -346,20 +365,24 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         </FormControl>
         {!outboundNumbers.length && <Alert severity="warning">No unassigned outbound number is available. Add a number in Numbers first; this API can be created once at least one number is selected.</Alert>}
         <Typography variant="h6" sx={{ mt: 1, fontWeight: 800 }}>Calling agent</Typography>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+        <FormControlLabel control={<Switch checked={voiceAgentEnabled} onChange={event => setVoiceAgentEnabled(event.target.checked)} />} label={voiceAgentEnabled ? 'Calling agent enabled' : 'Calling agent disabled'} />
+        {voiceAgentEnabled ? <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
           <FormControl fullWidth><InputLabel id="create-voice-provider-label">Provider</InputLabel><Select labelId="create-voice-provider-label" label="Provider" value={voiceProvider} onChange={event => setVoiceProvider(event.target.value)}><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
           <TextField label="Live voice model ID" value={voiceModel} onChange={event => setVoiceModel(event.target.value)} fullWidth />
-        </Stack>
+        </Stack> : <Alert severity="warning">Outbound AI calls from this API will be rejected until the calling agent is enabled.</Alert>}
         <Typography variant="h6" sx={{ mt: 1, fontWeight: 800 }}>Post-call agent</Typography>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+        <FormControlLabel control={<Switch checked={postCallAgentEnabled} onChange={event => setPostCallAgentEnabled(event.target.checked)} />} label={postCallAgentEnabled ? 'Post-call agent enabled' : 'Post-call agent disabled'} />
+        {postCallAgentEnabled && <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
           <FormControl fullWidth><InputLabel id="create-post-provider-label">Provider</InputLabel><Select labelId="create-post-provider-label" label="Provider" value={postCallProvider} onChange={event => setPostCallProvider(event.target.value)}><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
           <TextField label="Post-call model ID" value={postCallModel} onChange={event => setPostCallModel(event.target.value)} fullWidth />
-        </Stack>
-        <Typography variant="h6" sx={{ mt: 1, fontWeight: 800 }}>Google Cloud credentials</Typography>
-        <TextField label="Google Cloud service account JSON" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={5} fullWidth placeholder={'Paste the downloaded service account JSON key'} />
-        <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth placeholder="us-central1" />
+        </Stack>}
+        {(voiceAgentEnabled || postCallAgentEnabled) ? <>
+          <Typography variant="h6" sx={{ mt: 1, fontWeight: 800 }}>Google Cloud credentials</Typography>
+          <TextField label="Google Cloud service account JSON" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={5} fullWidth placeholder={'Paste the downloaded service account JSON key'} />
+          <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth placeholder="us-central1" />
+        </> : <Alert severity="info">Both agents are disabled. This API will not start outbound AI calls or run post-call analysis.</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || (!voiceAgentEnabled && !postCallAgentEnabled)} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={!!oneTimeKey} onClose={() => setOneTimeKey(null)} maxWidth="sm" fullWidth>
@@ -376,18 +399,23 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Edit API configuration</DialogTitle>
       <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
         <Alert severity="info" sx={{ fontSize: 12 }}>Saved service account credentials are encrypted. Leave the credential field blank to keep the current key; enter new JSON to rotate it. Provider choices reflect the integrations currently supported by the backend.</Alert>
-        <TextField label="Replace Google Cloud service account JSON (optional)" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={4} fullWidth placeholder={managementKey?.vertex_credentials_configured ? 'Credentials are saved. Leave blank to keep them.' : 'Paste service account JSON'} />
-        <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth />
         <Typography variant="h6" sx={{ mt: 1, fontWeight: 800 }}>Calling agent</Typography>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+        <FormControlLabel control={<Switch checked={voiceAgentEnabled} onChange={event => setVoiceAgentEnabled(event.target.checked)} />} label={voiceAgentEnabled ? 'Calling agent enabled' : 'Calling agent disabled'} />
+        {voiceAgentEnabled ? <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
           <FormControl fullWidth><InputLabel id="edit-voice-provider-label">Provider</InputLabel><Select labelId="edit-voice-provider-label" label="Provider" value={voiceProvider} onChange={event => setVoiceProvider(event.target.value)}><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
           <TextField label="Live voice model ID" value={voiceModel} onChange={event => setVoiceModel(event.target.value)} fullWidth />
-        </Stack>
+        </Stack> : <Alert severity="warning">Outbound AI calls from this API will be rejected until the calling agent is enabled.</Alert>}
         <Typography variant="h6" sx={{ mt: 1, fontWeight: 800 }}>Post-call agent</Typography>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+        <FormControlLabel control={<Switch checked={postCallAgentEnabled} onChange={event => setPostCallAgentEnabled(event.target.checked)} />} label={postCallAgentEnabled ? 'Post-call agent enabled' : 'Post-call agent disabled'} />
+        {postCallAgentEnabled && <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
           <FormControl fullWidth><InputLabel id="edit-post-provider-label">Provider</InputLabel><Select labelId="edit-post-provider-label" label="Provider" value={postCallProvider} onChange={event => setPostCallProvider(event.target.value)}><MenuItem value="vertex">Google Vertex AI</MenuItem></Select></FormControl>
           <TextField label="Post-call model ID" value={postCallModel} onChange={event => setPostCallModel(event.target.value)} fullWidth />
-        </Stack>
+        </Stack>}
+        {(voiceAgentEnabled || postCallAgentEnabled) ? <>
+          <Typography variant="h6" sx={{ mt: 1, fontWeight: 800 }}>Google Cloud credentials</Typography>
+          <TextField label="Replace Google Cloud service account JSON (optional)" value={gcpCredentials} onChange={event => setGcpCredentials(event.target.value)} multiline minRows={4} fullWidth placeholder={managementKey?.vertex_credentials_configured ? 'Credentials are saved. Leave blank to keep them.' : 'Paste service account JSON'} />
+          <TextField label="Vertex AI location" value={vertexLocation} onChange={event => setVertexLocation(event.target.value)} fullWidth />
+        </> : <Alert severity="info">Both agents are disabled. This API will not start outbound AI calls or run post-call analysis.</Alert>}
         <FormControl fullWidth disabled={!managementKey}>
           <InputLabel id="manage-number-label">Phone numbers</InputLabel>
           <Select multiple labelId="manage-number-label" value={selectedNumbers} label="Phone numbers" onChange={event => setSelectedNumbers(typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value)} renderValue={values => `${values.length} phone number${values.length === 1 ? '' : 's'} selected`}>
@@ -398,7 +426,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           </Select>
         </FormControl>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || (!gcpCredentials.trim() && !managementKey.vertex_credentials_configured) || !voiceModel.trim() || !postCallModel.trim() || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, numbers, credentials: gcpCredentials, location: vertexLocation, voiceProvider, voiceModel, postCallProvider, postCallModel }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || (!voiceAgentEnabled && !postCallAgentEnabled) || ((voiceAgentEnabled || postCallAgentEnabled) && !gcpCredentials.trim() && !managementKey.vertex_credentials_configured) || (voiceAgentEnabled && !voiceModel.trim()) || (postCallAgentEnabled && !postCallModel.trim()) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, numbers, credentials: gcpCredentials, location: vertexLocation, voiceProvider, voiceModel, postCallProvider, postCallModel, voiceAgentEnabled, postCallAgentEnabled }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={Boolean(viewingKey)} onClose={() => setViewingKey(null)} maxWidth="lg" fullWidth>
@@ -407,10 +435,11 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap">
           <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">API key</Typography><Typography><code>{viewingKey?.key_prefix}</code></Typography></Card>
           <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Assigned numbers</Typography><Typography>{viewingKey?.assigned_numbers.map(item => item.phone_number).join(', ') || 'None'}</Typography></Card>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Vertex AI</Typography><Typography>{viewingKey?.vertex_credentials_configured ? `${viewingKey.vertex_project_id} · ${viewingKey.vertex_location}` : 'Not configured'}</Typography></Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Calling agent</Typography><Typography>{viewingKey?.voice_agent_enabled === false ? 'Disabled' : `${viewingKey?.voice_provider || 'Vertex AI'} · ${viewingKey?.voice_model || 'Default model'}`}</Typography></Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Post-call agent</Typography><Typography>{viewingKey?.post_call_agent_enabled === false ? 'Disabled' : `${viewingKey?.post_call_provider || 'Vertex AI'} · ${viewingKey?.post_call_model || 'Default model'}`}</Typography></Card>
         </Stack>
         <Typography variant="h6" sx={{ fontWeight: 800 }}>Calls for this API</Typography>
-        {apiCallsQuery.isLoading ? <CircularProgress size={22} /> : apiCallsQuery.error ? <Alert severity="error">{errorText(apiCallsQuery.error)}</Alert> : apiCallsQuery.data?.items.length ? <Table size="small"><TableHead><TableRow>{['Started', 'Direction', 'From → To', 'Provider', 'Status', 'Duration', 'Post-call result', 'Session'].map(item => <TableCell className="table-head" key={item}>{item}</TableCell>)}</TableRow></TableHead><TableBody>{apiCallsQuery.data.items.map(call => <TableRow key={call.session_id}><TableCell className="table-cell">{new Date(call.started_at).toLocaleString()}</TableCell><TableCell className="table-cell">{call.direction || '—'}</TableCell><TableCell className="table-cell">{call.caller || '—'} → {call.callee || '—'}</TableCell><TableCell className="table-cell">{call.provider || '—'}</TableCell><TableCell className="table-cell"><StatusChip enabled={call.status === 'completed'} label={call.status} /></TableCell><TableCell className="table-cell">{call.duration_seconds == null ? '—' : `${call.duration_seconds}s`}</TableCell><TableCell className="table-cell">{call.post_call_status ? <><StatusChip enabled={call.post_call_status === 'completed'} label={call.post_call_status} />{call.post_call_result && <details style={{ marginTop: 6 }}><summary>View result</summary><pre style={{ whiteSpace: 'pre-wrap', maxWidth: 320, fontSize: 11 }}>{JSON.stringify(call.post_call_result, null, 2)}</pre></details>}</> : 'Waiting for call to finish'}</TableCell><TableCell className="table-cell"><code>{call.session_id}</code></TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state">No calls yet. Use the API key and the request example on the Docs page to place a test call.</div>}
+        {apiCallsQuery.isLoading ? <CircularProgress size={22} /> : apiCallsQuery.error ? <Alert severity="error">{errorText(apiCallsQuery.error)}</Alert> : apiCallsQuery.data?.items.length ? <Table size="small"><TableHead><TableRow>{['Started', 'Direction', 'From → To', 'Provider', 'Status', 'Duration', 'Post-call result', 'Session'].map(item => <TableCell className="table-head" key={item}>{item}</TableCell>)}</TableRow></TableHead><TableBody>{apiCallsQuery.data.items.map(call => <TableRow key={call.session_id}><TableCell className="table-cell">{new Date(call.started_at).toLocaleString()}</TableCell><TableCell className="table-cell">{call.direction || '—'}</TableCell><TableCell className="table-cell">{call.caller || '—'} → {call.callee || '—'}</TableCell><TableCell className="table-cell">{call.provider || '—'}</TableCell><TableCell className="table-cell"><StatusChip enabled={call.status === 'completed'} label={call.status} /></TableCell><TableCell className="table-cell">{call.duration_seconds == null ? '—' : `${call.duration_seconds}s`}</TableCell><TableCell className="table-cell">{call.post_call_status ? <><StatusChip enabled={call.post_call_status === 'completed'} label={call.post_call_status} />{call.post_call_result && <details style={{ marginTop: 6 }}><summary>View result</summary><pre style={{ whiteSpace: 'pre-wrap', maxWidth: 320, fontSize: 11 }}>{JSON.stringify(call.post_call_result, null, 2)}</pre></details>}</> : call.post_call_agent_enabled === false ? <StatusChip enabled={false} label="disabled" /> : 'Waiting for call to finish'}</TableCell><TableCell className="table-cell"><code>{call.session_id}</code></TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state">No calls yet. Use the API key and the request example on the Docs page to place a test call.</div>}
         <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Billing for this API</Typography>
         {apiBillingQuery.isLoading ? <CircularProgress size={22} /> : apiBillingQuery.error ? <Alert severity="error">{errorText(apiBillingQuery.error)}</Alert> : apiBillingQuery.data?.configured ? <>
           <Alert severity="info">Call charges below are attributed to this API key. Pricing and the prepaid balance or postpaid credit limit are managed on the customer billing plan and shared by API keys under that customer.</Alert>
@@ -423,7 +452,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           </Stack>
         </> : <Alert severity="warning">{apiBillingQuery.data?.message || 'No billing plan is configured for this customer yet.'}</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setViewingKey(null)}>Close</Button><Button onClick={() => { if (viewingKey) { setManagementKey(viewingKey); setSelectedNumbers(viewingKey.assigned_numbers.map(item => `${item.provider}|${item.phone_number}`)); setGcpCredentials(''); setVertexLocation(viewingKey.vertex_location || 'us-central1'); setVoiceProvider(viewingKey.voice_provider || 'vertex'); setVoiceModel(viewingKey.voice_model || 'google/gemini-live-2.5-flash-native-audio'); setPostCallProvider(viewingKey.post_call_provider || 'vertex'); setPostCallModel(viewingKey.post_call_model || 'gemini-2.5-flash') } setViewingKey(null) }}>Edit API</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setViewingKey(null)}>Close</Button><Button onClick={() => { if (viewingKey) openEditApi(viewingKey); setViewingKey(null) }}>Edit API</Button></DialogActions>
     </Dialog>
 
     <Snackbar open={Boolean(toast)} autoHideDuration={5000} onClose={() => setToast('')} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}><Alert onClose={() => setToast('')} severity={toast.toLowerCase().includes('error') || toast.toLowerCase().includes('failed') || toast.toLowerCase().includes('required') ? 'error' : 'success'} variant="filled">{toast}</Alert></Snackbar>
@@ -450,7 +479,7 @@ function AgentsPage({ keys, loading, error, onEdit, onCreate }: { keys: Platform
   return <><PageIntro eyebrow="AGENT CONFIGURATION" title="Agents" subtitle="Choose the live calling and post-call model providers for each API." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate}>Configure agents</Button>} />
     <Alert severity="info" sx={{ mt: 2 }}>Vertex AI is available for both agent types today. Provider choices are separate so live voice and post-call processing can move to different providers as integrations are added.</Alert>
     <Card className="surface-card" sx={{ mt: 2 }}>
-      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <Table size="small"><TableHead><TableRow>{['API / customer', 'Calling agent', 'Post-call agent', 'Phone numbers', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.filter(key => !key.revoked_at).map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><b>{key.name}</b><br /><Typography variant="caption">{key.customer_name} · <code>{key.key_prefix}</code></Typography></TableCell><TableCell className="table-cell"><Chip size="small" label={key.voice_provider === 'vertex' ? 'Google Vertex AI' : key.voice_provider || 'Not configured'} /><Typography variant="body2" sx={{ mt: 0.5 }}>{key.voice_model || 'Default voice model'}</Typography></TableCell><TableCell className="table-cell"><Chip size="small" label={key.post_call_provider === 'vertex' ? 'Google Vertex AI' : key.post_call_provider || 'Not configured'} /><Typography variant="body2" sx={{ mt: 0.5 }}>{key.post_call_model || 'Default post-call model'}</Typography></TableCell><TableCell className="table-cell">{key.assigned_numbers.map(item => item.phone_number).join(', ') || 'None'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(key)}>Configure</Button></TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No API agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create an API and choose its calling and post-call agent providers and models.</div><Button variant="contained" sx={{ mt: 2 }} onClick={onCreate}>Configure agents</Button></div>}
+      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <Table size="small"><TableHead><TableRow>{['API / customer', 'Calling agent', 'Post-call agent', 'Phone numbers', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.filter(key => !key.revoked_at).map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><b>{key.name}</b><br /><Typography variant="caption">{key.customer_name} · <code>{key.key_prefix}</code></Typography></TableCell><TableCell className="table-cell"><Chip size="small" label={key.voice_agent_enabled === false ? 'Disabled' : key.voice_provider === 'vertex' ? 'Google Vertex AI' : key.voice_provider || 'Not configured'} /><Typography variant="body2" sx={{ mt: 0.5 }}>{key.voice_agent_enabled === false ? 'Outbound calling unavailable' : key.voice_model || 'Default voice model'}</Typography></TableCell><TableCell className="table-cell"><Chip size="small" label={key.post_call_agent_enabled === false ? 'Disabled' : key.post_call_provider === 'vertex' ? 'Google Vertex AI' : key.post_call_provider || 'Not configured'} /><Typography variant="body2" sx={{ mt: 0.5 }}>{key.post_call_agent_enabled === false ? 'Analysis skipped' : key.post_call_model || 'Default post-call model'}</Typography></TableCell><TableCell className="table-cell">{key.assigned_numbers.map(item => item.phone_number).join(', ') || 'None'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(key)}>Configure</Button></TableCell></TableRow>)}</TableBody></Table> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No API agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create an API and choose its calling and post-call agent providers and models.</div><Button variant="contained" sx={{ mt: 2 }} onClick={onCreate}>Configure agents</Button></div>}
     </Card>
   </>
 }

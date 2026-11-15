@@ -99,12 +99,14 @@ class PhoneNumberAssignment(BaseModel):
 
 class CreatePhoneApiKeyBody(BaseModel):
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
-    gcp_credentials_json: str
+    gcp_credentials_json: str | None = None
     vertex_location: str = Field(default="us-central1", min_length=1, max_length=64)
     voice_provider: str = "vertex"
     voice_model: str = Field(default="google/gemini-live-2.5-flash-native-audio", min_length=1, max_length=160)
     post_call_provider: str = "vertex"
     post_call_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=160)
+    voice_agent_enabled: bool = True
+    post_call_agent_enabled: bool = True
 
     @field_validator("vertex_location")
     @classmethod
@@ -126,6 +128,8 @@ class UpdatePhoneApiKeyConfigBody(BaseModel):
     voice_model: str = Field(default="google/gemini-live-2.5-flash-native-audio", min_length=1, max_length=160)
     post_call_provider: str = "vertex"
     post_call_model: str = Field(default="gemini-2.5-flash", min_length=1, max_length=160)
+    voice_agent_enabled: bool = True
+    post_call_agent_enabled: bool = True
 
     @field_validator("vertex_location")
     @classmethod
@@ -280,6 +284,8 @@ def _key_json(key: ApiKeySummary) -> dict:
         "voice_model": key.voice_model,
         "post_call_provider": key.post_call_provider,
         "post_call_model": key.post_call_model,
+        "voice_agent_enabled": key.voice_agent_enabled,
+        "post_call_agent_enabled": key.post_call_agent_enabled,
     }
 
 
@@ -546,6 +552,11 @@ async def list_platform_api_calls(
     dispatcher = getattr(request.app.state, "post_call_dispatcher", None)
     if dispatcher is not None and hasattr(dispatcher, "get_status"):
         for call in result["items"]:
+            if not call["post_call_agent_enabled"]:
+                call["post_call_status"] = "disabled"
+                call["post_call_result"] = None
+                call["webhook_status"] = None
+                continue
             post_call = await dispatcher.get_status(key.tenant_id, call["session_id"])
             call["post_call_status"] = post_call["status"] if post_call else None
             call["post_call_result"] = post_call["result"] if post_call else None
@@ -580,6 +591,8 @@ async def issue_phone_api_key(
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
 ):
     account_store, api_key_directory = _stores(request)
+    if not body.voice_agent_enabled and not body.post_call_agent_enabled:
+        raise HTTPException(status_code=422, detail="Enable at least one agent for this API")
     requested = [(item.provider, item.phone_number) for item in body.phone_numbers]
     duplicate_pairs = len(requested) != len(set(requested))
     duplicate_numbers = len({number for _, number in requested}) != len(requested)
@@ -604,9 +617,14 @@ async def issue_phone_api_key(
     if len(tenant_ids) != 1:
         raise HTTPException(status_code=422, detail="All phone numbers must belong to one customer")
     tenant_id = next(iter(tenant_ids))
-    credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
-    if not settings.credentials_encryption_key:
-        raise HTTPException(status_code=503, detail="Encrypted GCP credential storage is not configured")
+    credentials = None
+    credentials_json = None
+    if body.voice_agent_enabled or body.post_call_agent_enabled:
+        if body.gcp_credentials_json is None:
+            raise HTTPException(status_code=422, detail="GCP credentials are required when an agent is enabled")
+        credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
+        if not settings.credentials_encryption_key:
+            raise HTTPException(status_code=503, detail="Encrypted GCP credential storage is not configured")
     account = await account_store.get(tenant_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Phone number customer was not found")
@@ -619,13 +637,15 @@ async def issue_phone_api_key(
             created_by=principal.subject,
             expires_at=expires_at,
             assigned_numbers=tuple(requested),
-            vertex_project_id=credentials["project_id"],
+            vertex_project_id=credentials["project_id"] if credentials else None,
             vertex_location=body.vertex_location,
             vertex_credentials_json=credentials_json,
             voice_provider=body.voice_provider,
             voice_model=body.voice_model.strip(),
             post_call_provider=body.post_call_provider,
             post_call_model=body.post_call_model.strip(),
+            voice_agent_enabled=body.voice_agent_enabled,
+            post_call_agent_enabled=body.post_call_agent_enabled,
         )
     except IntegrityError as exc:
         raise HTTPException(
@@ -656,6 +676,8 @@ async def update_phone_api_key_config(
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
 ):
     account_store, api_key_directory = _stores(request)
+    if not body.voice_agent_enabled and not body.post_call_agent_enabled:
+        raise HTTPException(status_code=422, detail="Enable at least one agent for this API")
     key = next((item for item in await api_key_directory.list_all() if item.key_id == key_id), None)
     if key is None or key.revoked_at is not None:
         raise HTTPException(status_code=404, detail="Active API key not found")
@@ -675,7 +697,7 @@ async def update_phone_api_key_config(
         project_id = credentials["project_id"]
     else:
         project_id = key.vertex_project_id
-        if not key.vertex_credentials_configured or not project_id:
+        if (body.voice_agent_enabled or body.post_call_agent_enabled) and (not key.vertex_credentials_configured or not project_id):
             raise HTTPException(status_code=422, detail="GCP credentials are required for this API")
     try:
         replaced = await api_key_directory.update_config_and_numbers(
@@ -688,6 +710,8 @@ async def update_phone_api_key_config(
             voice_model=body.voice_model.strip(),
             post_call_provider=body.post_call_provider,
             post_call_model=body.post_call_model.strip(),
+            voice_agent_enabled=body.voice_agent_enabled,
+            post_call_agent_enabled=body.post_call_agent_enabled,
         )
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="A selected phone number is already assigned to another API") from exc

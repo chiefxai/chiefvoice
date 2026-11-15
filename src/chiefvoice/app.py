@@ -555,6 +555,7 @@ def create_app(
             vertex_project_directory=vertex_project_directory,
             require_tenant_vertex_project=settings.vertex_project_isolation_enabled,
             call_session_store=call_session_store,
+            api_key_directory=api_key_directory,
         )
         if subscription_authorizer is not None
         else None

@@ -52,17 +52,21 @@ class ApiKeySummary:
     voice_model: str = "google/gemini-live-2.5-flash-native-audio"
     post_call_provider: str = "vertex"
     post_call_model: str = "gemini-2.5-flash"
+    voice_agent_enabled: bool = True
+    post_call_agent_enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ApiKeyVertexConfig:
-    project_id: str
+    project_id: str | None
     location: str
-    credentials_json: str
+    credentials_json: str | None
     voice_provider: str = "vertex"
     voice_model: str = "google/gemini-live-2.5-flash-native-audio"
     post_call_provider: str = "vertex"
     post_call_model: str = "gemini-2.5-flash"
+    voice_agent_enabled: bool = True
+    post_call_agent_enabled: bool = True
 
 
 class ApiKeyDirectory(Protocol):
@@ -83,6 +87,8 @@ class ApiKeyDirectory(Protocol):
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
         post_call_model: str = "gemini-2.5-flash",
+        voice_agent_enabled: bool = True,
+        post_call_agent_enabled: bool = True,
     ) -> tuple[str, ApiKeySummary]: ...
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
     async def list_all(self) -> list[ApiKeySummary]: ...
@@ -103,6 +109,7 @@ class ApiKeyDirectory(Protocol):
         vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
         voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
+        voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
     ) -> bool: ...
     async def provision_customer(
         self,
@@ -137,6 +144,8 @@ class ApiKeyRow(Base):
     voice_model: Mapped[str] = mapped_column(String(160), nullable=False, default="google/gemini-live-2.5-flash-native-audio", server_default="google/gemini-live-2.5-flash-native-audio")
     post_call_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="vertex", server_default="vertex")
     post_call_model: Mapped[str] = mapped_column(String(160), nullable=False, default="gemini-2.5-flash", server_default="gemini-2.5-flash")
+    voice_agent_enabled: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    post_call_agent_enabled: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
 
 
 class ApiKeyPhoneNumberRow(Base):
@@ -215,6 +224,8 @@ class SqlApiKeyDirectory:
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
         post_call_model: str = "gemini-2.5-flash",
+        voice_agent_enabled: bool = True,
+        post_call_agent_enabled: bool = True,
     ) -> tuple[str, ApiKeySummary]:
         normalized_numbers = tuple(sorted(set(assigned_numbers)))
         if len(normalized_numbers) != len(assigned_numbers) or len(
@@ -241,6 +252,7 @@ class SqlApiKeyDirectory:
             encrypted_vertex_credentials=self._encrypt_credentials(vertex_credentials_json),
             voice_provider=voice_provider, voice_model=voice_model,
             post_call_provider=post_call_provider, post_call_model=post_call_model,
+            voice_agent_enabled=voice_agent_enabled, post_call_agent_enabled=post_call_agent_enabled,
         )
         async with self._sessions.begin() as session:
             account = await session.get(TenantAccountRow, tenant_id)
@@ -269,17 +281,21 @@ class SqlApiKeyDirectory:
             row = await session.scalar(
                 select(ApiKeyRow).where(ApiKeyRow.id == key_id)
             )
-            if row is None or not row.encrypted_vertex_credentials or not row.vertex_project_id:
+            if row is None:
                 return None
-            if self._fernet is None:
-                raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY is not configured")
-            credentials = self._fernet.decrypt(row.encrypted_vertex_credentials.encode("ascii"))
+            credentials = None
+            if row.encrypted_vertex_credentials:
+                if self._fernet is None:
+                    raise RuntimeError("CREDENTIALS_ENCRYPTION_KEY is not configured")
+                credentials = self._fernet.decrypt(row.encrypted_vertex_credentials.encode("ascii"))
             return ApiKeyVertexConfig(
                 project_id=row.vertex_project_id,
                 location=row.vertex_location or "us-central1",
-                credentials_json=credentials.decode("utf-8"),
+                credentials_json=credentials.decode("utf-8") if credentials else None,
                 voice_provider=row.voice_provider, voice_model=row.voice_model,
                 post_call_provider=row.post_call_provider, post_call_model=row.post_call_model,
+                voice_agent_enabled=row.voice_agent_enabled,
+                post_call_agent_enabled=row.post_call_agent_enabled,
             )
 
     async def update_vertex_config(
@@ -287,10 +303,12 @@ class SqlApiKeyDirectory:
         vertex_location: str, vertex_credentials_json: str | None,
         voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
+        voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
     ) -> bool:
         values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location,
                   "voice_provider": voice_provider, "voice_model": voice_model,
                   "post_call_provider": post_call_provider, "post_call_model": post_call_model}
+        values.update(voice_agent_enabled=voice_agent_enabled, post_call_agent_enabled=post_call_agent_enabled)
         if vertex_credentials_json is not None:
             values["encrypted_vertex_credentials"] = self._encrypt_credentials(vertex_credentials_json)
         async with self._sessions.begin() as session:
@@ -307,6 +325,7 @@ class SqlApiKeyDirectory:
         vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
         voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
+        voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
     ) -> bool:
         normalized = tuple(sorted(set(assigned_numbers)))
         if len(normalized) != len(assigned_numbers) or len({number for _, number in assigned_numbers}) != len(assigned_numbers):
@@ -314,6 +333,7 @@ class SqlApiKeyDirectory:
         values = {"vertex_project_id": vertex_project_id, "vertex_location": vertex_location,
                   "voice_provider": voice_provider, "voice_model": voice_model,
                   "post_call_provider": post_call_provider, "post_call_model": post_call_model}
+        values.update(voice_agent_enabled=voice_agent_enabled, post_call_agent_enabled=post_call_agent_enabled)
         if vertex_credentials_json is not None:
             values["encrypted_vertex_credentials"] = self._encrypt_credentials(vertex_credentials_json)
         async with self._sessions.begin() as session:
@@ -482,4 +502,6 @@ def _to_summary(
         vertex_credentials_configured=bool(row.encrypted_vertex_credentials),
         voice_provider=row.voice_provider, voice_model=row.voice_model,
         post_call_provider=row.post_call_provider, post_call_model=row.post_call_model,
+        voice_agent_enabled=row.voice_agent_enabled,
+        post_call_agent_enabled=row.post_call_agent_enabled,
     )

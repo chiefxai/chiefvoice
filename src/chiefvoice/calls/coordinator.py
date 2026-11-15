@@ -24,6 +24,7 @@ from chiefvoice.observability.setup import (
     session_started,
 )
 from chiefvoice.sessions import AcceptedSession, Direction
+from chiefvoice.identity.api_keys import ApiKeyDirectory
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class CallCoordinator:
         vertex_project_directory: TenantVertexProjectDirectory | None = None,
         require_tenant_vertex_project: bool = False,
         call_session_store: SqlCallSessionStore | None = None,
+        api_key_directory: ApiKeyDirectory | None = None,
     ):
         self.adapters = adapters
         self.subscriptions = subscriptions
@@ -73,9 +75,23 @@ class CallCoordinator:
         self.vertex_project_directory = vertex_project_directory
         self.require_tenant_vertex_project = require_tenant_vertex_project
         self.call_session_store = call_session_store
+        self.api_key_directory = api_key_directory
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
-        self._require_post_call_ready()
+        post_call_agent_enabled = True
+        if command.api_key_id is not None:
+            if self.api_key_directory is None:
+                raise HTTPException(status_code=503, detail="API agent configuration is unavailable")
+            api_config = await self.api_key_directory.get_vertex_config(command.api_key_id)
+            if api_config is None:
+                raise HTTPException(status_code=503, detail="Configure GCP credentials for this API before placing calls")
+            if not api_config.voice_agent_enabled:
+                raise HTTPException(status_code=409, detail="The calling agent is disabled for this API")
+            if not api_config.project_id or not api_config.credentials_json:
+                raise HTTPException(status_code=503, detail="Configure Google Cloud credentials for this API before placing calls")
+            post_call_agent_enabled = api_config.post_call_agent_enabled
+        if post_call_agent_enabled:
+            self._require_post_call_ready()
         await self._require_vertex_project(command.tenant_id)
         adapter = self._adapter(command.provider)
         if command.bot_config_id is not None:
@@ -104,6 +120,7 @@ class CallCoordinator:
             post_call_time_zone=command.post_call_time_zone,
             post_call_time_format=command.post_call_time_format,
             include_live_agent_context=command.include_live_agent_context,
+            post_call_agent_enabled=post_call_agent_enabled,
         )
         fingerprint = SqlCallSessionStore.fingerprint(
             {
@@ -120,6 +137,7 @@ class CallCoordinator:
                 "post_call_time_zone": command.post_call_time_zone,
                 "post_call_time_format": command.post_call_time_format,
                 "include_live_agent_context": command.include_live_agent_context,
+                "post_call_agent_enabled": post_call_agent_enabled,
                 "recording_allowed": command.recording_allowed,
             }
         )
@@ -460,7 +478,8 @@ class CallCoordinator:
             return
         if session.metadata.get("post_call_enqueued") is True:
             return
-        if not self.post_call_required or self.post_call_dispatcher is None:
+        if not session.post_call_agent_enabled or not self.post_call_required or self.post_call_dispatcher is None:
+            session.metadata["post_call_status"] = "disabled"
             if self.call_session_store is not None:
                 await self.call_session_store.mark_post_call_enqueued(
                     session.tenant_id, session.session_id
