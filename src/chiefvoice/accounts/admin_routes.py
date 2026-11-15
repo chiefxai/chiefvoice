@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 
 from chiefvoice.accounts.models import AccountStore, PLATFORM_OWNER_ID, TenantAccount
