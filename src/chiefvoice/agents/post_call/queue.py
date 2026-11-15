@@ -107,7 +107,7 @@ Index(
     PostCallJobRow.created_at,
 )
 Index(
-    "ix_post_call_webhook_deliveries_status_lease_expires_at_next_attempt_at",
+    "ix_pcwh_status_lease_next_attempt",
     PostCallWebhookDeliveryRow.status,
     PostCallWebhookDeliveryRow.lease_expires_at,
     PostCallWebhookDeliveryRow.next_attempt_at,

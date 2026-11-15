@@ -46,7 +46,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("session_id", name=op.f("uq_post_call_webhook_deliveries_session_id")),
     )
     op.create_index(
-        "ix_post_call_webhook_deliveries_status_lease_expires_at_next_attempt_at",
+        "ix_pcwh_status_lease_next_attempt",
         "post_call_webhook_deliveries",
         ["status", "lease_expires_at", "next_attempt_at"],
     )
@@ -54,7 +54,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index(
-        "ix_post_call_webhook_deliveries_status_lease_expires_at_next_attempt_at",
+        "ix_pcwh_status_lease_next_attempt",
         table_name="post_call_webhook_deliveries",
     )
     op.drop_table("post_call_webhook_deliveries")
