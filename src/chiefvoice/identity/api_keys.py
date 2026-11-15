@@ -106,6 +106,7 @@ class ApiKeyDirectory(Protocol):
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
     async def list_all(self) -> list[ApiKeySummary]: ...
     async def revoke(self, tenant_id: str, key_id: str) -> bool: ...
+    async def delete_permanently(self, tenant_id: str, key_id: str) -> bool: ...
     async def replace_phone_numbers(
         self,
         tenant_id: str,
@@ -557,6 +558,17 @@ class SqlApiKeyDirectory:
                 delete(ApiKeyPhoneNumberRow).where(ApiKeyPhoneNumberRow.api_key_id == key_id)
             )
             return True
+
+    async def delete_permanently(self, tenant_id: str, key_id: str) -> bool:
+        """Permanently remove an API key and its number bindings from Postgres."""
+        async with self._sessions.begin() as session:
+            result = await session.execute(
+                delete(ApiKeyRow).where(
+                    ApiKeyRow.id == key_id,
+                    ApiKeyRow.tenant_id == tenant_id,
+                )
+            )
+            return result.rowcount == 1
 
     async def replace_phone_numbers(
         self,

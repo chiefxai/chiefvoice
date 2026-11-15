@@ -97,6 +97,10 @@ type ApiBillingUsage = {
   customer_prepaid_balance_minor?: number; customer_postpaid_used_minor?: number
   customer_postpaid_credit_limit_minor?: number; message?: string
 }
+type DeleteConfirmation =
+  | { kind: 'number'; number: RegisteredNumber }
+  | { kind: 'agent'; agent: AgentConfiguration }
+  | { kind: 'api'; api: PlatformApiKey }
 
 const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 const http = axios.create({ baseURL: API_BASE, timeout: 30000 })
@@ -187,6 +191,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [managedNumberTags, setManagedNumberTags] = useState('')
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
   const [viewingKey, setViewingKey] = useState<PlatformApiKey | null>(null)
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null)
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState('')
   const [simulationApiId, setSimulationApiId] = useState('')
   const [simulationDestination, setSimulationDestination] = useState('')
   const [simulationCallerId, setSimulationCallerId] = useState('')
@@ -289,7 +295,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
-      setToast('API deleted. Its key is disabled and assigned numbers are released; call and billing history are retained.')
+      void queryClient.invalidateQueries({ queryKey: ['platform-api-calls'] })
+      void queryClient.invalidateQueries({ queryKey: ['platform-api-billing'] })
+      setDeleteConfirmation(null); setDeleteConfirmationText('')
+      setToast('API and its credentials were permanently deleted from Postgres. Call and billing history remain without an API association.')
     },
     onError: error => setToast(errorText(error)),
   })
@@ -319,6 +328,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-agent-configs'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
+      setDeleteConfirmation(null); setDeleteConfirmationText('')
       setToast('Agent deleted.')
     },
     onError: error => setToast(errorText(error)),
@@ -349,9 +359,32 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   })
   const deleteNumberMutation = useMutation({
     mutationFn: api.deleteNumber,
-    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] }); void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] }); setManagedNumber(null); setToast('Phone number removed.') },
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] }); void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] }); setDeleteConfirmation(null); setDeleteConfirmationText(''); setManagedNumber(null); setToast('Phone number removed.') },
     onError: error => setToast(errorText(error)),
   })
+  const deleteConfirmationLabel = deleteConfirmation?.kind === 'number'
+    ? `${deleteConfirmation.number.provider} ${deleteConfirmation.number.phone_number}`
+    : deleteConfirmation?.kind === 'agent'
+      ? deleteConfirmation.agent.name
+      : deleteConfirmation?.kind === 'api'
+        ? `${deleteConfirmation.api.customer_name} / ${deleteConfirmation.api.name}`
+        : ''
+  const deleteConfirmationPhrase = deleteConfirmationLabel ? `DELETE ${deleteConfirmationLabel}` : ''
+  const openDeleteConfirmation = (target: DeleteConfirmation) => {
+    setDeleteConfirmation(target)
+    setDeleteConfirmationText('')
+  }
+  const confirmDeleteResource = () => {
+    if (!deleteConfirmation || deleteConfirmationText !== deleteConfirmationPhrase) return
+    if (deleteConfirmation.kind === 'number') deleteNumberMutation.mutate(deleteConfirmation.number)
+    if (deleteConfirmation.kind === 'agent') deleteAgentConfigMutation.mutate(deleteConfirmation.agent.id)
+    if (deleteConfirmation.kind === 'api') deleteApiKeyMutation.mutate(deleteConfirmation.api.id)
+  }
+  const deleteConfirmationPending = deleteConfirmation?.kind === 'number'
+    ? deleteNumberMutation.isPending
+    : deleteConfirmation?.kind === 'agent'
+      ? deleteAgentConfigMutation.isPending
+      : deleteApiKeyMutation.isPending
   const currentNumbers = numbersQuery.data || []
   const outboundNumbers = currentNumbers
     .filter(number => number.outbound_enabled && !number.api_key_id)
@@ -466,8 +499,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       </header>
       <div className="content">
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)); setManagedNumberTags((number.tags || []).join(', ')) }} />}
-        {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => setViewingKey(key)} onManage={openEditApi} onDelete={id => { if (window.confirm('Delete this API? Its key will stop working immediately and assigned numbers will be released. Call and billing history will be retained.')) deleteApiKeyMutation.mutate(id) }} />}
-        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => { if (window.confirm(`Delete the ${agent.name} agent? Active APIs must be unassigned first.`)) deleteAgentConfigMutation.mutate(agent.id) }} />}
+        {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => setViewingKey(key)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />}
+        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
         {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={id => { setSimulationApiId(id); setSimulationSessionId(''); const key = (keysQuery.data || []).find(item => item.id === id); setSimulationCallerId(key?.assigned_numbers[0] ? `${key.assigned_numbers[0].provider}|${key.assigned_numbers[0].phone_number}` : ''); setSimulationProfileId('') }} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={id => { setSimulationProfileId(id); const profile = (simulationProfilesQuery.data || []).find(item => item.id === id); if (profile) setSimulationLiveInstructions(profile.instructions) }} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} submitting={simulateCallMutation.isPending} />}
         {page === 'Docs' && <DocsPage />}
       </div>
@@ -515,7 +548,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         </Stack>
         <Typography variant="caption">Credential mode: {managedNumber?.credential_mode || 'Vobiz integration'}</Typography>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5, justifyContent: 'space-between' }}><Button color="error" disabled={!managedNumber || deleteNumberMutation.isPending} onClick={() => { if (managedNumber && window.confirm(`Remove ${managedNumber.phone_number}? This will release the number from any API key.`)) deleteNumberMutation.mutate(managedNumber) }}>Remove number</Button><Stack direction="row" gap={1}><Button onClick={() => setManagedNumber(null)}>Cancel</Button><Button variant="contained" disabled={!managedNumber || (!managedInbound && !managedOutbound) || Number(managedStandardChannels) < 0 || Number(managedUnlimitedChannels) < 0 || Number(managedStandardChannels) + Number(managedUnlimitedChannels) < 1 || updateNumberMutation.isPending} onClick={() => managedNumber && updateNumberMutation.mutate({ number: managedNumber, inbound: managedInbound, outbound: managedOutbound, standardChannels: Number(managedStandardChannels), unlimitedChannels: Number(managedUnlimitedChannels), tags: parseTags(managedNumberTags) })}>{updateNumberMutation.isPending ? 'Saving…' : 'Save settings'}</Button></Stack></DialogActions>
+      <DialogActions sx={{ p: 2.5, justifyContent: 'space-between' }}><Button color="error" disabled={!managedNumber || deleteNumberMutation.isPending} onClick={() => managedNumber && openDeleteConfirmation({ kind: 'number', number: managedNumber })}>Remove number</Button><Stack direction="row" gap={1}><Button onClick={() => setManagedNumber(null)}>Cancel</Button><Button variant="contained" disabled={!managedNumber || (!managedInbound && !managedOutbound) || Number(managedStandardChannels) < 0 || Number(managedUnlimitedChannels) < 0 || Number(managedStandardChannels) + Number(managedUnlimitedChannels) < 1 || updateNumberMutation.isPending} onClick={() => managedNumber && updateNumberMutation.mutate({ number: managedNumber, inbound: managedInbound, outbound: managedOutbound, standardChannels: Number(managedStandardChannels), unlimitedChannels: Number(managedUnlimitedChannels), tags: parseTags(managedNumberTags) })}>{updateNumberMutation.isPending ? 'Saving…' : 'Save settings'}</Button></Stack></DialogActions>
     </Dialog>
 
     <Dialog open={assignmentOpen} onClose={() => setAssignmentOpen(false)} maxWidth="md" fullWidth>
@@ -637,6 +670,25 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <TextField autoFocus fullWidth type="number" label={apiBillingQuery.data?.billing_mode === 'prepaid' ? 'Prepaid balance (INR)' : 'Credit limit (INR)'} value={billingAdjustmentAmount} onChange={event => setBillingAdjustmentAmount(event.target.value)} inputProps={{ min: 0, step: 0.01 }} />
       </Stack></DialogContent>
       <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setBillingAdjustmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={adjustBillingMutation.isPending || !billingAdjustmentAmount || Number(billingAdjustmentAmount) < 0 || !Number.isFinite(Number(billingAdjustmentAmount))} onClick={() => { if (!viewingKey || !apiBillingQuery.data?.billing_mode) return; adjustBillingMutation.mutate({ key: viewingKey, mode: apiBillingQuery.data.billing_mode, amountMinor: Math.round(Number(billingAdjustmentAmount) * 100) }) }}>{adjustBillingMutation.isPending ? 'Saving…' : 'Save billing'}</Button></DialogActions>
+    </Dialog>
+
+    <Dialog open={Boolean(deleteConfirmation)} onClose={() => { if (!deleteConfirmationPending) { setDeleteConfirmation(null); setDeleteConfirmationText('') } }} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>Confirm deletion</DialogTitle>
+      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
+        <Alert severity="warning">
+          {deleteConfirmation?.kind === 'api'
+            ? 'This permanently removes the API key, its credentials, and phone-number assignments from Postgres. Call logs and billing ledger entries remain, but their API association will be cleared.'
+            : deleteConfirmation?.kind === 'number'
+              ? 'This removes the phone number from platform inventory and releases it from its API assignment.'
+              : 'This removes the agent from active configuration. An agent assigned to an active API cannot be deleted.'}
+        </Alert>
+        <Typography variant="body2">Type <code>{deleteConfirmationPhrase}</code> to confirm.</Typography>
+        <TextField autoFocus fullWidth label="Confirmation" value={deleteConfirmationText} onChange={event => setDeleteConfirmationText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && deleteConfirmationText === deleteConfirmationPhrase) confirmDeleteResource() }} />
+      </Stack></DialogContent>
+      <DialogActions sx={{ p: 2.5 }}>
+        <Button disabled={deleteConfirmationPending} onClick={() => { setDeleteConfirmation(null); setDeleteConfirmationText('') }}>Cancel</Button>
+        <Button color="error" variant="contained" disabled={deleteConfirmationText !== deleteConfirmationPhrase || deleteConfirmationPending} onClick={confirmDeleteResource}>{deleteConfirmationPending ? 'Deleting…' : 'Delete'}</Button>
+      </DialogActions>
     </Dialog>
 
     <Snackbar open={Boolean(toast)} autoHideDuration={5000} onClose={() => setToast('')} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}><Alert onClose={() => setToast('')} severity={toast.toLowerCase().includes('error') || toast.toLowerCase().includes('failed') || toast.toLowerCase().includes('required') ? 'error' : 'success'} variant="filled">{toast}</Alert></Snackbar>

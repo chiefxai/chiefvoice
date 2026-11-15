@@ -1202,17 +1202,17 @@ async def replace_phone_api_key_numbers(
 
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def revoke_platform_api_key(
+async def delete_platform_api_key(
     key_id: str,
     request: Request,
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
 ):
     _account_store, api_key_directory = _stores(request)
     key = next((item for item in await api_key_directory.list_all() if item.key_id == key_id), None)
-    if key is None or not await api_key_directory.revoke(key.tenant_id, key.key_id):
-        raise HTTPException(status_code=404, detail="API key not found or already revoked")
+    if key is None or not await api_key_directory.delete_permanently(key.tenant_id, key.key_id):
+        raise HTTPException(status_code=404, detail="API key not found")
     logger.info(
-        "platform_api_key_revoked",
+        "platform_api_key_deleted",
         extra={
             "actor_subject": principal.subject,
             "tenant_id": key.tenant_id,
