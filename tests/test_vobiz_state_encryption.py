@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException
 
 from chiefvoice.channels.vobiz.adapter import VobizAdapter
+from chiefvoice.observability.setup import UvicornQueryRedactionFilter
 from chiefvoice.sessions import AcceptedSession, Direction
 
 
@@ -98,3 +100,52 @@ def test_callback_state_rejects_modified_ciphertext(monkeypatch):
     with pytest.raises(HTTPException) as error:
         adapter._read_state(tampered)
     assert error.value.status_code == 404
+
+
+def test_callback_state_rejection_logs_safe_reason_without_token(monkeypatch, caplog):
+    monkeypatch.setattr("chiefvoice.channels.vobiz.adapter.settings", _settings())
+    adapter = VobizAdapter(integration_store=object())
+    token = "not-a-valid-token"
+
+    with pytest.raises(HTTPException):
+        adapter._read_state(token)
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "vobiz_callback_state_rejected"
+    )
+    assert record.reason == "encryption_invalid"
+    assert record.state_length == len(token)
+    assert token not in record.getMessage()
+
+
+def test_callback_state_rejects_non_ascii_token_safely(monkeypatch, caplog):
+    monkeypatch.setattr("chiefvoice.channels.vobiz.adapter.settings", _settings())
+    adapter = VobizAdapter(integration_store=object())
+
+    with pytest.raises(HTTPException):
+        adapter._read_state("not-ascii-🔒")
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "vobiz_callback_state_rejected"
+    )
+    assert record.reason == "encoding_invalid"
+
+
+def test_uvicorn_websocket_logs_redact_callback_query_string():
+    record = logging.LogRecord(
+        "uvicorn.error",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "WebSocket %s" 403',
+        ("127.0.0.1", "/webhooks/vobiz/media?state=secret-token"),
+        None,
+    )
+
+    assert UvicornQueryRedactionFilter().filter(record)
+    assert "secret-token" not in record.getMessage()
+    assert "/webhooks/vobiz/media" in record.getMessage()

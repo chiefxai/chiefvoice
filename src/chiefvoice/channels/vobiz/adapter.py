@@ -37,6 +37,12 @@ PIPELINE_SAMPLE_RATE = 8000
 MAX_CALL_STATE_TOKEN_LENGTH = 16_384
 
 
+class _InvalidCallState(ValueError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True, slots=True)
 class VobizInboundCall:
     provider: str
@@ -580,15 +586,31 @@ class VobizAdapter:
         return token
 
     def _read_state(self, token: str) -> dict[str, Any]:
-        if not token or len(token) > MAX_CALL_STATE_TOKEN_LENGTH:
+        def reject(reason: str) -> None:
+            logger.warning(
+                "vobiz_callback_state_rejected",
+                extra={"provider": self.provider, "reason": reason, "state_length": len(token)},
+            )
             raise HTTPException(status_code=404, detail="Not found")
+
+        if not token:
+            reject("missing")
+        if len(token) > MAX_CALL_STATE_TOKEN_LENGTH:
+            reject("too_large")
         try:
             signed_token = self._state_cipher.decrypt(token.encode("ascii")).decode("ascii")
+        except InvalidToken:
+            reject("encryption_invalid")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            reject("encoding_invalid")
+        try:
             claims = self._state.loads(signed_token, max_age=12 * 60 * 60)
-        except (InvalidToken, UnicodeDecodeError, BadSignature, SignatureExpired) as exc:
-            raise HTTPException(status_code=404, detail="Not found") from exc
+        except SignatureExpired:
+            reject("expired")
+        except BadSignature:
+            reject("signature_invalid")
         if not isinstance(claims, dict):
-            raise HTTPException(status_code=404, detail="Not found")
+            reject("payload_invalid")
         try:
             _required_state_string(claims.get("session_id"), "session_id", 128)
             _required_state_string(claims.get("tenant_id"), "tenant_id", 200)
@@ -625,7 +647,7 @@ class VobizAdapter:
                         .decode("utf-8")
                     )
                 except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise ValueError("Invalid encrypted call context") from exc
+                    raise _InvalidCallState("context_invalid") from exc
                 if not isinstance(call_context, dict):
                     raise ValueError("Invalid call context")
                 live_context = call_context.get("live_agent_context")
@@ -657,8 +679,10 @@ class VobizAdapter:
                 if not isinstance(include_live_context, bool):
                     raise ValueError("Invalid live agent context flag")
                 claims["call_context"] = call_context
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="Not found") from exc
+        except _InvalidCallState as exc:
+            reject(exc.reason)
+        except (AttributeError, TypeError, ValueError):
+            reject("claims_invalid")
         return claims
 
     @staticmethod

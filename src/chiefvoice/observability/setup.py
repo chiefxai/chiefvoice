@@ -3,6 +3,7 @@ import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, Request
 from opentelemetry import trace
@@ -24,7 +25,18 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("session_id", "tenant_id", "project_id", "channel", "provider", "event", "attempt", "error_type"):
+        for key in (
+            "session_id",
+            "tenant_id",
+            "project_id",
+            "channel",
+            "provider",
+            "event",
+            "attempt",
+            "error_type",
+            "reason",
+            "state_length",
+        ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         if record.exc_info:
@@ -32,9 +44,26 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, separators=(",", ":"))
 
 
+class UvicornQueryRedactionFilter(logging.Filter):
+    """Strip callback query strings from Uvicorn's HTTP/WebSocket log arguments."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.name.startswith("uvicorn.") or not isinstance(record.args, tuple):
+            return True
+        redacted: list[Any] = []
+        for value in record.args:
+            if isinstance(value, str) and value.startswith("/") and "?" in value:
+                parts = urlsplit(value)
+                value = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+            redacted.append(value)
+        record.args = tuple(redacted)
+        return True
+
+
 def configure_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
+    handler.addFilter(UvicornQueryRedactionFilter())
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
