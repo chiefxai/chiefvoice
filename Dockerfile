@@ -15,8 +15,11 @@ COPY scripts ./scripts
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
     && install -d /usr/share/postgresql-common/pgdg \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-      | gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg \
+    && curl --http1.1 --retry 5 --retry-all-errors --retry-delay 2 -fsSL \
+      https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /tmp/postgresql.asc \
+    && gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg \
+      < /tmp/postgresql.asc \
+    && rm /tmp/postgresql.asc \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
