@@ -40,6 +40,7 @@ class PhoneNumberRow(Base):
     agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     standard_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     unlimited_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tags_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]", server_default="[]")
     __table_args__ = (
         ForeignKeyConstraint(
             ["provider", "tenant_id"],
@@ -116,6 +117,7 @@ class SqlProviderIntegrationStore:
                     agent_id=row.agent_id,
                     standard_channels=row.standard_channels,
                     unlimited_channels=row.unlimited_channels,
+                    tags=tuple(json.loads(row.tags_json or "[]")),
                 )
                 for row in rows
             ]
@@ -147,6 +149,7 @@ class SqlProviderIntegrationStore:
                     agent_id=item.agent_id,
                     standard_channels=item.standard_channels,
                     unlimited_channels=item.unlimited_channels,
+                    tags_json=json.dumps(item.tags),
                 )
                 for item in integration.phone_numbers
             )
@@ -168,6 +171,7 @@ class SqlProviderIntegrationStore:
                 ProviderPhoneNumber(
                     p.number, p.inbound_enabled, p.outbound_enabled, p.agent_id,
                     p.standard_channels, p.unlimited_channels,
+                    tuple(json.loads(p.tags_json or "[]")),
                 )
                 for p in row.phone_numbers
             ),

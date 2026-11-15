@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
 from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
+from chiefvoice.core.tags import normalize_tags
 from chiefvoice.identity.auth import Principal, require_scope
 
 router = APIRouter(prefix="/v1/integrations", tags=["integrations"])
@@ -19,6 +20,7 @@ class PhoneNumberBody(BaseModel):
     agent_id: str | None = Field(default=None, min_length=1, max_length=128)
     standard_channels: int = Field(default=1, ge=0, le=1_000)
     unlimited_channels: int = Field(default=0, ge=0, le=1_000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def require_channel_capacity(self):
@@ -30,6 +32,11 @@ class PhoneNumberBody(BaseModel):
     @classmethod
     def normalize_number(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_labels(cls, value: list[str]) -> list[str]:
+        return list(normalize_tags(value))
 
 
 class ProviderIntegrationBody(BaseModel):
@@ -98,6 +105,7 @@ async def get_integration(
                 "agent_id": n.agent_id,
                 "standard_channels": n.standard_channels,
                 "unlimited_channels": n.unlimited_channels,
+                "tags": n.tags,
             }
             for n in phone_numbers
         ],
@@ -116,6 +124,7 @@ async def put_integration(
         ProviderPhoneNumber(
             n.number, n.inbound_enabled, n.outbound_enabled, n.agent_id,
             n.standard_channels, n.unlimited_channels,
+            tuple(n.tags),
         )
         for n in body.phone_numbers
     )

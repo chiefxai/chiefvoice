@@ -58,6 +58,7 @@ class ApiKeySummary:
     post_call_agent_enabled: bool = True
     voice_agent_id: str | None = None
     post_call_agent_id: str | None = None
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,7 @@ class ApiKeyDirectory(Protocol):
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,
         post_call_agent_id: str | None = None,
+        tags: tuple[str, ...] = (),
     ) -> tuple[str, ApiKeySummary]: ...
     async def list_for_tenant(self, tenant_id: str) -> list[ApiKeySummary]: ...
     async def list_all(self) -> list[ApiKeySummary]: ...
@@ -123,6 +125,7 @@ class ApiKeyDirectory(Protocol):
         post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
         voice_location: str | None = None, post_call_location: str | None = None,
+        tags: tuple[str, ...] = (),
     ) -> bool: ...
     async def provision_customer(
         self,
@@ -148,6 +151,7 @@ class ApiKeyDirectory(Protocol):
         voice_agent_id: str | None = None,
         post_call_agent_id: str | None = None,
         voice_plan: dict | None = None,
+        tags: tuple[str, ...] = (),
     ) -> tuple[TenantAccount, str, ApiKeySummary]: ...
 
 
@@ -160,6 +164,7 @@ class ApiKeyRow(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     secret_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    tags_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]", server_default="[]")
     created_by: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -262,6 +267,7 @@ class SqlApiKeyDirectory:
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,
         post_call_agent_id: str | None = None,
+        tags: tuple[str, ...] = (),
     ) -> tuple[str, ApiKeySummary]:
         normalized_numbers = tuple(sorted(set(assigned_numbers)))
         if len(normalized_numbers) != len(assigned_numbers) or len(
@@ -280,6 +286,7 @@ class SqlApiKeyDirectory:
             name=name,
             secret_hash=_digest(token),
             scopes_json=json.dumps(sorted(set(scopes)), separators=(",", ":")),
+            tags_json=json.dumps(tags),
             created_by=created_by,
             created_at=now,
             expires_at=expires_at,
@@ -381,6 +388,7 @@ class SqlApiKeyDirectory:
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None, post_call_agent_id: str | None = None,
         voice_location: str | None = None, post_call_location: str | None = None,
+        tags: tuple[str, ...] = (),
     ) -> bool:
         normalized = tuple(sorted(set(assigned_numbers)))
         if len(normalized) != len(assigned_numbers) or len({number for _, number in assigned_numbers}) != len(assigned_numbers):
@@ -392,6 +400,7 @@ class SqlApiKeyDirectory:
         values.update(voice_agent_enabled=voice_agent_enabled, post_call_agent_enabled=post_call_agent_enabled)
         values.update(voice_agent_id=voice_agent_id, post_call_agent_id=post_call_agent_id)
         values["name"] = name
+        values["tags_json"] = json.dumps(tags)
         if vertex_credentials_json is not None:
             values["encrypted_vertex_credentials"] = self._encrypt_credentials(vertex_credentials_json)
         async with self._sessions.begin() as session:
@@ -431,6 +440,7 @@ class SqlApiKeyDirectory:
         voice_agent_id: str | None = None,
         post_call_agent_id: str | None = None,
         voice_plan: dict | None = None,
+        tags: tuple[str, ...] = (),
     ) -> tuple[TenantAccount, str, ApiKeySummary]:
         """Atomically create a stable customer tenant and its first API credential."""
         from uuid import uuid4
@@ -452,6 +462,7 @@ class SqlApiKeyDirectory:
             name=key_name,
             secret_hash=_digest(token),
             scopes_json=json.dumps(sorted(set(scopes)), separators=(",", ":")),
+            tags_json=json.dumps(tags),
             created_by=created_by,
             created_at=now,
             expires_at=expires_at,
@@ -627,4 +638,5 @@ def _to_summary(
         post_call_agent_enabled=row.post_call_agent_enabled,
         voice_agent_id=row.voice_agent_id,
         post_call_agent_id=row.post_call_agent_id,
+        tags=tuple(json.loads(row.tags_json or "[]")),
     )

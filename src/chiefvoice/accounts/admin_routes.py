@@ -17,6 +17,7 @@ from chiefvoice.billing import BillingMode
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
 from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
 from chiefvoice.core.config import settings
+from chiefvoice.core.tags import normalize_tags
 from chiefvoice.identity.api_keys import ApiKeyDirectory, ApiKeySummary
 from chiefvoice.identity.auth import Principal, current_principal
 
@@ -106,6 +107,7 @@ class CreatePhoneApiKeyBody(BaseModel):
     prepaid_balance_minor: int = Field(default=0, ge=0, le=10**15)
     postpaid_credit_limit_minor: int = Field(default=0, ge=0, le=10**15)
     name: str = Field(default="Phone API", min_length=1, max_length=100)
+    tags: list[str] = Field(default_factory=list, max_length=20)
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
     post_call_agent_id: str | None = None
@@ -121,8 +123,14 @@ class CreatePhoneApiKeyBody(BaseModel):
             raise ValueError("Value cannot be blank")
         return value
 
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags_field(cls, value: list[str]) -> list[str]:
+        return list(normalize_tags(value))
+
 class UpdatePhoneApiKeyConfigBody(BaseModel):
     name: str = Field(default="Phone API", min_length=1, max_length=100)
+    tags: list[str] = Field(default_factory=list, max_length=20)
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
     post_call_agent_id: str | None = None
@@ -137,6 +145,11 @@ class UpdatePhoneApiKeyConfigBody(BaseModel):
         if not value:
             raise ValueError("API name cannot be blank")
         return value
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags_field(cls, value: list[str]) -> list[str]:
+        return list(normalize_tags(value))
 
 
 class AdjustApiBillingBody(BaseModel):
@@ -169,6 +182,7 @@ class AddPlatformNumbersBody(BaseModel):
     phone_numbers: list[str] = Field(min_length=1, max_length=100)
     standard_channels: int = Field(default=1, ge=0, le=1_000)
     unlimited_channels: int = Field(default=0, ge=0, le=1_000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
     auth_id: str | None = Field(default=None, max_length=200)
     auth_token: str | None = Field(default=None, max_length=2000)
 
@@ -177,6 +191,11 @@ class AddPlatformNumbersBody(BaseModel):
         if self.standard_channels + self.unlimited_channels < 1:
             raise ValueError("At least one standard or unlimited channel is required")
         return self
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags_field(cls, value: list[str]) -> list[str]:
+        return list(normalize_tags(value))
 
     @field_validator("phone_numbers")
     @classmethod
@@ -197,12 +216,18 @@ class UpdatePlatformNumberBody(BaseModel):
     outbound_enabled: bool
     standard_channels: int = Field(ge=0, le=1_000)
     unlimited_channels: int = Field(ge=0, le=1_000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def require_channel_capacity(self):
         if self.standard_channels + self.unlimited_channels < 1:
             raise ValueError("At least one standard or unlimited channel is required")
         return self
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags_field(cls, value: list[str]) -> list[str]:
+        return list(normalize_tags(value))
 
 
 def _vobiz_credentials(credential_mode: str, auth_id: str | None, auth_token: str | None) -> dict[str, str]:
@@ -299,6 +324,12 @@ class AgentProviderConfigBody(BaseModel):
     location: str = Field(default="us-central1", min_length=1, max_length=64)
     cost_per_minute_minor: int = Field(default=0, ge=0, le=1_000_000_000)
     currency: Literal["INR"] = "INR"
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags_field(cls, value: list[str]) -> list[str]:
+        return list(normalize_tags(value))
 
     @field_validator("name", "model", "location")
     @classmethod
@@ -333,6 +364,7 @@ def _agent_config_json(agent: AgentConfiguration) -> dict:
         "name": agent.name, "kind": agent.kind,
         "provider": agent.provider, "model": agent.model, "location": agent.location,
         "cost_per_minute_minor": agent.cost_per_minute_minor, "currency": agent.currency,
+        "tags": agent.tags,
         "enabled": agent.enabled, "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
     }
@@ -352,6 +384,7 @@ async def create_agent_config(body: AgentProviderConfigBody, request: Request, p
         agent_id=uuid4().hex, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(),
         kind=body.kind, provider=body.provider, model=body.model.strip(), location=body.location.strip(),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
+        tags=tuple(body.tags),
         enabled=True, created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
     )
     try:
@@ -372,6 +405,7 @@ async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, requ
         agent_id=agent_id, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(), kind=body.kind,
         provider=body.provider, model=body.model.strip(), location=body.location.strip(),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
+        tags=tuple(body.tags),
         enabled=True, created_at=current.created_at, updated_at=datetime.now(UTC),
     )
     try:
@@ -410,6 +444,7 @@ def _key_json(key: ApiKeySummary) -> dict:
     return {
         "id": key.key_id,
         "name": key.name,
+        "tags": key.tags,
         "key_prefix": key.key_prefix,
         "scopes": key.scopes,
         "created_by": key.created_by,
@@ -547,6 +582,7 @@ async def list_platform_phone_numbers(
                 "outbound_enabled": phone.outbound_enabled,
                 "standard_channels": phone.standard_channels,
                 "unlimited_channels": phone.unlimited_channels,
+                "tags": phone.tags,
                 "agent_id": phone.agent_id,
                 "api_key_id": owner.key_id if owner else None,
                 "api_key_name": owner.name if owner else None,
@@ -584,6 +620,7 @@ async def add_platform_phone_numbers(
                 number,
                 standard_channels=body.standard_channels,
                 unlimited_channels=body.unlimited_channels,
+                tags=tuple(body.tags),
             )
             for number in body.phone_numbers
         ),
@@ -611,7 +648,8 @@ async def add_platform_phone_numbers(
     return {"provider": "vobiz", "owner": "platform", "credential_mode": body.credential_mode,
             "phone_numbers": body.phone_numbers,
             "standard_channels": body.standard_channels,
-            "unlimited_channels": body.unlimited_channels}
+            "unlimited_channels": body.unlimited_channels,
+            "tags": body.tags}
 
 
 @router.put("/phone-numbers/{provider}/{phone_number:path}")
@@ -633,7 +671,7 @@ async def update_platform_phone_number(
     numbers = [
         ProviderPhoneNumber(
             item.number, body.inbound_enabled, body.outbound_enabled, item.agent_id,
-            body.standard_channels, body.unlimited_channels,
+            body.standard_channels, body.unlimited_channels, tuple(body.tags),
         )
         if item.number == phone_number else item
         for item in integration.phone_numbers
@@ -647,7 +685,7 @@ async def update_platform_phone_number(
     integration_settings = {key: value for key, value in integration_settings.items() if value is not None}
     await store.save(ProviderIntegration(provider, customer_id, integration.credentials, integration_settings, tuple(numbers)))
     await _sync_api_channel_capacity(request, (provider, phone_number))
-    return {"status": "updated", "phone_number": phone_number}
+    return {"status": "updated", "phone_number": phone_number, "tags": body.tags}
 
 
 @router.delete("/phone-numbers/{provider}/{phone_number:path}", status_code=status.HTTP_204_NO_CONTENT)
@@ -867,6 +905,7 @@ async def issue_phone_api_key(
             post_call_agent_enabled=post_call_agent is not None,
             voice_agent_id=voice_agent.agent_id if voice_agent else None,
             post_call_agent_id=post_call_agent.agent_id if post_call_agent else None,
+            tags=tuple(body.tags),
             voice_plan={
                 "voice_enabled": voice_agent is not None,
                 "currency": "INR",
@@ -961,6 +1000,7 @@ async def update_phone_api_key_config(
             post_call_agent_enabled=post_call_agent is not None,
             voice_agent_id=voice_agent.agent_id if voice_agent else None,
             post_call_agent_id=post_call_agent.agent_id if post_call_agent else None,
+            tags=tuple(body.tags),
         )
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="A selected phone number is already assigned to another API") from exc

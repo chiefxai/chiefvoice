@@ -10,6 +10,7 @@ class ProviderPhoneNumber:
     agent_id: str | None = None
     standard_channels: int = 1
     unlimited_channels: int = 0
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,7 @@ class RegisteredPhoneNumber:
     agent_id: str | None = None
     standard_channels: int = 1
     unlimited_channels: int = 0
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

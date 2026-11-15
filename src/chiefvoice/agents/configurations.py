@@ -21,3 +21,4 @@ class AgentConfiguration:
     enabled: bool
     created_at: datetime
     updated_at: datetime
+    tags: tuple[str, ...] = ()
