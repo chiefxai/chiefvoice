@@ -547,6 +547,7 @@ class VobizAdapter:
                 "started_at": started_at.isoformat(),
             }
             call_context = {
+                "live_agent_instructions": session.live_agent_instructions,
                 "live_agent_context": session.live_agent_context,
                 "post_call_context": session.post_call_context,
                 "post_call_output_schema": session.post_call_output_schema,
@@ -638,6 +639,9 @@ class VobizAdapter:
                 include_live_context = call_context.get("include_live_agent_context", False)
                 if live_context is not None and not isinstance(live_context, dict):
                     raise ValueError("Invalid live agent context")
+                live_instructions = call_context.get("live_agent_instructions")
+                if live_instructions is not None and not isinstance(live_instructions, str):
+                    raise ValueError("Invalid live agent instructions")
                 if post_context is not None and not isinstance(post_context, str):
                     raise ValueError("Invalid post-call context")
                 if output_schema is not None and not isinstance(output_schema, dict):
@@ -673,6 +677,7 @@ class VobizAdapter:
             provider_call_id=claims.get("provider_call_id"),
             tenant_id=claims["tenant_id"],
             bot_config_id=claims.get("bot_config_id"),
+            live_agent_instructions=claims.get("call_context", {}).get("live_agent_instructions"),
             session_id=claims["session_id"],
             recording_allowed=claims.get("recording_allowed") is True,
             started_at=_parse_state_datetime(claims["started_at"]),

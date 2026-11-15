@@ -20,6 +20,7 @@ class LiveAgentBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str | None = Field(default=None, max_length=128)
+    instructions: str = Field(default="", max_length=6_000)
     context: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -86,6 +87,7 @@ class OutboundCallBody(BaseModel):
                 raise ValueError("live_agent.agent_id and bot_config_id must match")
         live_context: dict[str, Any] = self.live_agent.context if self.live_agent else {}
         context_payload = {
+            "live_agent_instructions": self.live_agent.instructions if self.live_agent else "",
             "live_agent_context": live_context,
             "post_call_context": self.post_call.context if self.post_call else None,
             "post_call_output_schema": (
@@ -181,6 +183,7 @@ async def start_outbound_call(
                     if body.live_agent and body.live_agent.agent_id
                     else body.bot_config_id
                 ),
+                live_agent_instructions=body.live_agent.instructions if body.live_agent else None,
                 live_agent_context=body.live_agent.context if body.live_agent else None,
                 post_call_context=body.post_call.context if body.post_call else None,
                 post_call_output_schema=(

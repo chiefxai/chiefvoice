@@ -17,10 +17,11 @@ import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded'
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded'
 import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded'
+import ScienceRoundedIcon from '@mui/icons-material/ScienceRounded'
 import LoginPage from './LoginPage'
 import { clearLoginCallbackFromUrl, currentUser, finishLogin, login, logout } from './auth'
 
-type Page = 'Numbers' | 'Agents' | 'API' | 'Docs'
+type Page = 'Numbers' | 'Agents' | 'API' | 'Simulation' | 'Docs'
 type RegisteredNumber = {
   provider: string
   phone_number: string
@@ -81,6 +82,7 @@ type ApiCallLog = {
   post_call_agent_enabled?: boolean
   webhook_status?: string | null
 }
+type VoiceAgentProfile = { id: string; name: string; language: string; voice: string; speaking_style: string; instructions: string }
 type ApiBillingUsage = {
   configured: boolean; billing_mode?: 'prepaid' | 'postpaid'; currency?: string; rate_per_minute_minor?: number
   calls?: number; billable_seconds?: number; charges_minor?: number; active_reservations?: number
@@ -109,6 +111,8 @@ const api = {
   apiKeys: () => http.get<{ items: PlatformApiKey[] }>('/v1/admin/customers/api-keys').then(r => r.data.items),
   agentConfigs: () => http.get<{ items: AgentConfiguration[] }>('/v1/admin/customers/agent-configs').then(r => r.data.items),
   apiCalls: (id: string) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`).then(r => r.data),
+  voiceProfiles: (id: string) => http.get<{ items: VoiceAgentProfile[] }>(`/v1/admin/customers/api-keys/${id}/voice-profiles`).then(r => r.data.items),
+  simulateCall: (id: string, data: Record<string, unknown>) => http.post<{ session_id: string; status: string }>(`/v1/admin/customers/api-keys/${id}/simulate`, data, { headers: { 'Idempotency-Key': crypto.randomUUID() } }).then(r => r.data),
   apiBilling: (id: string) => http.get<ApiBillingUsage>(`/v1/admin/customers/api-keys/${id}/billing`).then(r => r.data),
   adjustApiBilling: (id: string, mode: 'prepaid' | 'postpaid', amountMinor: number) => http.put(`/v1/admin/customers/api-keys/${id}/billing`, mode === 'prepaid' ? { prepaid_balance_minor: amountMinor } : { postpaid_credit_limit_minor: amountMinor }),
   customers: () => http.get<{ items: Customer[] }>('/v1/admin/customers').then(r => r.data.items),
@@ -173,6 +177,20 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [managedNumberTags, setManagedNumberTags] = useState('')
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
   const [viewingKey, setViewingKey] = useState<PlatformApiKey | null>(null)
+  const [simulationApiId, setSimulationApiId] = useState('')
+  const [simulationDestination, setSimulationDestination] = useState('')
+  const [simulationCallerId, setSimulationCallerId] = useState('')
+  const [simulationProfileId, setSimulationProfileId] = useState('')
+  const [simulationLiveInstructions, setSimulationLiveInstructions] = useState('')
+  const [simulationLiveContext, setSimulationLiveContext] = useState('{}')
+  const [simulationPostCallContext, setSimulationPostCallContext] = useState('Summarize the call and extract the requested fields. Use unknown when information is not stated; do not guess.')
+  const [simulationOutputSchema, setSimulationOutputSchema] = useState('{\n  "type": "object",\n  "properties": {\n    "summary": { "type": "string" },\n    "outcome": { "type": "string", "enum": ["completed", "follow_up_needed", "unknown"] }\n  },\n  "required": ["summary", "outcome"]\n}')
+  const [simulationTools, setSimulationTools] = useState<string[]>([])
+  const [simulationTimeZone, setSimulationTimeZone] = useState('Asia/Kolkata')
+  const [simulationTimeFormat, setSimulationTimeFormat] = useState('%Y-%m-%d %H:%M:%S %z')
+  const [simulationIncludeLiveContext, setSimulationIncludeLiveContext] = useState(false)
+  const [simulationRecording, setSimulationRecording] = useState(true)
+  const [simulationSessionId, setSimulationSessionId] = useState('')
   const [billingAdjustmentOpen, setBillingAdjustmentOpen] = useState(false)
   const [billingAdjustmentAmount, setBillingAdjustmentAmount] = useState('')
   const [oneTimeKey, setOneTimeKey] = useState<IssuedApiKey | null>(null)
@@ -222,8 +240,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     return () => window.removeEventListener('chiefvoice-auth-expired', handleUnauthorized)
   }, [queryClient])
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
-  const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && (page === 'API' || page === 'Agents'), retry: false })
+  const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && (page === 'API' || page === 'Agents' || page === 'Simulation'), retry: false })
   const agentsQuery = useQuery({ queryKey: ['platform-agent-configs'], queryFn: api.agentConfigs, enabled: connected && (page === 'API' || page === 'Agents'), retry: false })
+  const simulationProfilesQuery = useQuery({ queryKey: ['simulation-voice-profiles', simulationApiId], queryFn: () => api.voiceProfiles(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
+  const simulationCallsQuery = useQuery({ queryKey: ['simulation-call-logs', simulationApiId], queryFn: () => api.apiCalls(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false, refetchInterval: simulationSessionId ? 3000 : false })
   const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', viewingKey?.id], queryFn: () => api.apiCalls(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', viewingKey?.id], queryFn: () => api.apiBilling(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 10000 : false })
   const issueMutation = useMutation({
@@ -279,6 +299,15 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     },
     onError: error => setToast(errorText(error)),
   })
+  const simulateCallMutation = useMutation({
+    mutationFn: ({ keyId, data }: { keyId: string; data: Record<string, unknown> }) => api.simulateCall(keyId, data),
+    onSuccess: result => {
+      setSimulationSessionId(result.session_id)
+      void queryClient.invalidateQueries({ queryKey: ['simulation-call-logs', simulationApiId] })
+      setToast(`Simulation call started · ${result.session_id}`)
+    },
+    onError: error => setToast(errorText(error)),
+  })
   const addNumbersMutation = useMutation({
     mutationFn: api.addNumbers,
     onSuccess: () => {
@@ -316,6 +345,35 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (!Number.isFinite(amount) || amount <= 0) { setToast('Enter a positive INR starting balance or credit limit.'); return }
     issueMutation.mutate({ customerName: apiCustomerName.trim(), billingMode: apiBillingMode, billingAmountMinor: Math.round(amount * 100), name: apiName.trim(), tags: parseTags(apiTags), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim() })
   }
+  const startSimulation = () => {
+    const key = (keysQuery.data || []).find(item => item.id === simulationApiId)
+    if (!key || key.revoked_at) { setToast('Select an active API first.'); return }
+    if (!simulationDestination.trim()) { setToast('Enter the destination phone number.'); return }
+    if (!simulationCallerId) { setToast('Choose an assigned caller ID.'); return }
+    if (!key.voice_agent_enabled) { setToast('This API has no calling agent enabled.'); return }
+    let liveContext: Record<string, unknown>
+    let outputSchema: Record<string, unknown>
+    try {
+      liveContext = JSON.parse(simulationLiveContext || '{}')
+      if (!liveContext || Array.isArray(liveContext) || typeof liveContext !== 'object') throw new Error('Live-call context must be a JSON object.')
+      outputSchema = JSON.parse(simulationOutputSchema)
+      if (!outputSchema || Array.isArray(outputSchema) || typeof outputSchema !== 'object') throw new Error('Output schema must be a JSON object.')
+    } catch (error) { setToast(error instanceof Error ? error.message : 'Check the JSON fields.'); return }
+    const [provider] = simulationCallerId.split('|')
+    const data: Record<string, unknown> = {
+      provider, channel: 'phone', destination: simulationDestination.trim(), caller_id: simulationCallerId.split('|')[1],
+      live_agent: { agent_id: simulationProfileId || null, instructions: simulationLiveInstructions, context: liveContext },
+      recording_allowed: simulationRecording,
+    }
+    if (key.post_call_agent_enabled) data.post_call = {
+      context: simulationPostCallContext.trim(), output_schema: outputSchema, tools: simulationTools,
+      time_zone: simulationTimeZone, time_format: simulationTimeFormat,
+      include_live_agent_context: simulationIncludeLiveContext,
+    }
+    setSimulationSessionId('')
+    simulateCallMutation.mutate({ keyId: key.id, data })
+  }
+  const simulationCall = simulationCallsQuery.data?.items.find(item => item.session_id === simulationSessionId)
   const handleCreateNumberSelection = (value: string[] | string) => {
     const values = typeof value === 'string' ? value.split(',') : value
     setSelectedNumbers(values)
@@ -358,7 +416,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setAuthError('')
     void queryClient.clear()
   }
-  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'Agents', 'API', 'Docs'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { setPage(item); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : item === 'Agents' ? <AutoAwesomeRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : <ContentCopyRoundedIcon />}>{item}</Button>)}</div></>
+  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'Agents', 'API', 'Simulation', 'Docs'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { setPage(item); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : item === 'Agents' ? <AutoAwesomeRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : item === 'Simulation' ? <ScienceRoundedIcon /> : <ContentCopyRoundedIcon />}>{item}</Button>)}</div></>
 
   if (!authReady || !connected) {
     return <LoginPage loading={!authReady} signingIn={signingIn} error={authError} onSignIn={() => { void connect() }} />
@@ -386,6 +444,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)); setManagedNumberTags((number.tags || []).join(', ')) }} />}
         {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => setViewingKey(key)} onManage={openEditApi} onRevoke={id => { if (window.confirm('Revoke this API key? Requests using it will stop working immediately.')) revokeMutation.mutate(id) }} />}
         {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => { if (window.confirm(`Delete the ${agent.name} agent? Active APIs must be unassigned first.`)) deleteAgentConfigMutation.mutate(agent.id) }} />}
+        {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={id => { setSimulationApiId(id); setSimulationSessionId(''); const key = (keysQuery.data || []).find(item => item.id === id); setSimulationCallerId(key?.assigned_numbers[0] ? `${key.assigned_numbers[0].provider}|${key.assigned_numbers[0].phone_number}` : ''); setSimulationProfileId('') }} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={id => { setSimulationProfileId(id); const profile = (simulationProfilesQuery.data || []).find(item => item.id === id); if (profile) setSimulationLiveInstructions(profile.instructions) }} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} submitting={simulateCallMutation.isPending} />}
         {page === 'Docs' && <DocsPage />}
       </div>
     </main>
@@ -585,6 +644,68 @@ function AgentsPage({ agents, loading, error, onEdit, onCreate, onDelete }: { ag
   </>
 }
 
+function SimulationPage(props: {
+  keys: PlatformApiKey[]; loading: boolean; error: unknown; selectedApiId: string; onSelectApi: (id: string) => void
+  destination: string; onDestinationChange: (value: string) => void; callerId: string; onCallerIdChange: (value: string) => void
+  profiles: VoiceAgentProfile[]; profilesLoading: boolean; profileId: string; onProfileChange: (value: string) => void
+  liveInstructions: string; onLiveInstructionsChange: (value: string) => void; liveContext: string; onLiveContextChange: (value: string) => void
+  postCallContext: string; onPostCallContextChange: (value: string) => void; outputSchema: string; onOutputSchemaChange: (value: string) => void
+  tools: string[]; onToolsChange: (value: string[]) => void; timeZone: string; onTimeZoneChange: (value: string) => void
+  timeFormat: string; onTimeFormatChange: (value: string) => void; includeLiveContext: boolean; onIncludeLiveContextChange: (value: boolean) => void
+  recording: boolean; onRecordingChange: (value: boolean) => void; call?: ApiCallLog; callLoading: boolean
+  onStart: () => void; submitting: boolean
+}) {
+  const selected = props.keys.find(key => key.id === props.selectedApiId)
+  const assignedNumbers = selected?.assigned_numbers || []
+  return <>
+    <PageIntro eyebrow="DEVELOPER TESTING" title="Simulation" subtitle="Place a real test call through a selected API and inspect its post-call result." />
+    <Alert severity="warning" sx={{ mt: 2 }}>This places a real outbound call. The selected API’s billing plan, agent costs, and recording policy apply.</Alert>
+    <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
+      {props.loading ? <CircularProgress size={24} /> : props.error ? <Alert severity="error">{errorText(props.error)}</Alert> : !props.keys.length ? <div className="empty-state">Create an API and assign a phone number before starting a simulation.</div> : <Stack gap={2.5}>
+        <Typography variant="h6" sx={{ fontWeight: 800 }}>Call setup</Typography>
+        <FormControl fullWidth><InputLabel id="simulation-api-label">API customer</InputLabel><Select labelId="simulation-api-label" label="API customer" value={props.selectedApiId} onChange={event => props.onSelectApi(event.target.value)}>
+          {props.keys.filter(key => !key.revoked_at).map(key => <MenuItem key={key.id} value={key.id}>{key.customer_name} · {key.name} · {key.key_prefix}</MenuItem>)}
+        </Select></FormControl>
+        {selected && <Alert severity="info">Calling model: <b>{selected.voice_model || 'Not configured'}</b> · Post-call model: <b>{selected.post_call_agent_enabled ? selected.post_call_model || 'Not configured' : 'disabled'}</b>. This test uses this API’s credentials, assigned phone number, and customer billing plan.</Alert>}
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+          <TextField fullWidth label="Destination phone number" value={props.destination} onChange={event => props.onDestinationChange(event.target.value)} placeholder="+919876543210" />
+          <FormControl fullWidth disabled={!assignedNumbers.length}><InputLabel id="simulation-caller-label">Assigned caller ID</InputLabel><Select labelId="simulation-caller-label" label="Assigned caller ID" value={props.callerId} onChange={event => props.onCallerIdChange(event.target.value)}>{assignedNumbers.map(number => <MenuItem key={`${number.provider}|${number.phone_number}`} value={`${number.provider}|${number.phone_number}`}>{number.phone_number} · {number.provider}</MenuItem>)}</Select></FormControl>
+        </Stack>
+        {!assignedNumbers.length && selected && <Alert severity="error">This API has no assigned phone number. Assign a number in API settings first.</Alert>}
+        <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Live-call agent</Typography>
+        <FormControl fullWidth disabled={!selected}><InputLabel id="simulation-profile-label">Agent profile (optional)</InputLabel><Select labelId="simulation-profile-label" label="Agent profile (optional)" value={props.profileId} onChange={event => props.onProfileChange(event.target.value)}><MenuItem value="">API default voice</MenuItem>{props.profiles.map(profile => <MenuItem key={profile.id} value={profile.id}>{profile.name} · {profile.language} · {profile.voice}</MenuItem>)}</Select></FormControl>
+        {props.profilesLoading && <Typography variant="caption" color="text.secondary">Loading profiles owned by this API customer…</Typography>}
+        <TextField fullWidth multiline minRows={4} label="Live-call prompt / instructions" value={props.liveInstructions} onChange={event => props.onLiveInstructionsChange(event.target.value)} placeholder="Tell the caller who the agent is, the goal of the call, and how it should handle questions." helperText="This is sent as system instructions for this test call only." />
+        <TextField fullWidth multiline minRows={3} label="Live-call context (JSON object)" value={props.liveContext} onChange={event => props.onLiveContextChange(event.target.value)} helperText="Per-call facts for personalization. Instructions belong in the prompt above." />
+        <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Post-call agent</Typography>
+        {!selected?.post_call_agent_enabled ? <Alert severity="info">Post-call analysis is disabled for this API. Enable a post-call agent in API settings to test extraction.</Alert> : <>
+          <TextField fullWidth multiline minRows={3} label="Post-call task / prompt" value={props.postCallContext} onChange={event => props.onPostCallContextChange(event.target.value)} />
+          <TextField fullWidth multiline minRows={8} label="Expected output schema (JSON)" value={props.outputSchema} onChange={event => props.onOutputSchemaChange(event.target.value)} helperText="The result is validated against this schema before delivery." />
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+            <TextField fullWidth label="Time zone (IANA)" value={props.timeZone} onChange={event => props.onTimeZoneChange(event.target.value)} placeholder="Asia/Kolkata" />
+            <TextField fullWidth label="Time format (strftime; include %z)" value={props.timeFormat} onChange={event => props.onTimeFormatChange(event.target.value)} />
+          </Stack>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+            <Chip clickable color={props.tools.includes('calculator') ? 'primary' : 'default'} variant={props.tools.includes('calculator') ? 'filled' : 'outlined'} label="Calculator tool" onClick={() => props.onToolsChange(props.tools.includes('calculator') ? props.tools.filter(tool => tool !== 'calculator') : [...props.tools, 'calculator'])} />
+            <Chip clickable color={props.tools.includes('time') ? 'primary' : 'default'} variant={props.tools.includes('time') ? 'filled' : 'outlined'} label="Time tool" onClick={() => props.onToolsChange(props.tools.includes('time') ? props.tools.filter(tool => tool !== 'time') : [...props.tools, 'time'])} />
+          </Stack>
+          <FormControl><Stack direction="row" alignItems="center" gap={1}><Checkbox checked={props.includeLiveContext} onChange={event => props.onIncludeLiveContextChange(event.target.checked)} /><Typography variant="body2">Include the live-call context in post-call analysis</Typography></Stack></FormControl>
+        </>}
+        <FormControl><Stack direction="row" alignItems="center" gap={1}><Checkbox checked={props.recording} onChange={event => props.onRecordingChange(event.target.checked)} /><Typography variant="body2">Record this test call (subject to the API billing plan)</Typography></Stack></FormControl>
+        <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={props.onStart} disabled={!selected || !selected.voice_agent_enabled || !props.callerId || !props.destination.trim() || props.submitting}>{props.submitting ? 'Starting call…' : 'Start test call'}</Button>
+      </Stack>}
+    </Card>
+    {props.call && <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
+      <Stack gap={1.5}><Stack direction="row" alignItems="center" gap={1}><Typography variant="h6" sx={{ fontWeight: 800 }}>Simulation result</Typography><StatusChip enabled={props.call.status === 'completed'} label={props.call.status} />{props.callLoading && <CircularProgress size={16} />}</Stack>
+        <Typography variant="body2">Session <code>{props.call.session_id}</code> · {props.call.caller} → {props.call.callee}</Typography>
+        <Stack direction="row" gap={1} alignItems="center"><Typography variant="body2">Post-call</Typography>{props.call.post_call_status ? <StatusChip enabled={props.call.post_call_status === 'completed'} label={props.call.post_call_status} /> : props.call.post_call_agent_enabled === false ? <StatusChip enabled={false} label="disabled" /> : <StatusChip enabled={false} label="waiting" />}</Stack>
+        {props.call.post_call_result && <><Typography variant="subtitle2">Validated extraction</Typography><pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', padding: 16, borderRadius: 10, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(props.call.post_call_result, null, 2)}</pre></>}
+        {props.call.end_reason && <Alert severity={props.call.status === 'completed' ? 'info' : 'error'}>Call ended: {props.call.end_reason}</Alert>}
+      </Stack>
+    </Card>}
+  </>
+}
+
 function ConnectPrompt({ onConnect }: { onConnect: () => void }) { return <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>Sign in to manage the platform</b><div style={{ fontSize: 12, marginTop: 6 }}>Use your allowlisted platform administrator identity.</div><Button sx={{ mt: 1.5 }} variant="contained" onClick={onConnect}>Sign in with OIDC</Button></div> }
 function UsageCard({ label, value }: { label: string; value: string }) { return <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 150 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography sx={{ fontWeight: 800, mt: 0.4 }}>{value}</Typography></Card> }
 function formatMoney(amountMinor: number, currency: string) { return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amountMinor / 100) }
@@ -602,6 +723,7 @@ function DocsPage() {
     "caller_id": "+15557654321",
     "live_agent": {
       "agent_id": "agent-profile-id",
+      "instructions": "Confirm the appointment politely. Do not make up availability.",
       "context": {"patient_name": "Avery", "appointment": "Tuesday 10:30"}
     },
     "post_call": {
@@ -624,7 +746,7 @@ function DocsPage() {
   return <><PageIntro eyebrow="DEVELOPER GUIDE" title="API documentation" subtitle="Start a call, check its progress, and receive structured post-call results." />
     <Stack gap={2} sx={{ mt: 3 }}>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Authentication and phone numbers</Typography><Typography sx={{ mt: 1 }}>Use the full API key shown once when the API was created. Send it as a Bearer token. It can only call from phone numbers assigned to that API. If you assigned multiple numbers for a provider, include <code>caller_id</code>.</Typography><Typography sx={{ mt: 1 }}>Create the API key in the API page. Credentials and phone number assignments are editable from the API’s detail view.</Typography></Card>
-      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Start an outbound call</Typography><Typography sx={{ mt: 1, mb: 1.5 }}>The call request returns an accepted session ID quickly; it does not hold the HTTP connection open while the conversation runs.</Typography><TextField value={callBody} fullWidth multiline minRows={20} InputProps={{ readOnly: true }} /></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Start an outbound call</Typography><Typography sx={{ mt: 1, mb: 1.5 }}>The call request returns an accepted session ID quickly; it does not hold the HTTP connection open while the conversation runs. Use the Simulation page to run the same flow from the console with an API, prompts, and extraction schema.</Typography><TextField value={callBody} fullWidth multiline minRows={21} InputProps={{ readOnly: true }} /></Card>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Check call status and results</Typography><Typography sx={{ mt: 1 }}>Poll <code>GET /v1/calls/{'{session_id}'}</code> for lifecycle status and <code>GET /v1/calls/{'{session_id}'}/post-call</code> for analysis status and result. Post-call processing starts after the call finishes. The API view refreshes its call log automatically while open.</Typography><TextField value={`curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID" \\\n  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`} fullWidth multiline minRows={2} sx={{ mt: 1.5 }} InputProps={{ readOnly: true }} /></Card>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Context, output schema, and tools</Typography><Typography sx={{ mt: 1 }}>Keep live conversation context in <code>live_agent.context</code>. Put extraction instructions and the JSON output schema in <code>post_call</code>. The schema is validated with strict types before the result is stored or delivered. Supported post-call tools are <code>calculator</code> and <code>time</code>; when using the time tool, set an IANA timezone and a format containing <code>%z</code>.</Typography><Typography sx={{ mt: 1 }}>Use <code>include_live_agent_context</code> only when post-call extraction needs the live context too. Treat supplied context as reference data and provide an “unknown” option for facts the agent cannot establish.</Typography></Card>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Webhooks and polling</Typography><Typography sx={{ mt: 1 }}>Polling is available for call and post-call status. If a post-call webhook is configured, the platform sends a signed callback when analysis is ready. The recipient should deduplicate deliveries by event ID because failed delivery attempts are retried.</Typography></Card>

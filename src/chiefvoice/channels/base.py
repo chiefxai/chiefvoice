@@ -20,6 +20,7 @@ class InboundCall(Protocol):
     callee: str | None
     provider_call_id: str | None
     bot_config_id: str | None
+    live_agent_instructions: str | None
 
 
 class OutboundCall(Protocol):

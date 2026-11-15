@@ -102,6 +102,13 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     model=model, voice=voice, language=language_tag
                 )
 
+        if session.live_agent_instructions and session.live_agent_instructions.strip():
+            system_instruction = (
+                f"{system_instruction.strip()}\n\n"
+                "Additional instructions for this call:\n"
+                f"{session.live_agent_instructions.strip()}"
+            )
+
         project_id = self.project_id
         credentials_json = self.credentials_json
         credentials_path = self.credentials_path

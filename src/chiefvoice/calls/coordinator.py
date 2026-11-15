@@ -38,6 +38,7 @@ class OutboundCallCommand:
     api_key_id: str | None = None
     caller_id: str | None = None
     bot_config_id: str | None = None
+    live_agent_instructions: str | None = None
     live_agent_context: dict[str, Any] | None = None
     post_call_context: str | None = None
     post_call_output_schema: dict[str, Any] | None = None
@@ -113,6 +114,7 @@ class CallCoordinator:
             tenant_id=command.tenant_id,
             api_key_id=command.api_key_id,
             bot_config_id=command.bot_config_id,
+            live_agent_instructions=command.live_agent_instructions,
             live_agent_context=command.live_agent_context,
             post_call_context=command.post_call_context,
             post_call_output_schema=command.post_call_output_schema,
@@ -130,6 +132,7 @@ class CallCoordinator:
                 "destination": command.destination,
                 "caller_id": command.caller_id,
                 "bot_config_id": command.bot_config_id,
+                "live_agent_instructions": command.live_agent_instructions,
                 "live_agent_context": command.live_agent_context,
                 "post_call_context": command.post_call_context,
                 "post_call_output_schema": command.post_call_output_schema,
@@ -191,6 +194,7 @@ class CallCoordinator:
             api_key_id=command.api_key_id,
             caller_id=command.caller_id,
             bot_config_id=command.bot_config_id,
+            live_agent_instructions=command.live_agent_instructions,
             live_agent_context=command.live_agent_context,
             post_call_context=command.post_call_context,
             post_call_output_schema=command.post_call_output_schema,
@@ -583,6 +587,7 @@ class _OutboundCallData:
     destination: str
     caller_id: str | None
     bot_config_id: str | None
+    live_agent_instructions: str | None
     live_agent_context: dict[str, Any] | None
     post_call_context: str | None
     post_call_output_schema: dict[str, Any] | None

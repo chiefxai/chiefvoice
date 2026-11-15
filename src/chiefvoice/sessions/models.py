@@ -21,6 +21,7 @@ class AcceptedSession:
     tenant_id: str | None = None
     api_key_id: str | None = None
     bot_config_id: str | None = None
+    live_agent_instructions: str | None = None
     live_agent_context: dict[str, Any] | None = None
     post_call_context: str | None = None
     post_call_output_schema: dict[str, Any] | None = None

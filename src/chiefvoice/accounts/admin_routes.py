@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Security, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 
@@ -16,10 +16,12 @@ from chiefvoice.agents.configurations import AgentConfiguration
 from chiefvoice.billing import BillingMode
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
 from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
+from chiefvoice.calls.routes import OutboundCallBody, get_call_coordinator
 from chiefvoice.core.config import settings
 from chiefvoice.core.tags import normalize_tags
 from chiefvoice.identity.api_keys import ApiKeyDirectory, ApiKeySummary
 from chiefvoice.identity.auth import Principal, current_principal
+from chiefvoice.observability.setup import call_start_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin/customers", tags=["platform administration"])
@@ -792,6 +794,86 @@ async def list_platform_api_calls(
             call["post_call_result"] = post_call["result"] if post_call else None
             call["webhook_status"] = post_call["webhook_status"] if post_call else None
     return result
+
+
+@router.get("/api-keys/{key_id}/voice-profiles")
+async def list_api_voice_profiles(
+    key_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
+):
+    del principal
+    _, api_keys = _stores(request)
+    key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None)
+    if key is None or key.revoked_at is not None:
+        raise HTTPException(status_code=404, detail="Active API key not found")
+    directory = getattr(request.app.state, "agent_profile_directory", None)
+    if directory is None:
+        return {"items": []}
+    profiles = await directory.list_for_tenant(key.tenant_id)
+    return {"items": [
+        {"id": profile.agent_id, "name": profile.name, "language": profile.language,
+         "voice": profile.voice, "speaking_style": profile.speaking_style.value,
+         "instructions": profile.instructions}
+        for profile in profiles
+    ]}
+
+
+@router.post("/api-keys/{key_id}/simulate", status_code=status.HTTP_202_ACCEPTED)
+async def simulate_api_call(
+    key_id: str,
+    body: OutboundCallBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    from chiefvoice.calls.coordinator import OutboundCallCommand
+
+    _ = principal
+    _, api_keys = _stores(request)
+    key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None)
+    if key is None or key.revoked_at is not None or (key.expires_at and key.expires_at <= datetime.now(UTC)):
+        raise HTTPException(status_code=404, detail="Active API key not found")
+    if "calls:write" not in key.scopes:
+        raise HTTPException(status_code=403, detail="Selected API does not have calls:write scope")
+    if body.channel != "phone":
+        raise HTTPException(status_code=422, detail="Simulation currently supports phone calls")
+    assigned = [number for provider, number in key.assigned_numbers if provider == body.provider]
+    if not assigned:
+        raise HTTPException(status_code=403, detail="Selected API has no number assigned for this provider")
+    caller_id = body.caller_id
+    if caller_id is None:
+        if len(assigned) != 1:
+            raise HTTPException(status_code=422, detail="Select a caller ID when this API has multiple assigned numbers")
+        caller_id = assigned[0]
+    if (body.provider, caller_id) not in key.assigned_numbers:
+        raise HTTPException(status_code=403, detail="Caller ID is not assigned to the selected API")
+    coordinator = get_call_coordinator(request)
+    try:
+        session = await coordinator.start_outbound(OutboundCallCommand(
+            provider=body.provider, channel=body.channel, tenant_id=key.tenant_id,
+            api_key_id=key.key_id, destination=body.destination, caller_id=caller_id,
+            bot_config_id=(body.live_agent.agent_id if body.live_agent else None),
+            live_agent_instructions=(body.live_agent.instructions if body.live_agent else None),
+            live_agent_context=(body.live_agent.context if body.live_agent else None),
+            post_call_context=(body.post_call.context if body.post_call else None),
+            post_call_output_schema=(body.post_call.output_schema.model_dump(exclude_none=True) if body.post_call else None),
+            post_call_tools=(body.post_call.tools if body.post_call else None),
+            post_call_time_zone=(body.post_call.time_zone if body.post_call else None),
+            post_call_time_format=(body.post_call.time_format if body.post_call else None),
+            include_live_agent_context=(body.post_call.include_live_agent_context if body.post_call else False),
+            recording_allowed=body.recording_allowed, idempotency_key=idempotency_key,
+        ))
+    except HTTPException as exc:
+        call_start_event("rejected" if exc.status_code < 500 else "failed")
+        raise
+    except Exception:
+        call_start_event("failed")
+        raise
+    call_start_event("accepted")
+    return {"session_id": session.session_id, "provider": session.provider,
+            "channel": session.channel, "direction": session.direction.value,
+            "status": session.metadata.get("call_status", "starting")}
 
 
 @router.get("/api-keys/{key_id}/billing")
