@@ -292,7 +292,8 @@ resource "google_compute_instance" "backend" {
   tags = ["chiefvoice-backend"]
   boot_disk {
     initialize_params {
-      image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64"
+      # Keep the running VM on its current image; changing the image forces replacement.
+      image = "projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20261105"
       size = var.vm_disk_gb
       type = "pd-ssd"
     }
