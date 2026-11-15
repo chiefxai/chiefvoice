@@ -15,9 +15,13 @@ substitutions:
   _VERTEX_LOCATION: us-central1
   _POST_CALL_MODEL: gemini-2.5-flash
   _OIDC_AUDIENCE: https://chiefvoice.elvoryx.in/api
-  _OIDC_AUTHORITY: https://YOUR_AUTH0_DOMAIN/
-  _OIDC_CLIENT_ID: CHANGE_ME_AUTH0_SPA_CLIENT_ID
+  _OIDC_AUTHORITY: https://dev-ls5gkmim0q0ioeu1.us.auth0.com/
+  _OIDC_CLIENT_ID: JjVV1d1Rn69oazE7h7s5JOuwbvAA6q4K
   _OIDC_SCOPE: openid profile email platform:customers:read platform:customers:write
+  _OIDC_ISSUER: https://dev-ls5gkmim0q0ioeu1.us.auth0.com/
+  _OIDC_JWKS_URL: https://dev-ls5gkmim0q0ioeu1.us.auth0.com/.well-known/jwks.json
+  _OIDC_TENANT_CLAIM: https://chiefvoice.elvoryx.in/tenant_id
+  _PLATFORM_ADMIN_SUBJECTS: auth0|6af9a7262178bf91525670d9
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -112,7 +116,7 @@ steps:
         function_url="$(cat /workspace/post-call-function-url)"
         test -n "$${function_url}"
         gcloud compute ssh ${_VM_NAME} --zone=${_ZONE} --tunnel-through-iap \
-          --command="sudo /usr/local/bin/chiefvoice-deploy '$${image}' '$${frontend_image}' '$${function_url}'" \
+          --command="sudo sed -i -e 's#^OIDC_ISSUER=.*#OIDC_ISSUER=${_OIDC_ISSUER}#' -e 's#^OIDC_AUDIENCE=.*#OIDC_AUDIENCE=${_OIDC_AUDIENCE}#' -e 's#^OIDC_JWKS_URL=.*#OIDC_JWKS_URL=${_OIDC_JWKS_URL}#' -e 's#^OIDC_TENANT_CLAIM=.*#OIDC_TENANT_CLAIM=${_OIDC_TENANT_CLAIM}#' -e 's#^PLATFORM_ADMIN_SUBJECTS=.*#PLATFORM_ADMIN_SUBJECTS=${_PLATFORM_ADMIN_SUBJECTS}#' /opt/chiefvoice/api.env && sudo /usr/local/bin/chiefvoice-deploy '$${image}' '$${frontend_image}' '$${function_url}'" \
           --quiet
 
   - id: smoke-test-public-endpoint
