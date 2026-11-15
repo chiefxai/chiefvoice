@@ -55,15 +55,6 @@ class SqlAccountStore:
             row = await session.scalar(
                 select(TenantAccountRow).where(TenantAccountRow.tenant_id == tenant_id)
             )
-
-    async def update_display_name(self, tenant_id: str, display_name: str) -> bool:
-        async with self._sessions.begin() as session:
-            result = await session.execute(
-                update(TenantAccountRow)
-                .where(TenantAccountRow.tenant_id == tenant_id)
-                .values(display_name=display_name)
-            )
-            return result.rowcount == 1
             if row is None:
                 return None
             created_at = row.created_at
@@ -76,6 +67,15 @@ class SqlAccountStore:
                 created_by=row.created_by,
                 created_at=created_at,
             )
+
+    async def update_display_name(self, tenant_id: str, display_name: str) -> bool:
+        async with self._sessions.begin() as session:
+            result = await session.execute(
+                update(TenantAccountRow)
+                .where(TenantAccountRow.tenant_id == tenant_id)
+                .values(display_name=display_name)
+            )
+            return result.rowcount == 1
 
     async def list(self, *, limit: int = 100, offset: int = 0) -> list[TenantAccount]:
         if not 1 <= limit <= 500 or offset < 0:

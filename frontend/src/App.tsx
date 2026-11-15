@@ -208,10 +208,12 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const connected = Boolean(token)
 
   useEffect(() => {
+    const query = new URLSearchParams(location.search)
+    if (query.has('code') || query.has('error')) return
     if (!Object.values(pagePaths).includes(location.pathname.replace(/\/$/, ''))) {
       navigate(pagePaths.Numbers, { replace: true })
     }
-  }, [location.pathname, navigate])
+  }, [location.pathname, location.search, navigate])
 
   useEffect(() => {
     let active = true
@@ -222,7 +224,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         const user = isCallback
           ? await finishLogin()
           : await currentUser()
-        if (isCallback) clearLoginCallbackFromUrl()
+        if (isCallback) {
+          clearLoginCallbackFromUrl()
+          navigate(pagePaths.Numbers, { replace: true })
+        }
         if (!user || user.expired || !user.access_token) {
           sessionStorage.removeItem('chiefvoice.token')
           if (active) setToken('')
@@ -231,7 +236,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         sessionStorage.setItem('chiefvoice.token', user.access_token)
         if (active) setToken(user.access_token)
       } catch (error) {
-        if (isCallback) clearLoginCallbackFromUrl()
+        if (isCallback) {
+          clearLoginCallbackFromUrl()
+          navigate(pagePaths.Numbers, { replace: true })
+        }
         sessionStorage.removeItem('chiefvoice.token')
         if (active) {
           setToken('')
