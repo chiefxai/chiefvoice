@@ -12,6 +12,7 @@ from pipecat.processors.frame_processor import (
     FrameProcessor,
     FrameProcessorSetup,
 )
+from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.serializers.base_serializer import FrameSerializer
 
 from chiefvoice.sessions import AcceptedSession
@@ -106,6 +107,40 @@ class AudioFrameCounter(FrameProcessor):
         if isinstance(frame, self._frame_type):
             self._diagnostics.record_frame(self._stage, frame)
         await self.push_frame(frame, direction)
+
+
+class GeminiInputResampler(FrameProcessor):
+    """Convert telephony PCM to Gemini Live's required 16 kHz input rate."""
+
+    def __init__(self, target_sample_rate: int = 16000):
+        super().__init__()
+        self._target_sample_rate = target_sample_rate
+        # Keep resampler state across frames to avoid discontinuities at chunk boundaries.
+        self._resampler = SOXRStreamAudioResampler(quality="LQ", clear_after_secs=None)
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if not isinstance(frame, InputAudioRawFrame) or frame.sample_rate == self._target_sample_rate:
+            await self.push_frame(frame, direction)
+            return
+        if frame.num_channels != 1:
+            logger.error(
+                "gemini_audio_resample_unsupported_channels",
+                extra={"channels": frame.num_channels, "sample_rate": frame.sample_rate},
+            )
+            return
+        audio = await self._resampler.resample(
+            frame.audio, frame.sample_rate, self._target_sample_rate
+        )
+        if audio:
+            await self.push_frame(
+                InputAudioRawFrame(
+                    audio=audio,
+                    sample_rate=self._target_sample_rate,
+                    num_channels=frame.num_channels,
+                ),
+                direction,
+            )
 
 
 class ObservedVobizSerializer(FrameSerializer):
