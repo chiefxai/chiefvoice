@@ -3,6 +3,8 @@ from collections.abc import Sequence
 from pipecat.frames.frames import InputAudioRawFrame, OutputAudioRawFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.transports.base_transport import BaseTransport
 
 from chiefvoice.agents.call.audio_diagnostics import (
@@ -26,7 +28,11 @@ def build_pipeline(
 
     The caller supplies the chosen STT/LLM/TTS or realtime processors. Recording is
     attached after transport output so it can observe both inbound and outbound audio.
+    The context aggregators initialize LLM services with an LLMContextFrame before
+    realtime audio reaches them and maintain conversation state for post-call capture.
     """
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(LLMContext())
+
     # Vobiz supplies narrowband 8 kHz PCM, while Gemini Live requires 16 kHz
     # PCM input. Resample before both diagnostics and the realtime model.
     processors: list[FrameProcessor] = [transport.input(), GeminiInputResampler()]
@@ -36,6 +42,7 @@ def build_pipeline(
         )
     if transcript_processor is not None:
         processors.append(transcript_processor)
+    processors.append(user_aggregator)
     processors.extend(conversation_processors)
     if assistant_transcript_processor is not None:
         processors.append(assistant_transcript_processor)
@@ -46,4 +53,5 @@ def build_pipeline(
     processors.append(transport.output())
     if recording_processor is not None:
         processors.append(recording_processor)
+    processors.append(assistant_aggregator)
     return Pipeline(processors)
