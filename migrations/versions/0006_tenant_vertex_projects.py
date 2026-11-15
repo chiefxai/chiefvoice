@@ -34,7 +34,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("project_id", name=op.f("uq_tenant_vertex_projects_project_id")),
     )
     op.create_index(
-        "ix_tenant_vertex_projects_status_next_attempt_at_lease_expires_at",
+        "ix_tenant_vertex_projects_status_next_attempt_lease",
         "tenant_vertex_projects",
         ["status", "next_attempt_at", "lease_expires_at"],
     )
@@ -42,7 +42,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index(
-        "ix_tenant_vertex_projects_status_next_attempt_at_lease_expires_at",
+        "ix_tenant_vertex_projects_status_next_attempt_lease",
         table_name="tenant_vertex_projects",
     )
     op.drop_table("tenant_vertex_projects")

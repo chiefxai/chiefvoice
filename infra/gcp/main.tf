@@ -334,7 +334,8 @@ resource "google_compute_instance" "backend" {
   tags         = ["chiefvoice-backend"]
   boot_disk {
     initialize_params {
-      image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64"
+      # Keep the running VM on its current image; changing the image forces replacement.
+      image = "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20261105"
       size  = var.vm_disk_gb
       type  = "pd-ssd"
     }
@@ -347,24 +348,30 @@ resource "google_compute_instance" "backend" {
     email  = google_service_account.backend.email
     scopes = ["cloud-platform"]
   }
-  metadata_startup_script = templatefile("${path.module}/startup.sh.tftpl", {
-    object_bucket            = google_storage_bucket.objects.name
-    secret_ids               = { for key, secret in google_secret_manager_secret.vm_runtime : key => secret.secret_id }
-    tasks_queue              = google_cloud_tasks_queue.post_call.id
-    function_service_account = google_service_account.task_invoker.email
-    public_domain            = var.public_domain
-    vertex_project_id        = var.project_id
-    vertex_location          = var.vertex_location
-    vertex_model             = var.vertex_model
-    post_call_model          = var.post_call_model
-    oidc_issuer              = var.oidc_issuer
-    oidc_audience            = var.oidc_audience
-    oidc_jwks_url            = var.oidc_jwks_url
-    oidc_tenant_claim        = var.oidc_tenant_claim
-    platform_admin_subjects  = join(",", var.platform_admin_subjects)
-    artifact_registry_host   = "${var.region}-docker.pkg.dev"
-  })
+  metadata = {
+    "startup-script" = templatefile("${path.module}/startup.sh.tftpl", {
+      object_bucket            = google_storage_bucket.objects.name
+      secret_ids               = { for key, secret in google_secret_manager_secret.vm_runtime : key => secret.secret_id }
+      tasks_queue              = google_cloud_tasks_queue.post_call.id
+      function_service_account = google_service_account.task_invoker.email
+      public_domain            = var.public_domain
+      vertex_project_id        = var.project_id
+      vertex_location          = var.vertex_location
+      vertex_model             = var.vertex_model
+      post_call_model          = var.post_call_model
+      oidc_issuer              = var.oidc_issuer
+      oidc_audience            = var.oidc_audience
+      oidc_jwks_url            = var.oidc_jwks_url
+      oidc_tenant_claim        = var.oidc_tenant_claim
+      platform_admin_subjects  = join(",", var.platform_admin_subjects)
+      artifact_registry_host   = "${var.region}-docker.pkg.dev"
+    })
+  }
   labels = var.labels
+  lifecycle {
+    # gcloud injects short-lived SSH keys; don't remove them during metadata updates.
+    ignore_changes = [metadata["ssh-keys"]]
+  }
   depends_on = [
     google_project_iam_member.backend_tasks,
     google_storage_bucket_iam_member.backend_objects,

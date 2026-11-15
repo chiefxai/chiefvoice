@@ -20,6 +20,23 @@ Database tables are managed with Alembic migrations, not created by application 
 uv run alembic upgrade head
 ```
 
+## Web console
+
+A React operations console is in [`frontend/`](frontend/README.md). Start the API as above, then run `cd frontend && npm install && npm run dev`; open `http://localhost:5173` and connect with an OIDC access token. The console supports workspace and billing setup, voice agent profiles, Vobiz integration, outbound calls, and call status/post-call lookup. Call history is currently stored in the browser because the API has no tenant call-list endpoint.
+
+### Run the console stack with Docker
+
+Docker Compose starts PostgreSQL, applies migrations, launches the API and React console, and starts a local-only mock OIDC issuer. From the repository root:
+
+```sh
+cp .env.docker.example .env.docker
+docker compose up --build
+```
+
+Open <http://localhost:5173>, choose **Sign in with OIDC**, and enter the local development credentials from [`frontend/README.md`](frontend/README.md) on the identity-provider page.
+
+The token is valid for one hour and grants broad permissions only against the disposable local tenant `local-demo-tenant`. The mock issuer keeps its development signing key in a Docker volume across restarts. The compose setup disables cloud voice and post-call providers; it lets you test authentication, workspace and plan setup, agent profiles, and Vobiz integration storage, but placing a real call still requires Vobiz and Vertex AI credentials and a working media callback URL. Do not expose this development stack to a public network. Stop with `docker compose down`; add `-v` to also delete local PostgreSQL data and the mock OIDC signing key.
+
 For an existing database created by an earlier `create_all` development build, inspect that its tables match `migrations/versions/0001_initial_schema.py` before stamping it with `uv run alembic stamp head`. Do not stamp an unverified database. Application startup checks that the database is at the current Alembic revision and fails with an actionable error if it is not.
 
 The starter exposes `/healthz`, `/readyz`, and Prometheus metrics at `/metrics`. JSON logs go to stdout. Traces are created for FastAPI requests; set `OTEL_EXPORTER_OTLP_ENDPOINT` to export them over OTLP/HTTP.
@@ -140,7 +157,7 @@ Retention and backup worker outcomes, plus recording upload success/failure, are
 
 ## Realtime agent providers
 
-The conversation engine has a provider boundary independent of the phone channel. Active-call agents live under `src/chiefvoice/agents/call/`; the first backend is Pipecat's Gemini Live speech-to-speech service on Vertex AI. Set `REALTIME_AGENT_PROVIDER=vertex`, `VERTEX_PROJECT_ID`, and `VERTEX_LOCATION`; authentication uses Google Application Default Credentials by default, or `VERTEX_CREDENTIALS_PATH` / `VERTEX_CREDENTIALS_JSON` for an explicit service account. Set `VERTEX_MODEL`, `VERTEX_VOICE`, and `VERTEX_SYSTEM_INSTRUCTION` as needed. On Google Cloud, grant the runtime service account Vertex AI access and enable the Vertex AI API.
+The conversation engine has a provider boundary independent of the phone channel. Active-call agents live under `src/chiefvoice/agents/call/`; the first backend is Pipecat's Gemini Live speech-to-speech service. Agent profiles can use Tamil (`ta-IN`), Malayalam (`ml-IN`), and Telugu (`te-IN`) with selectable Gemini Live voices and language-aware mild slang. Google's published Vertex Live language list includes Tamil and Telugu but does not currently list Malayalam, so Malayalam profiles are routed to the Google AI Gemini Live API. Set `GOOGLE_AI_API_KEY` (and optionally `GOOGLE_AI_LIVE_MODEL`, default `gemini-3.1-flash-live-preview`) to enable Malayalam. This uses separate Google AI API credentials, billing, and quota from Vertex AI; it does not inherit tenant Vertex project isolation. Without the key, Malayalam calls fail with an explicit setup error. Tamil and Telugu continue to use Vertex. For those, set `REALTIME_AGENT_PROVIDER=vertex`, `VERTEX_PROJECT_ID`, and `VERTEX_LOCATION`; authentication uses Google Application Default Credentials by default, or `VERTEX_CREDENTIALS_PATH` / `VERTEX_CREDENTIALS_JSON` for an explicit service account. Set `VERTEX_MODEL`, `VERTEX_VOICE`, and `VERTEX_SYSTEM_INSTRUCTION` as needed. On Google Cloud, grant the runtime service account Vertex AI access and enable the Vertex AI API. See Google's [Vertex Live language and voice configuration](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/configure-language-voice?hl=en), [Gemini API Live language capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities?authuser=14), and [current Gemini API models](https://ai.google.dev/gemini-api/docs/models).
 
 For per-customer Google Cloud project isolation, enable `VERTEX_PROJECT_ISOLATION_ENABLED=true` and configure `GCP_PROJECT_PARENT`, `GCP_BILLING_ACCOUNT_ID`, `GCP_RUNTIME_SERVICE_ACCOUNT`, `GCP_BUDGET_API_PROJECT_ID`, and `GCP_VERTEX_MONTHLY_SPEND_CAP`. `DATABASE_URL` and `VERTEX_LOCATION` are also required. The configured service identity uses Application Default Credentials. Grant it project creation on the selected organization/folder, billing account permissions to attach projects and create/configure spend cap budgets, project service-usage and IAM administration permissions for the new projects, and permission to use `GCP_BUDGET_API_PROJECT_ID` for budget API quota attribution. Enable Resource Manager, Cloud Billing, Service Usage, Vertex AI, and Cloud Billing Budget APIs where required. The billing budget API consumer project must have `billingbudgets.googleapis.com` enabled. The platform provisions a separate tenant project asynchronously during account creation, links it to the platform billing account, enables Vertex AI, grants the platform runtime service account `roles/aiplatform.user`, and creates a monthly Vertex-only spend cap. The runtime sends the project ID from that tenant's database row to both live-call Vertex and post-call Vertex. No service-account private key is returned or stored by this flow; use workload identity/ADC and rotate credentials through your cloud environment.
 
