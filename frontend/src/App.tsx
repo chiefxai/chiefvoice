@@ -141,9 +141,26 @@ const api = {
   deleteApiKey: (id: string) => http.delete(`/v1/admin/customers/api-keys/${id}`),
 }
 
-const errorText = (error: unknown) => axios.isAxiosError(error)
-  ? String(error.response?.data?.detail || error.message)
-  : 'Something went wrong. Please try again.'
+const errorText = (error: unknown) => {
+  if (!axios.isAxiosError(error)) return 'Something went wrong. Please try again.'
+
+  const detail: unknown = error.response?.data?.detail
+  if (Array.isArray(detail)) {
+    const messages = detail.map((issue: unknown) => {
+      if (!issue || typeof issue !== 'object') return String(issue)
+      const item = issue as { loc?: unknown[]; msg?: unknown }
+      const location = Array.isArray(item.loc) ? item.loc.map(String).join('.') : ''
+      const message = typeof item.msg === 'string' ? item.msg : 'Invalid value'
+      return location ? `${location}: ${message}` : message
+    })
+    return messages.join('; ') || error.message
+  }
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object' && 'msg' in detail && typeof detail.msg === 'string') {
+    return detail.msg
+  }
+  return error.message
+}
 
 export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; onToggleTheme: () => void }) {
   const queryClient = useQueryClient()
