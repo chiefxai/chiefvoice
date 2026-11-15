@@ -93,10 +93,13 @@ COMPOSE
 cat >/opt/chiefvoice/Caddyfile <<'CADDY'
 ${public_domain} {
   encode zstd gzip
-  handle /v1/* { reverse_proxy api:8080 }
-  handle /webhooks/* { reverse_proxy api:8080 }
-  handle /healthz /readyz /metrics /docs /openapi.json { reverse_proxy api:8080 }
-  handle { reverse_proxy frontend:8080 }
+  @api path /v1/* /webhooks/* /healthz /readyz /metrics /docs /openapi.json
+  handle @api {
+    reverse_proxy api:8080
+  }
+  handle {
+    reverse_proxy frontend:8080
+  }
 }
 CADDY
 
@@ -111,7 +114,7 @@ BACKUP_ENCRYPTION_KEY=$backup_key
 RECORDINGS_ENABLED=false
 RECORDINGS_STORAGE_BACKEND=s3
 BACKUP_STORAGE_BACKEND=s3
-BACKUP_POLICIES_JSON=[{"scope":"service","tenant_id":null,"resource":"postgres","interval_seconds":86400,"retain_for_seconds":2592000,"enabled":true}]
+BACKUP_POLICIES_JSON=[{"scope":"service","resource":"postgres","interval_seconds":86400,"retain_for_seconds":2592000,"encryption_required":true}]
 BACKUP_INTERVAL_SECONDS=3600
 RETENTION_POLICIES_JSON=[]
 OBJECT_STORAGE_BUCKET=${object_bucket}
