@@ -19,6 +19,11 @@ variable "public_domain" {
 variable "oidc_issuer" { type = string }
 variable "oidc_audience" { type = string }
 variable "oidc_jwks_url" { type = string }
+variable "oidc_tenant_claim" {
+  type        = string
+  default     = "https://chiefvoice.elvoryx.in/tenant_id"
+  description = "OIDC claim containing the platform tenant ID. Auth0 custom claims must be namespaced."
+}
 variable "platform_admin_subjects" {
   type        = list(string)
   default     = []
@@ -32,16 +37,6 @@ variable "vertex_model" { type = string
 }
 variable "post_call_model" { type = string
   default = "gemini-2.5-flash"
-}
-variable "tenant_project_parent" { type = string }
-variable "tenant_billing_account_id" { type = string }
-variable "budget_api_project_id" { type = string }
-variable "vertex_monthly_spend_cap" { type = string
-  default = "100"
-}
-variable "cloud_build_service_account_email" {
-  type        = string
-  description = "Service account used by the Cloud Build trigger that publishes the VM image and deploys the post-call function."
 }
 variable "labels" { type = map(string)
   default = { app = "chiefvoice", managed_by = "terraform" }

@@ -71,10 +71,14 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+  frontend:
+    image: $${FRONTEND_IMAGE:-busybox}
+    restart: unless-stopped
+    expose: ["8080"]
   caddy:
     image: caddy:2
     restart: unless-stopped
-    depends_on: [api]
+    depends_on: [api, frontend]
     ports: ["80:80", "443:443", "443:443/udp"]
     volumes:
       - /opt/chiefvoice/Caddyfile:/etc/caddy/Caddyfile:ro
@@ -89,7 +93,10 @@ COMPOSE
 cat >/opt/chiefvoice/Caddyfile <<'CADDY'
 ${public_domain} {
   encode zstd gzip
-  reverse_proxy api:8080
+  handle /v1/* { reverse_proxy api:8080 }
+  handle /webhooks/* { reverse_proxy api:8080 }
+  handle /healthz /readyz /metrics /docs /openapi.json { reverse_proxy api:8080 }
+  handle { reverse_proxy frontend:8080 }
 }
 CADDY
 
@@ -121,18 +128,14 @@ GCP_CLOUD_TASKS_SERVICE_ACCOUNT=${function_service_account}
 POST_CALL_AGENT_PROVIDER=langchain_vertex
 POST_CALL_MODEL=${post_call_model}
 REALTIME_AGENT_PROVIDER=vertex
-VERTEX_PROJECT_ISOLATION_ENABLED=true
+VERTEX_PROJECT_ISOLATION_ENABLED=false
+VERTEX_PROJECT_ID=${vertex_project_id}
 VERTEX_LOCATION=${vertex_location}
 VERTEX_MODEL=${vertex_model}
-GCP_PROJECT_PARENT=${tenant_project_parent}
-GCP_BILLING_ACCOUNT_ID=${tenant_billing_account_id}
-GCP_RUNTIME_SERVICE_ACCOUNT=${tenant_runtime_service_account}
-GCP_POST_CALL_SERVICE_ACCOUNT=${function_service_account}
-GCP_BUDGET_API_PROJECT_ID=${budget_api_project_id}
-GCP_VERTEX_MONTHLY_SPEND_CAP=${vertex_monthly_spend_cap}
 OIDC_ISSUER=${oidc_issuer}
 OIDC_AUDIENCE=${oidc_audience}
 OIDC_JWKS_URL=${oidc_jwks_url}
+OIDC_TENANT_CLAIM=${oidc_tenant_claim}
 PLATFORM_ADMIN_SUBJECTS=${platform_admin_subjects}
 VOBIZ_PUBLIC_URL=https://${public_domain}
 VOBIZ_WEBHOOK_SECRET=$vobiz_webhook_secret
@@ -145,15 +148,17 @@ unset database_password credentials_key post_call_key recording_key backup_key v
 cat >/usr/local/bin/chiefvoice-deploy <<'DEPLOY'
 #!/bin/bash
 set -euo pipefail
-image="$${1:?usage: chiefvoice-deploy IMAGE FUNCTION_URL}"
-function_url="$${2:?usage: chiefvoice-deploy IMAGE FUNCTION_URL}"
+image="$${1:?usage: chiefvoice-deploy API_IMAGE FRONTEND_IMAGE FUNCTION_URL}"
+frontend_image="$${2:?usage: chiefvoice-deploy API_IMAGE FRONTEND_IMAGE FUNCTION_URL}"
+function_url="$${3:?usage: chiefvoice-deploy API_IMAGE FRONTEND_IMAGE FUNCTION_URL}"
 cd /opt/chiefvoice
 exec 9>/var/lock/chiefvoice-deploy.lock
 flock 9
 umask 077
 sed -i "s|^POST_CALL_GCP_FUNCTION_URL=.*|POST_CALL_GCP_FUNCTION_URL=$${function_url}|" api.env
 export API_IMAGE="$${image}"
-docker compose -f compose.yaml pull postgres api caddy
+export FRONTEND_IMAGE="$${frontend_image}"
+docker compose -f compose.yaml pull postgres api frontend caddy
 docker compose -f compose.yaml up -d postgres
 for attempt in $(seq 1 60); do
   if docker compose -f compose.yaml exec -T postgres pg_isready -U chiefvoice -d chiefvoice >/dev/null 2>&1; then break; fi
@@ -161,7 +166,7 @@ for attempt in $(seq 1 60); do
   sleep 5
 done
 docker compose -f compose.yaml run --rm --no-deps api alembic upgrade head
-docker compose -f compose.yaml up -d api caddy
+docker compose -f compose.yaml up -d api frontend caddy
 DEPLOY
 chmod 700 /usr/local/bin/chiefvoice-deploy
 

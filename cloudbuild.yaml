@@ -4,24 +4,20 @@ substitutions:
   _IMAGE_NAME: api
   _VM_NAME: chiefvoice-backend
   _ZONE: us-central1-a
-  _PUBLIC_DOMAIN: voice.example.com
+  _PUBLIC_DOMAIN: chiefvoice.elvoryx.in
   _FUNCTION_NAME: chiefvoice-post-call
   _FUNCTION_VPC_CONNECTOR: chiefvoice-functions
-  _FUNCTION_SERVICE_ACCOUNT: CHANGE_ME_FUNCTION_SA
-  _TASK_INVOKER_SERVICE_ACCOUNT: CHANGE_ME_TASK_INVOKER_SA
-  _BACKEND_SERVICE_ACCOUNT: CHANGE_ME_BACKEND_SA
+  _FUNCTION_SERVICE_ACCOUNT: chiefvoice-post-call@chief-502717.iam.gserviceaccount.com
+  _TASK_INVOKER_SERVICE_ACCOUNT: chiefvoice-task-invoker@chief-502717.iam.gserviceaccount.com
   _POST_CALL_FUNCTION_MAX_INSTANCES: "10"
   _DATABASE_URL_SECRET: chiefvoice-function-database-url
   _POST_CALL_ENCRYPTION_KEY_SECRET: chiefvoice-post-call-encryption-key
-  _GCP_PROJECT_PARENT: folders/CHANGE_ME
-  _GCP_BILLING_ACCOUNT_ID: CHANGE_ME
-  _GCP_BUDGET_API_PROJECT_ID: CHANGE_ME_BUDGET_API_PROJECT
-  _GCP_VERTEX_MONTHLY_SPEND_CAP: "100"
   _VERTEX_LOCATION: us-central1
   _POST_CALL_MODEL: gemini-2.5-flash
-  _OIDC_ISSUER: CHANGE_ME
-  _OIDC_AUDIENCE: CHANGE_ME
-  _OIDC_JWKS_URL: CHANGE_ME
+  _OIDC_AUDIENCE: https://chiefvoice.elvoryx.in/api
+  _OIDC_AUTHORITY: https://YOUR_AUTH0_DOMAIN/
+  _OIDC_CLIENT_ID: CHANGE_ME_AUTH0_SPA_CLIENT_ID
+  _OIDC_SCOPE: openid profile email platform:customers:read platform:customers:write
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -55,6 +51,30 @@ steps:
       - push
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
 
+  - id: build-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file
+      - frontend/Dockerfile.production
+      - --build-arg
+      - VITE_OIDC_AUTHORITY=${_OIDC_AUTHORITY}
+      - --build-arg
+      - VITE_OIDC_CLIENT_ID=${_OIDC_CLIENT_ID}
+      - --build-arg
+      - VITE_OIDC_AUDIENCE=${_OIDC_AUDIENCE}
+      - --build-arg
+      - VITE_OIDC_SCOPE=${_OIDC_SCOPE}
+      - --tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}
+      - frontend
+
+  - id: push-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}
+
   - id: deploy-post-call-function
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
@@ -71,7 +91,7 @@ steps:
           --egress-settings=private-ranges-only \
           --timeout=240s --memory=1Gi \
           --max-instances=${_POST_CALL_FUNCTION_MAX_INSTANCES} \
-          --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=true,VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL},GCP_PROJECT_PARENT=${_GCP_PROJECT_PARENT},GCP_BILLING_ACCOUNT_ID=${_GCP_BILLING_ACCOUNT_ID},GCP_RUNTIME_SERVICE_ACCOUNT=${_BACKEND_SERVICE_ACCOUNT},GCP_POST_CALL_SERVICE_ACCOUNT=${_FUNCTION_SERVICE_ACCOUNT},GCP_BUDGET_API_PROJECT_ID=${_GCP_BUDGET_API_PROJECT_ID},GCP_VERTEX_MONTHLY_SPEND_CAP=${_GCP_VERTEX_MONTHLY_SPEND_CAP} \
+          --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=false,VERTEX_PROJECT_ID=${PROJECT_ID},VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL} \
           --set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,POST_CALL_ENCRYPTION_KEY=${_POST_CALL_ENCRYPTION_KEY_SECRET}:latest \
           --quiet
         gcloud run services add-iam-policy-binding ${_FUNCTION_NAME} \
@@ -88,10 +108,11 @@ steps:
       - -ceu
       - |
         image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
+        frontend_image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}"
         function_url="$(cat /workspace/post-call-function-url)"
         test -n "$${function_url}"
         gcloud compute ssh ${_VM_NAME} --zone=${_ZONE} --tunnel-through-iap \
-          --command="sudo /usr/local/bin/chiefvoice-deploy '$${image}' '$${function_url}'" \
+          --command="sudo /usr/local/bin/chiefvoice-deploy '$${image}' '$${frontend_image}' '$${function_url}'" \
           --quiet
 
   - id: smoke-test-public-endpoint
@@ -108,3 +129,4 @@ steps:
 
 images:
   - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}

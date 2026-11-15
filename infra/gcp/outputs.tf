@@ -9,3 +9,4 @@ output "object_storage_endpoint" { value = "https://storage.googleapis.com" }
 output "object_storage_signing_region" { value = "auto" }
 output "vm_backend_service_account" { value = google_service_account.backend.email }
 output "post_call_function_service_account" { value = google_service_account.post_call_function.email }
+output "cloud_build_service_account" { value = google_service_account.cloud_build.email }
