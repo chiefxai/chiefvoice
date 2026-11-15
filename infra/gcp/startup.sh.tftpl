@@ -113,6 +113,7 @@ RECORDINGS_ENCRYPTION_KEY=$recording_key
 BACKUP_ENCRYPTION_KEY=$backup_key
 RECORDINGS_ENABLED=false
 RECORDINGS_STORAGE_BACKEND=s3
+BACKUP_DIRECTORY=/tmp/chiefvoice-backups
 BACKUP_STORAGE_BACKEND=s3
 BACKUP_POLICIES_JSON=[{"scope":"service","resource":"postgres","interval_seconds":86400,"retain_for_seconds":2592000,"encryption_required":true}]
 BACKUP_INTERVAL_SECONDS=3600
