@@ -5,7 +5,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0022_phone_number_channel_capacity"
+revision: str = "0022_number_channels"
 down_revision: str | None = "0021_platform_owned_resources"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
