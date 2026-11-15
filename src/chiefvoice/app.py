@@ -535,7 +535,11 @@ def create_app(
         backup_execution_lock = PostgresBackupRunLock(settings.database_url)
     vobiz_adapter = adapters.get("vobiz")
     if vobiz_adapter is None and settings.vobiz_webhook_secret and provider_integration_store is not None:
-        vobiz_adapter = VobizAdapter(provider_integration_store, vobiz_callback_nonce_store)
+        vobiz_adapter = VobizAdapter(
+            provider_integration_store,
+            vobiz_callback_nonce_store,
+            call_session_store,
+        )
         adapters["vobiz"] = vobiz_adapter
     application.state.provider_integration_store = provider_integration_store
     application.state.account_store = account_store

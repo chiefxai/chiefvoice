@@ -25,6 +25,7 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
+from chiefvoice.calls.store import SqlCallSessionStore
 from chiefvoice.channels.base import AmbiguousCallStart, InboundCall, OutboundCall
 from chiefvoice.channels.integrations import ProviderIntegrationStore
 from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
@@ -65,9 +66,11 @@ class VobizAdapter:
         self,
         integration_store: ProviderIntegrationStore,
         nonce_store: SqlVobizCallbackNonceStore | None = None,
+        call_session_store: SqlCallSessionStore | None = None,
     ):
         self.integration_store = integration_store
         self.nonce_store = nonce_store
+        self.call_session_store = call_session_store
         if not settings.vobiz_webhook_secret:
             raise ValueError("VOBIZ_WEBHOOK_SECRET is required")
         if settings.vobiz_public_url and not settings.vobiz_public_url.startswith("https://"):
@@ -118,6 +121,11 @@ class VobizAdapter:
         # in the signed callback state so the media session gets the same call context.
         session.caller = caller_id
         session.callee = call.destination
+        # The callback token is intentionally only a reference to this durable
+        # envelope. Save the resolved phone numbers before Vobiz can invoke the
+        # answer/media callbacks (which may arrive before the call API returns).
+        if self.call_session_store is not None:
+            await self.call_session_store.update_state(session, status="starting")
         state = self._make_state(session)
         answer_url = self._public_url("/webhooks/vobiz/answer", {"state": state})
         hangup_url = self._public_url("/webhooks/vobiz/hangup", {"state": state})
@@ -287,7 +295,7 @@ class VobizAdapter:
         claims = self._read_state(state)
         # The outbound API callback runs after the callee answers. Put that timestamp
         # into the media URL so billable duration excludes ringing and setup time.
-        session = self._session_from_state(claims)
+        session = await self._session_from_state(claims)
         session.started_at = datetime.now(UTC)
         form = await request.form()
         provider_call_id = _string_value(
@@ -313,7 +321,7 @@ class VobizAdapter:
 
     async def hangup_callback(self, request: Request) -> AcceptedSession:
         state = self._read_state(request.query_params.get("state", ""))
-        session = self._session_from_state(state)
+        session = await self._session_from_state(state)
         # Vobiz may send the provider call ID in the callback body. The outbound
         # callback URL is created before the provider returns that ID, so use the
         # signed session state as the identity and the callback body only to enrich it.
@@ -382,7 +390,11 @@ class VobizAdapter:
         except HTTPException:
             await websocket.close(code=1008)
             return
-        session = self._session_from_state(state)
+        try:
+            session = await self._session_from_state(state)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
         if attach_session_persistence is not None:
             persistence_result = attach_session_persistence(session)
             if inspect.isawaitable(persistence_result):
@@ -573,7 +585,17 @@ class VobizAdapter:
                 for name, value in call_context.items()
                 if name != "include_live_agent_context"
             ) or session.include_live_agent_context
-            if has_call_context:
+            if self.call_session_store is not None:
+                if not session.tenant_id:
+                    raise ValueError("tenant_id is required for durable callback state")
+                claims = {
+                    "state_version": 2,
+                    "session_id": _required_state_string(
+                        session.session_id, "session_id", 128
+                    ),
+                    "tenant_id": _required_state_string(session.tenant_id, "tenant_id", 200),
+                }
+            elif has_call_context:
                 if not settings.credentials_encryption_key:
                     raise HTTPException(
                         status_code=503,
@@ -638,76 +660,88 @@ class VobizAdapter:
         if not isinstance(claims, dict):
             reject("payload_invalid")
         try:
-            _required_state_string(claims.get("session_id"), "session_id", 128)
-            _required_state_string(claims.get("tenant_id"), "tenant_id", 200)
-            if claims.get("direction") not in {Direction.INBOUND.value, Direction.OUTBOUND.value}:
-                raise ValueError("Invalid direction")
-            if not isinstance(claims.get("recording_allowed"), bool):
-                raise ValueError("Invalid recording flag")
-            for field, limit in (
-                ("caller", 256),
-                ("callee", 256),
-                ("provider_call_id", 256),
-                ("bot_config_id", 128),
-            ):
-                _optional_state_string(claims.get(field), field, limit)
-            _parse_state_datetime(claims.get("started_at"))
-            max_call_seconds = claims.get("max_call_seconds")
-            if max_call_seconds is not None and (
-                not isinstance(max_call_seconds, int)
-                or isinstance(max_call_seconds, bool)
-                or not 1 <= max_call_seconds <= 3_600
-            ):
-                raise ValueError("Invalid max call duration")
-            encrypted_context = claims.get("encrypted_call_context")
-            if encrypted_context is not None:
-                if (
-                    not isinstance(encrypted_context, str)
-                    or not settings.credentials_encryption_key
+            state_version = claims.get("state_version", 1)
+            if state_version == 2:
+                _required_state_string(claims.get("session_id"), "session_id", 128)
+                _required_state_string(claims.get("tenant_id"), "tenant_id", 200)
+            elif state_version == 1:
+                _required_state_string(claims.get("session_id"), "session_id", 128)
+                _required_state_string(claims.get("tenant_id"), "tenant_id", 200)
+                if claims.get("direction") not in {
+                    Direction.INBOUND.value,
+                    Direction.OUTBOUND.value,
+                }:
+                    raise ValueError("Invalid direction")
+                if not isinstance(claims.get("recording_allowed"), bool):
+                    raise ValueError("Invalid recording flag")
+                for field, limit in (
+                    ("caller", 256),
+                    ("callee", 256),
+                    ("provider_call_id", 256),
+                    ("bot_config_id", 128),
                 ):
-                    raise ValueError("Invalid encrypted call context")
-                try:
-                    call_context = json.loads(
-                        Fernet(settings.credentials_encryption_key.encode("ascii"))
-                        .decrypt(encrypted_context.encode("ascii"))
-                        .decode("utf-8")
-                    )
-                except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise _InvalidCallState("context_invalid") from exc
-                if not isinstance(call_context, dict):
-                    raise ValueError("Invalid call context")
-                live_context = call_context.get("live_agent_context")
-                post_context = call_context.get("post_call_context")
-                output_schema = call_context.get("post_call_output_schema")
-                post_call_tools = call_context.get("post_call_tools")
-                time_zone = call_context.get("post_call_time_zone")
-                time_format = call_context.get("post_call_time_format")
-                include_live_context = call_context.get("include_live_agent_context", False)
-                if live_context is not None and not isinstance(live_context, dict):
-                    raise ValueError("Invalid live agent context")
-                live_instructions = call_context.get("live_agent_instructions")
-                if live_instructions is not None and not isinstance(live_instructions, str):
-                    raise ValueError("Invalid live agent instructions")
-                if post_context is not None and not isinstance(post_context, str):
-                    raise ValueError("Invalid post-call context")
-                if output_schema is not None and not isinstance(output_schema, dict):
-                    raise ValueError("Invalid post-call output schema")
-                if post_call_tools is not None and (
-                    not isinstance(post_call_tools, list)
-                    or any(
-                        not isinstance(tool, str) or tool not in {"calculator", "time"}
-                        for tool in post_call_tools
-                    )
-                    or len(set(post_call_tools)) != len(post_call_tools)
+                    _optional_state_string(claims.get(field), field, limit)
+                _parse_state_datetime(claims.get("started_at"))
+                max_call_seconds = claims.get("max_call_seconds")
+                if max_call_seconds is not None and (
+                    not isinstance(max_call_seconds, int)
+                    or isinstance(max_call_seconds, bool)
+                    or not 1 <= max_call_seconds <= 3_600
                 ):
-                    raise ValueError("Invalid post-call tools")
-                if time_zone is not None and not isinstance(time_zone, str):
-                    raise ValueError("Invalid post-call time zone")
-                if time_format is not None and not isinstance(time_format, str):
-                    raise ValueError("Invalid post-call time format")
-                if not isinstance(include_live_context, bool):
-                    raise ValueError("Invalid live agent context flag")
-                claims["call_context"] = call_context
+                    raise ValueError("Invalid max call duration")
+            else:
+                reject("payload_invalid")
+            if state_version == 1:
+                encrypted_context = claims.get("encrypted_call_context")
+                if encrypted_context is not None:
+                    if (
+                        not isinstance(encrypted_context, str)
+                        or not settings.credentials_encryption_key
+                    ):
+                        raise ValueError("Invalid encrypted call context")
+                    try:
+                        call_context = json.loads(
+                            Fernet(settings.credentials_encryption_key.encode("ascii"))
+                            .decrypt(encrypted_context.encode("ascii"))
+                            .decode("utf-8")
+                        )
+                    except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise _InvalidCallState("context_invalid") from exc
+                    if not isinstance(call_context, dict):
+                        raise ValueError("Invalid call context")
+                    live_context = call_context.get("live_agent_context")
+                    post_context = call_context.get("post_call_context")
+                    output_schema = call_context.get("post_call_output_schema")
+                    post_call_tools = call_context.get("post_call_tools")
+                    time_zone = call_context.get("post_call_time_zone")
+                    time_format = call_context.get("post_call_time_format")
+                    include_live_context = call_context.get("include_live_agent_context", False)
+                    if live_context is not None and not isinstance(live_context, dict):
+                        raise ValueError("Invalid live agent context")
+                    live_instructions = call_context.get("live_agent_instructions")
+                    if live_instructions is not None and not isinstance(live_instructions, str):
+                        raise ValueError("Invalid live agent instructions")
+                    if post_context is not None and not isinstance(post_context, str):
+                        raise ValueError("Invalid post-call context")
+                    if output_schema is not None and not isinstance(output_schema, dict):
+                        raise ValueError("Invalid post-call output schema")
+                    if post_call_tools is not None and (
+                        not isinstance(post_call_tools, list)
+                        or any(
+                            not isinstance(tool, str)
+                            or tool not in {"calculator", "time"}
+                            for tool in post_call_tools
+                        )
+                        or len(set(post_call_tools)) != len(post_call_tools)
+                    ):
+                        raise ValueError("Invalid post-call tools")
+                    if time_zone is not None and not isinstance(time_zone, str):
+                        raise ValueError("Invalid post-call time zone")
+                    if time_format is not None and not isinstance(time_format, str):
+                        raise ValueError("Invalid post-call time format")
+                    if not isinstance(include_live_context, bool):
+                        raise ValueError("Invalid live agent context flag")
+                    claims["call_context"] = call_context
         except _InvalidCallState as exc:
             reject(exc.reason)
         except (AttributeError, TypeError, ValueError):
@@ -738,8 +772,20 @@ class VobizAdapter:
         )
         return integration or await self.integration_store.get(self.provider, "platform")
 
+    async def _session_from_state(self, claims: dict[str, Any]) -> AcceptedSession:
+        if claims.get("state_version") == 2:
+            if self.call_session_store is None:
+                raise HTTPException(status_code=404, detail="Not found")
+            session = await self.call_session_store.get_session(
+                claims["tenant_id"], claims["session_id"]
+            )
+            if session is None or session.provider != self.provider:
+                raise HTTPException(status_code=404, detail="Not found")
+            return session
+        return self._legacy_session_from_state(claims)
+
     @staticmethod
-    def _session_from_state(claims: dict[str, Any]) -> AcceptedSession:
+    def _legacy_session_from_state(claims: dict[str, Any]) -> AcceptedSession:
         return AcceptedSession(
             channel="phone",
             provider="vobiz",

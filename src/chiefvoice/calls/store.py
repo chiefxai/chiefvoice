@@ -239,6 +239,19 @@ class SqlCallSessionStore:
                 .values(**values)
             )
 
+    async def get_session(self, tenant_id: str, session_id: str) -> AcceptedSession | None:
+        """Load the encrypted call envelope for a provider callback reference."""
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+            )
+            if row is None or row.encrypted_session is None:
+                return None
+            return self._decrypt_session(row.encrypted_session)
+
     async def append_transcript(
         self, session_id: str, tenant_id: str, speaker: str, text: str
     ) -> None:
