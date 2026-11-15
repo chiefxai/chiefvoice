@@ -18,10 +18,18 @@ import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded'
 import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded'
 import ScienceRoundedIcon from '@mui/icons-material/ScienceRounded'
+import { useLocation, useNavigate } from 'react-router-dom'
 import LoginPage from './LoginPage'
 import { clearLoginCallbackFromUrl, currentUser, finishLogin, login, logout } from './auth'
 
 type Page = 'Numbers' | 'Agents' | 'API' | 'Simulation' | 'Docs'
+const pagePaths: Record<Page, string> = {
+  Numbers: '/numbers', Agents: '/agents', API: '/api', Simulation: '/simulation', Docs: '/docs',
+}
+const pageFromPath = (pathname: string): Page => {
+  const match = (Object.entries(pagePaths) as [Page, string][]).find(([, path]) => path === pathname.replace(/\/$/, ''))
+  return match?.[0] || 'Numbers'
+}
 type RegisteredNumber = {
   provider: string
   phone_number: string
@@ -133,7 +141,9 @@ const errorText = (error: unknown) => axios.isAxiosError(error)
 
 export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; onToggleTheme: () => void }) {
   const queryClient = useQueryClient()
-  const [page, setPage] = useState<Page>('Numbers')
+  const location = useLocation()
+  const navigate = useNavigate()
+  const page = pageFromPath(location.pathname)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null)
   const [token, setToken] = useState(sessionStorage.getItem('chiefvoice.token') || '')
@@ -196,6 +206,12 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [oneTimeKey, setOneTimeKey] = useState<IssuedApiKey | null>(null)
   const [toast, setToast] = useState('')
   const connected = Boolean(token)
+
+  useEffect(() => {
+    if (!Object.values(pagePaths).includes(location.pathname.replace(/\/$/, ''))) {
+      navigate(pagePaths.Numbers, { replace: true })
+    }
+  }, [location.pathname, navigate])
 
   useEffect(() => {
     let active = true
@@ -416,7 +432,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setAuthError('')
     void queryClient.clear()
   }
-  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'Agents', 'API', 'Simulation', 'Docs'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { setPage(item); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : item === 'Agents' ? <AutoAwesomeRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : item === 'Simulation' ? <ScienceRoundedIcon /> : <ContentCopyRoundedIcon />}>{item}</Button>)}</div></>
+  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'Agents', 'API', 'Simulation', 'Docs'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { navigate(pagePaths[item]); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : item === 'Agents' ? <AutoAwesomeRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : item === 'Simulation' ? <ScienceRoundedIcon /> : <ContentCopyRoundedIcon />}>{item}</Button>)}</div></>
 
   if (!authReady || !connected) {
     return <LoginPage loading={!authReady} signingIn={signingIn} error={authError} onSignIn={() => { void connect() }} />
