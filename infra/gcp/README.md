@@ -26,6 +26,7 @@ This Terraform root is the active GCP deployment: one Compute Engine VM runs the
 
   The state bucket stack uses local state only to create that bucket; subsequent production state is kept in GCS. The bucket is private and protected from accidental Terraform destruction.
 - Ensure billing is active on `chief-502717` under the supplied billing account. This shared-project deployment does not attach customer projects to the billing account.
+- The VM and supporting infrastructure can be provisioned before Auth0 is configured. With empty OIDC values the API fails closed and the console cannot sign in; finish Auth0 setup and rerun Terraform plus Cloud Build before using the service.
 - Set `public_domain` to a DNS name you control. Point its A record to `backend_external_ip` before the first public deployment so Caddy can obtain/renew its HTTPS certificate. Provider callback URLs are HTTPS.
 - Configure OIDC issuer, audience and JWKS URL; `terraform.tfvars.example` shows all required values.
 - Set `platform_admin_subjects` to trusted OIDC `sub` values for platform operators. Customer provisioning also requires `platform:customers:write` or `platform:customers:read` in the token scope; an empty allowlist disables customer administration.

@@ -20,9 +20,21 @@ variable "public_domain" {
   type        = string
   description = "DNS name pointed at the static backend_external_ip; Caddy manages HTTPS certificates."
 }
-variable "oidc_issuer" { type = string }
-variable "oidc_audience" { type = string }
-variable "oidc_jwks_url" { type = string }
+variable "oidc_issuer" {
+  type        = string
+  default     = ""
+  description = "Leave empty for infrastructure-only bootstrap; set before deploying the public console/API."
+}
+variable "oidc_audience" {
+  type        = string
+  default     = ""
+  description = "Leave empty for infrastructure-only bootstrap; set before deploying the public console/API."
+}
+variable "oidc_jwks_url" {
+  type        = string
+  default     = ""
+  description = "Leave empty for infrastructure-only bootstrap; set before deploying the public console/API."
+}
 variable "oidc_tenant_claim" {
   type        = string
   default     = "https://chiefvoice.elvoryx.in/tenant_id"
