@@ -28,6 +28,16 @@ const pagePaths: Record<Page, string> = {
 }
 const defaultSimulationPostCallContext = 'Summarize the call and extract the requested fields. Use unknown when information is not stated; do not guess.'
 const defaultSimulationOutputSchema = JSON.stringify({ type: 'object', properties: { summary: { type: 'string' }, outcome: { type: 'string', enum: ['completed', 'follow_up_needed', 'unknown'] } }, required: ['summary', 'outcome'] }, null, 2)
+const livePromptContainsPostCallDirective = (instructions: string) =>
+  instructions.split(/[\n.!?]+/).some(clause => {
+    if (/\b(?:do not|don't|never|avoid|must not|should not)\b/i.test(clause)) return false
+    return (
+      /\b(?:summari[sz]e|analy[sz]e)\b.{0,80}\b(?:the )?call\b/i.test(clause) ||
+      /\b(?:extract|transcribe)\b.{0,100}\b(?:transcript|from the call)\b/i.test(clause) ||
+      /\b(?:post[- ]call|after the call|following the call)\b.{0,100}\b(?:extract|summari[sz]e|analy[sz]e|transcribe|return|output)\b/i.test(clause) ||
+      /\b(?:extract|summari[sz]e|analy[sz]e|transcribe)\b.{0,100}\b(?:post[- ]call|after the call|following the call)\b/i.test(clause)
+    )
+  })
 const pageFromPath = (pathname: string): Page => {
   const match = (Object.entries(pagePaths) as [Page, string][]).find(([, path]) => path === pathname.replace(/\/$/, ''))
   return match?.[0] || 'Numbers'
@@ -448,7 +458,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (!simulationDestination.trim()) { setToast('Enter the destination phone number.'); return }
     if (!simulationCallerId) { setToast('Choose an assigned caller ID.'); return }
     if (!key.voice_agent_enabled) { setToast('This API has no calling agent enabled.'); return }
-    if (/\b(transcript|post[- ]call|after the call|summari[sz]e the call)\b/i.test(simulationLiveInstructions)) {
+    if (livePromptContainsPostCallDirective(simulationLiveInstructions)) {
       setToast('These look like post-call instructions. Put transcript extraction or call summaries in the Post-call task field.'); return
     }
     let liveContext: Record<string, unknown>
