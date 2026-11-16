@@ -463,6 +463,26 @@ class CallCoordinator:
                     "call_transcript_checkpoint_incomplete",
                     extra={"session_id": session.session_id, "tenant_id": session.tenant_id},
                 )
+            finalize_recording = session.metadata.get("finalize_recording")
+            if (
+                session.metadata.get("recording_pipeline_finished") is True
+                and callable(finalize_recording)
+            ):
+                try:
+                    # AudioBufferProcessor emits its final buffered audio only
+                    # when stopped. Flush before persisting the session so its
+                    # recording URI is included in the durable call record.
+                    await finalize_recording()
+                except Exception as exc:
+                    logger.error(
+                        "recording_finalization_failed",
+                        extra={
+                            "session_id": session.session_id,
+                            "tenant_id": session.tenant_id,
+                            "provider": session.provider,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
             if self.call_session_store is not None:
                 try:
                     await self.call_session_store.update_state(

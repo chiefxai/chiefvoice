@@ -595,6 +595,9 @@ class VobizAdapter:
             diagnostics = session.metadata.get("call_audio_diagnostics")
             if isinstance(diagnostics, CallAudioDiagnostics):
                 diagnostics.log_summary()
+            # The buffer must flush only after Pipecat's runner has drained and
+            # stopped. A separate provider hangup webhook can race this cleanup.
+            session.metadata["recording_pipeline_finished"] = True
             await end_session(session, end_reason)
 
     async def hangup(self, session: AcceptedSession, reason: str | None = None) -> None:

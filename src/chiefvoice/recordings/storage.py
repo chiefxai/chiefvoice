@@ -606,6 +606,31 @@ def attach_recording(
     if not settings.recordings_enabled or not session.recording_allowed:
         return
 
+    finalize_lock = asyncio.Lock()
+    finalized = False
+
+    async def finalize_recording() -> None:
+        """Flush Pipecat's final audio chunk before call state is persisted."""
+        nonlocal finalized
+        async with finalize_lock:
+            if finalized:
+                return
+            await processor.stop_recording()
+            finalized = True
+            if not session.metadata.get("recording_uri"):
+                logger.info(
+                    "recording_finalized_without_audio",
+                    extra={
+                        "session_id": session.session_id,
+                        "channel": session.channel,
+                        "provider": session.provider,
+                    },
+                )
+
+    # The call coordinator awaits this before encrypting the final session. This
+    # both flushes the processor's buffer and ensures recording_uri is persisted.
+    session.metadata["finalize_recording"] = finalize_recording
+
     @processor.event_handler("on_audio_data")
     async def on_audio_data(_processor, audio: bytes, sample_rate: int, channels: int):
         if session.tenant_id is None:
