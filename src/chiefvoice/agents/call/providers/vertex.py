@@ -3,9 +3,9 @@ import logging
 from collections.abc import Sequence
 
 from fastapi import HTTPException
-from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transcriptions.language import Language
 
@@ -64,6 +64,9 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         # Import lazily so deployments using another backend do not require Google packages.
         from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
         from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
+
+        from chiefvoice.agents.call.audio_diagnostics import diagnostics_for_session
+        from chiefvoice.agents.call.gemini_reliability import reliable_vertex_service_class
 
         service_type = "vertex"
         model = self.model
@@ -220,7 +223,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             )
             return (service,)
 
-        service = GeminiLiveVertexLLMService(
+        reliable_service = reliable_vertex_service_class(
+            GeminiLiveVertexLLMService,
+            session_id=session.session_id,
+            diagnostics=diagnostics_for_session(session),
+        )
+        service = reliable_service(
             project_id=project_id,
             location=location,
             credentials=credentials_json,

@@ -7,13 +7,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.frames.frames import InputAudioRawFrame, OutputAudioRawFrame
 from pipecat.processors.frame_processor import (
     FrameDirection,
     FrameProcessor,
     FrameProcessorSetup,
 )
-from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.serializers.base_serializer import FrameSerializer
 
 from chiefvoice.sessions import AcceptedSession
@@ -36,6 +36,23 @@ class CallAudioDiagnostics:
         self.session_id = session.session_id
         self._stages: dict[str, _AudioStage] = {}
         self._started_at = time.monotonic()
+        self._gemini_audio = {
+            "received": 0,
+            "queued": 0,
+            "sent": 0,
+            "dropped": 0,
+        }
+        self._gemini_reconnects = 0
+
+    def record_gemini_audio(self, outcome: str, *, frames: int = 1) -> None:
+        """Count model-bound frames, including frames lost during reconnects."""
+        if outcome not in self._gemini_audio:
+            raise ValueError(f"Unsupported Gemini audio outcome: {outcome}")
+        self._gemini_audio[outcome] += max(0, frames)
+
+    def record_gemini_reconnect(self) -> int:
+        self._gemini_reconnects += 1
+        return self._gemini_reconnects
 
     def record(
         self,
@@ -93,7 +110,12 @@ class CallAudioDiagnostics:
             )
         logger.info(
             "call_audio_flow_summary",
-            extra={"session_id": self.session_id, "audio_stages": stages},
+            extra={
+                "session_id": self.session_id,
+                "audio_stages": stages,
+                "gemini_audio_frames": dict(self._gemini_audio),
+                "gemini_reconnect_attempts": self._gemini_reconnects,
+            },
         )
 
 
