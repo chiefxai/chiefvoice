@@ -1,6 +1,12 @@
 from collections.abc import Sequence
+import asyncio
 
-from pipecat.frames.frames import InputAudioRawFrame, OutputAudioRawFrame
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    InputAudioRawFrame,
+    OutputAudioRawFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -15,6 +21,28 @@ from chiefvoice.agents.call.audio_diagnostics import (
 from chiefvoice.agents.post_call.transcript import TranscriptCollector
 
 
+class BotSpeechDrainObserver(FrameProcessor):
+    """Track when the transport has finished sending a bot speech turn.
+
+    This processor is deliberately placed after ``transport.output()``. The
+    websocket output transport emits BotStoppedSpeakingFrame only after its
+    queued audio has been written, making this a useful drain barrier before a
+    telephony provider is asked to disconnect the call.
+    """
+
+    def __init__(self, drain_event: asyncio.Event) -> None:
+        super().__init__()
+        self._drain_event = drain_event
+
+    async def process_frame(self, frame, direction) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._drain_event.clear()
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._drain_event.set()
+        await self.push_frame(frame, direction)
+
+
 def build_pipeline(
     transport: BaseTransport,
     conversation_processors: Sequence[FrameProcessor],
@@ -23,6 +51,7 @@ def build_pipeline(
     transcript_processor: TranscriptCollector | None = None,
     assistant_transcript_processor: TranscriptCollector | None = None,
     audio_diagnostics: CallAudioDiagnostics | None = None,
+    bot_speech_drain_event: asyncio.Event | None = None,
 ) -> Pipeline:
     """Assemble a channel-neutral Pipecat pipeline around provider transport I/O.
 
@@ -62,6 +91,8 @@ def build_pipeline(
             AudioFrameCounter(audio_diagnostics, "gemini_output", OutputAudioRawFrame)
         )
     processors.append(transport.output())
+    if bot_speech_drain_event is not None:
+        processors.append(BotSpeechDrainObserver(bot_speech_drain_event))
     if recording_processor is not None:
         processors.append(recording_processor)
     processors.append(assistant_aggregator)

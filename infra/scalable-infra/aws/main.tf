@@ -397,7 +397,7 @@ resource "aws_lambda_function" "post_call" {
       VERTEX_PROJECT_ISOLATION_ENABLED = "true"
       VERTEX_PROJECT_ID              = var.vertex_project_id
       VERTEX_LOCATION                = var.vertex_location
-      POST_CALL_MODEL                = "gemini-2.5-flash"
+      POST_CALL_MODEL                = "gemini-3.5-flash-lite"
       DATABASE_URL_SECRET_ARN         = aws_secretsmanager_secret.database_url.arn
       POST_CALL_ENCRYPTION_KEY_SECRET_ARN = aws_secretsmanager_secret.runtime["post-call-encryption-key"].arn
       GOOGLE_CREDENTIALS_SECRET_ARN   = var.vertex_credentials_secret_arn

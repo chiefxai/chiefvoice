@@ -285,12 +285,12 @@ def create_app(
     if (
         settings.post_call_agent_provider == "langchain_vertex"
         and (settings.vertex_project_id or settings.vertex_project_isolation_enabled)
-        and settings.vertex_location
+        and settings.post_call_location
     ):
         if settings.vertex_project_isolation_enabled:
             post_call_agent = TenantVertexPostCallAgent(
                 vertex_project_directory,
-                location=settings.vertex_location or "us-central1",
+                location=settings.post_call_location,
                 model=settings.post_call_model,
                 credentials_json=settings.vertex_credentials_json,
                 credentials_path=settings.vertex_credentials_path,
@@ -298,7 +298,7 @@ def create_app(
         else:
             post_call_agent = create_vertex_post_call_agent(
                 project_id=settings.vertex_project_id,
-                location=settings.vertex_location or "us-central1",
+                location=settings.post_call_location,
                 model=settings.post_call_model,
                 credentials_json=settings.vertex_credentials_json,
                 credentials_path=settings.vertex_credentials_path,

@@ -54,6 +54,7 @@ def create_voice_pipeline_factory(
             transcript_processor=caller_transcript,
             assistant_transcript_processor=assistant_transcript,
             audio_diagnostics=diagnostics_for_session(session),
+            bot_speech_drain_event=session.metadata.get("bot_speech_drain_event"),
         )
 
     return factory

@@ -42,7 +42,10 @@ variable "vertex_model" { type = string
   default = "google/gemini-live-2.5-flash-native-audio"
 }
 variable "post_call_model" { type = string
-  default = "gemini-2.5-flash"
+  default = "gemini-3.5-flash-lite"
+}
+variable "post_call_location" { type = string
+  default = "global"
 }
 variable "gcp_project_parent" { type = string }
 variable "gcp_billing_account_id" { type = string }

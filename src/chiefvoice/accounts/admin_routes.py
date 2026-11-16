@@ -324,7 +324,7 @@ class AgentProviderConfigBody(BaseModel):
     kind: Literal["calling", "post_call"]
     provider: Literal["vertex"] = "vertex"
     model: str = Field(min_length=1, max_length=160)
-    location: str = Field(default="us-central1", min_length=1, max_length=64)
+    location: str | None = Field(default=None, min_length=1, max_length=64)
     cost_per_minute_minor: int = Field(default=0, ge=0, le=1_000_000_000)
     currency: Literal["INR"] = "INR"
     auto_hangup_when_complete: bool = False
@@ -335,12 +335,20 @@ class AgentProviderConfigBody(BaseModel):
     def normalize_tags_field(cls, value: list[str]) -> list[str]:
         return list(normalize_tags(value))
 
-    @field_validator("name", "model", "location")
+    @field_validator("name", "model")
     @classmethod
     def trim_required(cls, value: str) -> str:
         value = value.strip()
         if not value:
             raise ValueError("Value cannot be blank")
+        return value
+
+    @field_validator("location")
+    @classmethod
+    def trim_location(cls, value: str | None) -> str | None:
+        value = value.strip() if value is not None else None
+        if value == "":
+            raise ValueError("Location cannot be blank")
         return value
 
 
@@ -387,7 +395,8 @@ async def create_agent_config(body: AgentProviderConfigBody, request: Request, p
     _accounts, _ = _stores(request)
     agent = AgentConfiguration(
         agent_id=uuid4().hex, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(),
-        kind=body.kind, provider=body.provider, model=body.model.strip(), location=body.location.strip(),
+        kind=body.kind, provider=body.provider, model=body.model.strip(),
+        location=body.location or ("global" if body.kind == "post_call" else "us-central1"),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
         auto_hangup_when_complete=body.auto_hangup_when_complete,
         tags=tuple(body.tags),
@@ -409,7 +418,8 @@ async def update_agent_config(agent_id: str, body: AgentProviderConfigBody, requ
         raise HTTPException(status_code=404, detail="Agent configuration not found")
     replacement = AgentConfiguration(
         agent_id=agent_id, tenant_id=PLATFORM_OWNER_ID, name=body.name.strip(), kind=body.kind,
-        provider=body.provider, model=body.model.strip(), location=body.location.strip(),
+        provider=body.provider, model=body.model.strip(),
+        location=body.location or ("global" if body.kind == "post_call" else "us-central1"),
         cost_per_minute_minor=body.cost_per_minute_minor, currency=body.currency,
         auto_hangup_when_complete=body.auto_hangup_when_complete,
         tags=tuple(body.tags),
@@ -1025,11 +1035,11 @@ async def issue_phone_api_key(
             vertex_location=body.voice_location or (voice_agent.location if voice_agent else None) or (post_call_agent.location if post_call_agent else None) or "us-central1",
             vertex_credentials_json=credentials_json,
             voice_location=body.voice_location or (voice_agent.location if voice_agent else None) or "us-central1",
-            post_call_location=body.post_call_location or (post_call_agent.location if post_call_agent else None) or "us-central1",
+            post_call_location=body.post_call_location or (post_call_agent.location if post_call_agent else None) or "global",
             voice_provider=voice_agent.provider if voice_agent else "vertex",
             voice_model=voice_agent.model if voice_agent else "google/gemini-live-2.5-flash-native-audio",
             post_call_provider=post_call_agent.provider if post_call_agent else "vertex",
-            post_call_model=post_call_agent.model if post_call_agent else "gemini-2.5-flash",
+            post_call_model=post_call_agent.model if post_call_agent else "gemini-3.5-flash-lite",
             voice_agent_enabled=voice_agent is not None,
             post_call_agent_enabled=post_call_agent is not None,
             voice_agent_id=voice_agent.agent_id if voice_agent else None,
@@ -1120,11 +1130,11 @@ async def update_phone_api_key_config(
             vertex_location=body.voice_location or (voice_agent.location if voice_agent else None) or (body.post_call_location or (post_call_agent.location if post_call_agent else None)) or key.vertex_location or "us-central1",
             vertex_credentials_json=credentials_json,
             voice_location=body.voice_location or (voice_agent.location if voice_agent else None) or key.voice_location or "us-central1",
-            post_call_location=body.post_call_location or (post_call_agent.location if post_call_agent else None) or key.post_call_location or "us-central1",
+            post_call_location=body.post_call_location or (post_call_agent.location if post_call_agent else None) or key.post_call_location or "global",
             voice_provider=voice_agent.provider if voice_agent else "vertex",
             voice_model=voice_agent.model if voice_agent else "google/gemini-live-2.5-flash-native-audio",
             post_call_provider=post_call_agent.provider if post_call_agent else "vertex",
-            post_call_model=post_call_agent.model if post_call_agent else "gemini-2.5-flash",
+            post_call_model=post_call_agent.model if post_call_agent else "gemini-3.5-flash-lite",
             voice_agent_enabled=voice_agent is not None,
             post_call_agent_enabled=post_call_agent is not None,
             voice_agent_id=voice_agent.agent_id if voice_agent else None,

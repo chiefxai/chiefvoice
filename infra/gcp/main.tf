@@ -359,6 +359,7 @@ resource "google_compute_instance" "backend" {
       vertex_location          = var.vertex_location
       vertex_model             = var.vertex_model
       post_call_model          = var.post_call_model
+      post_call_location       = var.post_call_location
       oidc_issuer              = var.oidc_issuer
       oidc_audience            = var.oidc_audience
       oidc_jwks_url            = var.oidc_jwks_url

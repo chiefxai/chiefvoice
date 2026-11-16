@@ -53,7 +53,7 @@ class ApiKeySummary:
     voice_provider: str = "vertex"
     voice_model: str = "google/gemini-live-2.5-flash-native-audio"
     post_call_provider: str = "vertex"
-    post_call_model: str = "gemini-2.5-flash"
+    post_call_model: str = "gemini-3.5-flash-lite"
     voice_agent_enabled: bool = True
     post_call_agent_enabled: bool = True
     voice_agent_id: str | None = None
@@ -69,7 +69,7 @@ class ApiKeyVertexConfig:
     voice_provider: str = "vertex"
     voice_model: str = "google/gemini-live-2.5-flash-native-audio"
     post_call_provider: str = "vertex"
-    post_call_model: str = "gemini-2.5-flash"
+    post_call_model: str = "gemini-3.5-flash-lite"
     voice_agent_enabled: bool = True
     post_call_agent_enabled: bool = True
     post_call_project_id: str | None = None
@@ -97,7 +97,7 @@ class ApiKeyDirectory(Protocol):
         voice_provider: str = "vertex",
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
-        post_call_model: str = "gemini-2.5-flash",
+        post_call_model: str = "gemini-3.5-flash-lite",
         voice_agent_enabled: bool = True,
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,
@@ -124,7 +124,7 @@ class ApiKeyDirectory(Protocol):
         name: str,
         vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
         voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
-        post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
+        post_call_provider: str = "vertex", post_call_model: str = "gemini-3.5-flash-lite",
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
         voice_location: str | None = None, post_call_location: str | None = None,
         tags: tuple[str, ...] = (),
@@ -147,7 +147,7 @@ class ApiKeyDirectory(Protocol):
         voice_provider: str = "vertex",
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
-        post_call_model: str = "gemini-2.5-flash",
+        post_call_model: str = "gemini-3.5-flash-lite",
         voice_agent_enabled: bool = True,
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,
@@ -180,7 +180,7 @@ class ApiKeyRow(Base):
     voice_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="vertex", server_default="vertex")
     voice_model: Mapped[str] = mapped_column(String(160), nullable=False, default="google/gemini-live-2.5-flash-native-audio", server_default="google/gemini-live-2.5-flash-native-audio")
     post_call_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="vertex", server_default="vertex")
-    post_call_model: Mapped[str] = mapped_column(String(160), nullable=False, default="gemini-2.5-flash", server_default="gemini-2.5-flash")
+    post_call_model: Mapped[str] = mapped_column(String(160), nullable=False, default="gemini-3.5-flash-lite", server_default="gemini-3.5-flash-lite")
     voice_agent_enabled: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
     post_call_agent_enabled: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
     voice_agent_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("agent_provider_configs.id", ondelete="SET NULL"))
@@ -264,7 +264,7 @@ class SqlApiKeyDirectory:
         voice_provider: str = "vertex",
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
-        post_call_model: str = "gemini-2.5-flash",
+        post_call_model: str = "gemini-3.5-flash-lite",
         voice_agent_enabled: bool = True,
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,
@@ -360,7 +360,7 @@ class SqlApiKeyDirectory:
         self, tenant_id: str, key_id: str, *, vertex_project_id: str,
         vertex_location: str, vertex_credentials_json: str | None,
         voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
-        post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
+        post_call_provider: str = "vertex", post_call_model: str = "gemini-3.5-flash-lite",
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None, post_call_agent_id: str | None = None,
         voice_location: str | None = None, post_call_location: str | None = None,
@@ -387,7 +387,7 @@ class SqlApiKeyDirectory:
         name: str,
         vertex_project_id: str, vertex_location: str, vertex_credentials_json: str | None,
         voice_provider: str = "vertex", voice_model: str = "google/gemini-live-2.5-flash-native-audio",
-        post_call_provider: str = "vertex", post_call_model: str = "gemini-2.5-flash",
+        post_call_provider: str = "vertex", post_call_model: str = "gemini-3.5-flash-lite",
         voice_agent_enabled: bool = True, post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None, post_call_agent_id: str | None = None,
         voice_location: str | None = None, post_call_location: str | None = None,
@@ -437,7 +437,7 @@ class SqlApiKeyDirectory:
         voice_provider: str = "vertex",
         voice_model: str = "google/gemini-live-2.5-flash-native-audio",
         post_call_provider: str = "vertex",
-        post_call_model: str = "gemini-2.5-flash",
+        post_call_model: str = "gemini-3.5-flash-lite",
         voice_agent_enabled: bool = True,
         post_call_agent_enabled: bool = True,
         voice_agent_id: str | None = None,

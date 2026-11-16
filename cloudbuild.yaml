@@ -14,7 +14,8 @@ substitutions:
   _DATABASE_URL_SECRET: chiefvoice-function-database-url
   _POST_CALL_ENCRYPTION_KEY_SECRET: chiefvoice-post-call-encryption-key
   _VERTEX_LOCATION: us-central1
-  _POST_CALL_MODEL: gemini-2.5-flash
+  _POST_CALL_LOCATION: global
+  _POST_CALL_MODEL: gemini-3.5-flash-lite
   _OIDC_AUDIENCE: https://chiefvoice.elvoryx.in/api
   _OIDC_AUTHORITY: https://dev-ls5gkmim0q0ioeu1.us.auth0.com/
   _OIDC_CLIENT_ID: JjVV1d1Rn69oazE7h7s5JOuwbvAA6q4K
@@ -97,7 +98,7 @@ steps:
           --egress-settings=private-ranges-only \
           --timeout=240s --memory=1Gi \
           --max-instances=${_POST_CALL_FUNCTION_MAX_INSTANCES} \
-          --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=false,VERTEX_PROJECT_ID=${PROJECT_ID},VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL} \
+          --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=false,VERTEX_PROJECT_ID=${PROJECT_ID},VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_LOCATION=${_POST_CALL_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL} \
           --set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,POST_CALL_ENCRYPTION_KEY=${_POST_CALL_ENCRYPTION_KEY_SECRET}:latest \
           --quiet
         gcloud run services add-iam-policy-binding ${_FUNCTION_NAME} \

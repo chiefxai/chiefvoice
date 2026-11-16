@@ -55,7 +55,11 @@ variable "vertex_model" {
 }
 variable "post_call_model" {
   type    = string
-  default = "gemini-2.5-flash"
+  default = "gemini-3.5-flash-lite"
+}
+variable "post_call_location" {
+  type    = string
+  default = "global"
 }
 variable "labels" {
   type    = map(string)

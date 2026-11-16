@@ -194,6 +194,7 @@ resource "aws_lambda_function" "post_call" {
     VERTEX_PROJECT_ISOLATION_ENABLED = "true"
     VERTEX_LOCATION = var.vertex_location
     POST_CALL_MODEL = var.post_call_model
+    POST_CALL_LOCATION = var.post_call_location
     GOOGLE_CREDENTIALS_SECRET_ARN = var.google_credentials_secret_arn
   } }
   depends_on = [aws_secretsmanager_secret_version.lambda_database_url]
@@ -261,6 +262,7 @@ resource "aws_instance" "backend" {
     vertex_location = var.vertex_location
     vertex_model = var.vertex_model
     post_call_model = var.post_call_model
+    post_call_location = var.post_call_location
     gcp_project_parent = var.gcp_project_parent
     gcp_billing_account_id = trimprefix(var.gcp_billing_account_id, "billingAccounts/")
     gcp_runtime_service_account = var.gcp_runtime_service_account

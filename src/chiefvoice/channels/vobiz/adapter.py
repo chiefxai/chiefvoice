@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 VOBIZ_API = "https://api.vobiz.ai"
 PIPELINE_SAMPLE_RATE = 8000
 MAX_CALL_STATE_TOKEN_LENGTH = 16_384
+AGENT_HANGUP_AUDIO_GRACE_SECONDS = 1.5
+AGENT_HANGUP_AUDIO_QUIET_SECONDS = 0.5
+AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS = 12.0
 
 
 class _InvalidCallState(ValueError):
@@ -406,10 +409,70 @@ class VobizAdapter:
             if inspect.isawaitable(persistence_result):
                 await persistence_result
         end_reason = "completed"
+        agent_hangup_request = asyncio.Event()
+        agent_hangup_task: asyncio.Task[None] | None = None
+        # Starts drained. The live pipeline clears this when bot speech begins
+        # and sets it only after transport.output() has drained the turn.
+        bot_speech_drained = asyncio.Event()
+        bot_speech_drained.set()
+        session.metadata["bot_speech_drain_event"] = bot_speech_drained
 
         async def hang_up_from_agent() -> None:
-            await self.hangup(session, "agent_completed")
+            logger.info(
+                "vobiz_agent_hangup_drain_requested",
+                extra={"session_id": session.session_id, "provider": self.provider},
+            )
+            # Do not block Gemini's frame/tool task here. The independent
+            # monitor waits for the downstream transport drain signal and then
+            # hangs up, so the pipeline can continue delivering audio frames.
+            agent_hangup_request.set()
         session.metadata["hang_up_call"] = hang_up_from_agent
+
+        async def hang_up_after_audio_drain() -> None:
+            await agent_hangup_request.wait()
+            logger.info(
+                "vobiz_agent_hangup_waiting_for_audio_drain",
+                extra={"session_id": session.session_id, "provider": self.provider},
+            )
+            await asyncio.sleep(AGENT_HANGUP_AUDIO_GRACE_SECONDS)
+            deadline = asyncio.get_running_loop().time() + AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS
+            try:
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    await asyncio.wait_for(bot_speech_drained.wait(), timeout=remaining)
+                    # Require a short stable-quiet interval to catch a
+                    # speech-start frame still travelling through the pipeline.
+                    await asyncio.sleep(min(AGENT_HANGUP_AUDIO_QUIET_SECONDS, remaining))
+                    if bot_speech_drained.is_set():
+                        break
+            except TimeoutError:
+                logger.warning(
+                    "vobiz_agent_hangup_audio_drain_timeout",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "timeout_seconds": AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS,
+                    },
+                )
+            else:
+                logger.info(
+                    "vobiz_agent_hangup_audio_drained",
+                    extra={"session_id": session.session_id, "provider": self.provider},
+                )
+            try:
+                await self.hangup(session, "agent_completed")
+            except Exception as exc:
+                logger.error(
+                    "vobiz_agent_hangup_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
         try:
             transport = await self.build_transport(session, websocket)
             if pipeline_factory is None:
@@ -444,6 +507,10 @@ class VobizAdapter:
             runner_task = asyncio.create_task(
                 PipelineRunner(handle_sigint=False).run(task),
                 name=f"vobiz-pipeline-{session.session_id}",
+            )
+            agent_hangup_task = asyncio.create_task(
+                hang_up_after_audio_drain(),
+                name=f"vobiz-agent-hangup-{session.session_id}",
             )
             timeout_task = None
             try:
@@ -522,6 +589,9 @@ class VobizAdapter:
                     pass
             raise
         finally:
+            if agent_hangup_task is not None and not agent_hangup_task.done():
+                agent_hangup_task.cancel()
+                await asyncio.gather(agent_hangup_task, return_exceptions=True)
             diagnostics = session.metadata.get("call_audio_diagnostics")
             if isinstance(diagnostics, CallAudioDiagnostics):
                 diagnostics.log_summary()
