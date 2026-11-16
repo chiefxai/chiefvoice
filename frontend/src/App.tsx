@@ -5,7 +5,7 @@ import {
   Alert, Avatar, Button, Card, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Drawer, FormControl, IconButton, InputAdornment,
   InputLabel, ListItemText, Menu, MenuItem, Select, Snackbar, Stack, Switch, FormControlLabel, Table, TableBody, TableCell,
-  TableHead, TableRow, TableContainer, TextField, Tooltip, Typography,
+  TableHead, TableRow, TableContainer, TablePagination, TextField, Tooltip, Typography,
 } from '@mui/material'
 import HubRoundedIcon from '@mui/icons-material/HubRounded'
 import KeyRoundedIcon from '@mui/icons-material/KeyRounded'
@@ -148,7 +148,7 @@ const api = {
   phoneNumbers: () => http.get<{ items: RegisteredNumber[] }>('/v1/admin/customers/phone-numbers').then(r => r.data.items),
   apiKeys: () => http.get<{ items: PlatformApiKey[] }>('/v1/admin/customers/api-keys').then(r => r.data.items),
   agentConfigs: () => http.get<{ items: AgentConfiguration[] }>('/v1/admin/customers/agent-configs').then(r => r.data.items),
-  apiCalls: (id: string) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`).then(r => r.data),
+  apiCalls: (id: string, limit = 50, offset = 0) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`, { params: { limit, offset } }).then(r => r.data),
   apiCallDetail: (id: string, sessionId: string) => http.get<ApiCallDetail>(`/v1/admin/customers/api-keys/${id}/calls/${sessionId}`).then(r => r.data),
   apiCallRecording: (id: string, sessionId: string) => http.get<Blob>(`/v1/admin/customers/api-keys/${id}/calls/${sessionId}/recording`, { responseType: 'blob' }).then(r => r.data),
   voiceProfiles: (id: string) => http.get<{ items: VoiceAgentProfile[] }>(`/v1/admin/customers/api-keys/${id}/voice-profiles`).then(r => r.data.items),
@@ -196,6 +196,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const page = apiDetailId ? 'API' : pageFromPath(location.pathname)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null)
+  const [apiCallsPage, setApiCallsPage] = useState(0)
+  const [apiCallsPageSize, setApiCallsPageSize] = useState(10)
   const [token, setToken] = useState(sessionStorage.getItem('chiefvoice.token') || '')
   const [authReady, setAuthReady] = useState(false)
   const [signingIn, setSigningIn] = useState(false)
@@ -270,6 +272,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   }, [location.pathname, location.search, navigate, apiDetailId])
 
   useEffect(() => {
+    setApiCallsPage(0)
+  }, [apiDetailId])
+
+  useEffect(() => {
     let active = true
     const initializeAuth = async () => {
       const params = new URLSearchParams(window.location.search)
@@ -322,7 +328,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const agentsQuery = useQuery({ queryKey: ['platform-agent-configs'], queryFn: api.agentConfigs, enabled: connected && (page === 'API' || page === 'Agents'), retry: false })
   const simulationProfilesQuery = useQuery({ queryKey: ['simulation-voice-profiles', simulationApiId], queryFn: () => api.voiceProfiles(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
   const simulationCallsQuery = useQuery({ queryKey: ['simulation-call-logs', simulationApiId], queryFn: () => api.apiCalls(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false, refetchInterval: simulationSessionId ? 3000 : false })
-  const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', apiDetailId], queryFn: () => api.apiCalls(apiDetailId!), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 5000 : false })
+  const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', apiDetailId, apiCallsPage, apiCallsPageSize], queryFn: () => api.apiCalls(apiDetailId!, apiCallsPageSize, apiCallsPage * apiCallsPageSize), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', apiDetailId], queryFn: () => api.apiBilling(apiDetailId!), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 10000 : false })
   const apiDetailKey = keysQuery.data?.find(key => key.id === apiDetailId) || null
   const issueMutation = useMutation({
@@ -599,7 +605,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       <div className="content">
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)); setManagedNumberTags((number.tags || []).join(', ')) }} />}
         {page === 'API' && (apiDetailId
-          ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onBack={() => navigate(pagePaths.API)} onEdit={key => openEditApi(key)} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} />
+          ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsTotal={apiCallsQuery.data?.total || 0} callsPage={apiCallsPage} callsPageSize={apiCallsPageSize} onCallsPageChange={setApiCallsPage} onCallsPageSizeChange={size => { setApiCallsPageSize(size); setApiCallsPage(0) }} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onBack={() => navigate(pagePaths.API)} onEdit={key => openEditApi(key)} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} />
           : <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
         {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
         {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={selectSimulationProfile} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} />}
@@ -792,29 +798,25 @@ function ApiPage({ connected, numbers, keys, agents, loading, error, onCreate, o
   </>
 }
 
-function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsLoading, callsError, billing, billingLoading, billingError, onBack, onEdit, onAdjustBilling }: {
+function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal, callsPage, callsPageSize, onCallsPageChange, onCallsPageSizeChange, callsLoading, callsError, billing, billingLoading, billingError, onBack, onEdit, onAdjustBilling }: {
   api: PlatformApiKey | null; agents: AgentConfiguration[]; loading: boolean; error: unknown
-  calls: ApiCallLog[]; callsLoading: boolean; callsError: unknown; billing?: ApiBillingUsage
+  calls: ApiCallLog[]; callsTotal: number; callsPage: number; callsPageSize: number
+  onCallsPageChange: (page: number) => void; onCallsPageSizeChange: (size: number) => void
+  callsLoading: boolean; callsError: unknown; billing?: ApiBillingUsage
   billingLoading: boolean; billingError: unknown; onBack: () => void
   onEdit: (key: PlatformApiKey) => void; onAdjustBilling: (amount: string) => void
 }) {
   const voiceAgent = agents.find(agent => agent.id === apiKey?.voice_agent_id)
   const postCallAgent = agents.find(agent => agent.id === apiKey?.post_call_agent_id)
   return <>
-    <PageIntro eyebrow="API CUSTOMER" title={apiKey?.name || 'API details'} subtitle="Configuration, call history, recordings, transcripts, post-call results, and billing for this API." />
-    <Stack direction="row" gap={1} sx={{ mt: 2, mb: 2 }}>
-      <Button variant="outlined" onClick={onBack}>Back to APIs</Button>
-      {apiKey && !apiKey.revoked_at && <Button variant="contained" onClick={() => onEdit(apiKey)}>Edit API</Button>}
-    </Stack>
+    <PageIntro eyebrow="API CUSTOMER" title={apiKey?.name || 'API details'} subtitle="Configuration, calls, recordings, transcripts, post-call results, and billing for this API." action={<Stack direction={{ xs: 'column', sm: 'row' }} gap={1}><Button variant="outlined" onClick={onBack}>Back to APIs</Button>{apiKey && !apiKey.revoked_at && <Button variant="contained" onClick={() => onEdit(apiKey)}>Edit API</Button>}</Stack>} />
     {loading ? <Card className="surface-card" sx={{ p: 3 }}><CircularProgress size={24} /></Card> : error ? <Alert severity="error">{errorText(error)}</Alert> : !apiKey ? <Alert severity="warning">This API could not be found. It may have been deleted.</Alert> : <Stack gap={2}>
       <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
-        <Stack gap={2}>
+        <Stack gap={2.5}>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
-            <Stack gap={0.5}><Typography variant="h5" sx={{ fontWeight: 800 }}>{apiKey.name}</Typography><Typography color="text.secondary">Customer: {apiKey.customer_name}</Typography><TagChips tags={apiKey.tags || []} /></Stack>
-            <StatusChip enabled={!apiKey.revoked_at} label={apiKey.revoked_at ? 'Revoked' : 'Active'} />
+            <Stack gap={0.75}><Stack direction="row" alignItems="center" gap={1.25} flexWrap="wrap"><Typography variant="h5" sx={{ fontWeight: 800 }}>{apiKey.name}</Typography><StatusChip enabled={!apiKey.revoked_at} label={apiKey.revoked_at ? 'Revoked' : 'Active'} /></Stack><Typography color="text.secondary">Customer: {apiKey.customer_name}</Typography><Stack direction="row" gap={1} alignItems="center" flexWrap="wrap"><Chip size="small" variant="outlined" label={`Key · ${apiKey.key_prefix}`} /><TagChips tags={apiKey.tags || []} /></Stack></Stack>
           </Stack>
           <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} flexWrap="wrap">
-            <UsageCard label="API key prefix" value={apiKey.key_prefix} />
             <UsageCard label="Created" value={new Date(apiKey.created_at).toLocaleString()} />
             <UsageCard label="Assigned numbers" value={apiKey.assigned_numbers.map(number => number.phone_number).join(', ') || 'None'} />
             <UsageCard label="Call recordings" value={apiKey.recording_allowed ? 'Enabled' : 'Disabled'} />
@@ -832,11 +834,28 @@ function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsLoadi
         </Stack>
       </Card>
 
-      <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
-        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1.5 }}>Call history</Typography>
-        {callsLoading ? <CircularProgress size={22} /> : callsError ? <Alert severity="error">{errorText(callsError)}</Alert> : calls.length ? <Stack gap={1.5}>
-          {calls.map(call => <ApiCallRecord key={call.session_id} apiId={apiKey.id} call={call} />)}
-        </Stack> : <div className="empty-state">No calls yet. Use this API from the Docs or Simulation page to place a test call.</div>}
+      <Card className="surface-card" sx={{ overflow: 'hidden' }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'center' }} justifyContent="space-between" gap={1} sx={{ px: { xs: 2, md: 3 }, pt: { xs: 2, md: 2.5 }, pb: 2 }}>
+          <Stack gap={0.35}><Stack direction="row" alignItems="center" gap={1}><Typography variant="h6" sx={{ fontWeight: 800 }}>Call history</Typography><Chip size="small" label={callsTotal} /></Stack><Typography variant="body2" color="text.secondary">Review call outcomes and open a call to see its recording, transcript, and extracted result.</Typography></Stack>
+        </Stack>
+        {callsLoading && !calls.length ? <Stack alignItems="center" sx={{ py: 6 }}><CircularProgress size={24} /></Stack> : callsError ? <Alert severity="error" sx={{ mx: 3, mb: 2 }}>{errorText(callsError)}</Alert> : calls.length ? <>
+          <Stack gap={1} sx={{ px: { xs: 1.5, md: 2.5 }, pb: 1.5 }}>
+            {calls.map(call => <ApiCallRecord key={call.session_id} apiId={apiKey.id} call={call} />)}
+          </Stack>
+          <TablePagination
+            component="div"
+            count={callsTotal}
+            page={callsPage}
+            onPageChange={(_, page) => onCallsPageChange(page)}
+            rowsPerPage={callsPageSize}
+            onRowsPerPageChange={event => onCallsPageSizeChange(Number(event.target.value))}
+            rowsPerPageOptions={[10, 25, 50, 100]}
+            labelRowsPerPage="Calls per page"
+            showFirstButton
+            showLastButton
+            sx={{ borderTop: 1, borderColor: 'divider', '.MuiTablePagination-toolbar': { px: { xs: 1.5, md: 2.5 }, flexWrap: 'wrap' } }}
+          />
+        </> : <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 6 }}><Typography sx={{ fontWeight: 700 }}>No calls yet</Typography><Typography variant="body2" color="text.secondary">Use this API from the Docs or Simulation page to place a test call. Calls will appear here when they start.</Typography></Stack>}
       </Card>
 
       <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
