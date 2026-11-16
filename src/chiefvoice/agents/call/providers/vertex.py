@@ -168,10 +168,13 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             )
             system_instruction = (
                 f"{system_instruction.strip()}\n\n"
-                "When the caller's requested information has been collected, briefly thank them, "
-                "then call the hang_up_call tool to end the phone call. Do not call it before "
-                "the requested information is collected. Never claim the call has ended unless "
-                "the tool succeeds."
+                "Automatic call completion is enabled. Track every field or outcome requested "
+                "by the live-call instructions. As soon as all requested information is collected, "
+                "or the caller clearly declines or cannot provide a requested item, say a brief "
+                "thank-you and immediately call hang_up_call. Do not merely say that you will "
+                "hang up, do not wait for the caller to end the call, and do not continue with "
+                "unrelated conversation after the task is complete. Never claim the call ended "
+                "unless the tool succeeds."
             )
 
             async def hang_up_call(params: FunctionCallParams) -> None:

@@ -615,6 +615,7 @@ class VobizAdapter:
             call_context = {
                 "live_agent_instructions": session.live_agent_instructions,
                 "live_agent_context": session.live_agent_context,
+                "auto_hangup_when_complete": session.auto_hangup_when_complete,
                 "post_call_context": session.post_call_context,
                 "post_call_output_schema": session.post_call_output_schema,
                 "post_call_tools": session.post_call_tools,
@@ -625,8 +626,8 @@ class VobizAdapter:
             has_call_context = any(
                 value is not None
                 for name, value in call_context.items()
-                if name != "include_live_agent_context"
-            ) or session.include_live_agent_context
+                if name not in {"include_live_agent_context", "auto_hangup_when_complete"}
+            ) or session.include_live_agent_context or session.auto_hangup_when_complete
             if self.call_session_store is not None:
                 if not session.tenant_id:
                     raise ValueError("tenant_id is required for durable callback state")
@@ -758,6 +759,7 @@ class VobizAdapter:
                     time_zone = call_context.get("post_call_time_zone")
                     time_format = call_context.get("post_call_time_format")
                     include_live_context = call_context.get("include_live_agent_context", False)
+                    auto_hangup = call_context.get("auto_hangup_when_complete", False)
                     if live_context is not None and not isinstance(live_context, dict):
                         raise ValueError("Invalid live agent context")
                     live_instructions = call_context.get("live_agent_instructions")
@@ -783,6 +785,8 @@ class VobizAdapter:
                         raise ValueError("Invalid post-call time format")
                     if not isinstance(include_live_context, bool):
                         raise ValueError("Invalid live agent context flag")
+                    if not isinstance(auto_hangup, bool):
+                        raise ValueError("Invalid auto hang-up flag")
                     claims["call_context"] = call_context
         except _InvalidCallState as exc:
             reject(exc.reason)
@@ -852,6 +856,9 @@ class VobizAdapter:
             post_call_time_format=claims.get("call_context", {}).get("post_call_time_format"),
             include_live_agent_context=claims.get("call_context", {}).get(
                 "include_live_agent_context", False
+            ),
+            auto_hangup_when_complete=claims.get("call_context", {}).get(
+                "auto_hangup_when_complete", False
             ),
         )
 
