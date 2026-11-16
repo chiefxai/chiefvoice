@@ -111,6 +111,11 @@ type ApiCallLog = {
   webhook_status?: string | null
 }
 type ApiCallDetail = ApiCallLog & { transcript: string | null; recording_allowed: boolean }
+type SimulationTemplate = {
+  id: string; name: string; apiId: string; destination: string; callerId: string; profileId: string
+  liveInstructions: string; liveContext: string; postCallContext: string; outputSchema: string
+  tools: string[]; timeZone: string; timeFormat: string; includeLiveContext: boolean; recording: boolean
+}
 type VoiceAgentProfile = { id: string; name: string; language: string; voice: string; speaking_style: string; instructions: string }
 type ApiBillingUsage = {
   configured: boolean; billing_mode?: 'prepaid' | 'postpaid'; currency?: string; rate_per_minute_minor?: number
@@ -379,9 +384,9 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   })
   const simulateCallMutation = useMutation({
     mutationFn: ({ keyId, data }: { keyId: string; data: Record<string, unknown> }) => api.simulateCall(keyId, data),
-    onSuccess: result => {
+    onSuccess: (result, variables) => {
       setSimulationSessionId(result.session_id)
-      void queryClient.invalidateQueries({ queryKey: ['simulation-call-logs', simulationApiId] })
+      void queryClient.invalidateQueries({ queryKey: ['simulation-call-logs', variables.keyId] })
       setToast(`Simulation call started · ${result.session_id}`)
     },
     onError: error => setToast(errorText(error)),
@@ -467,36 +472,61 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setSimulationLiveInstructions(profile?.instructions || '')
     setSimulationLiveContext('{}')
   }
-  const startSimulation = () => {
-    const key = (keysQuery.data || []).find(item => item.id === simulationApiId)
+  const startSimulation = (template?: SimulationTemplate) => {
+    const config: Omit<SimulationTemplate, 'id' | 'name'> = template || {
+      apiId: simulationApiId, destination: simulationDestination, callerId: simulationCallerId,
+      profileId: simulationProfileId, liveInstructions: simulationLiveInstructions,
+      liveContext: simulationLiveContext, postCallContext: simulationPostCallContext,
+      outputSchema: simulationOutputSchema, tools: simulationTools, timeZone: simulationTimeZone,
+      timeFormat: simulationTimeFormat, includeLiveContext: simulationIncludeLiveContext,
+      recording: simulationRecording,
+    }
+    const key = (keysQuery.data || []).find(item => item.id === config.apiId)
     if (!key || key.revoked_at) { setToast('Select an active API first.'); return }
-    if (!simulationDestination.trim()) { setToast('Enter the destination phone number.'); return }
-    if (!simulationCallerId) { setToast('Choose an assigned caller ID.'); return }
+    if (!config.destination.trim()) { setToast('Enter the destination phone number.'); return }
+    if (!config.callerId) { setToast('Choose an assigned caller ID.'); return }
     if (!key.voice_agent_enabled) { setToast('This API has no calling agent enabled.'); return }
-    if (livePromptContainsPostCallDirective(simulationLiveInstructions)) {
+    if (livePromptContainsPostCallDirective(config.liveInstructions)) {
       setToast('These look like post-call instructions. Put transcript extraction or call summaries in the Post-call task field.'); return
     }
     let liveContext: Record<string, unknown>
     let outputSchema: Record<string, unknown>
     try {
-      liveContext = JSON.parse(simulationLiveContext || '{}')
+      liveContext = JSON.parse(config.liveContext || '{}')
       if (!liveContext || Array.isArray(liveContext) || typeof liveContext !== 'object') throw new Error('Live-call context must be a JSON object.')
-      outputSchema = JSON.parse(simulationOutputSchema)
+      outputSchema = JSON.parse(config.outputSchema)
       if (!outputSchema || Array.isArray(outputSchema) || typeof outputSchema !== 'object') throw new Error('Output schema must be a JSON object.')
     } catch (error) { setToast(error instanceof Error ? error.message : 'Check the JSON fields.'); return }
-    const [provider] = simulationCallerId.split('|')
+    const [provider] = config.callerId.split('|')
     const data: Record<string, unknown> = {
-      provider, channel: 'phone', destination: simulationDestination.trim(), caller_id: simulationCallerId.split('|')[1],
-      live_agent: { agent_id: simulationProfileId || null, instructions: simulationLiveInstructions, context: liveContext },
-      recording_allowed: simulationRecording,
+      provider, channel: 'phone', destination: config.destination.trim(), caller_id: config.callerId.split('|')[1],
+      live_agent: { agent_id: config.profileId || null, instructions: config.liveInstructions, context: liveContext },
+      recording_allowed: config.recording,
     }
     if (key.post_call_agent_enabled) data.post_call = {
-      context: simulationPostCallContext.trim(), output_schema: outputSchema, tools: simulationTools,
-      time_zone: simulationTimeZone, time_format: simulationTimeFormat,
-      include_live_agent_context: simulationIncludeLiveContext,
+      context: config.postCallContext.trim(), output_schema: outputSchema, tools: config.tools,
+      time_zone: config.timeZone, time_format: config.timeFormat,
+      include_live_agent_context: config.includeLiveContext,
     }
+    if (template) applySimulationTemplate(template)
     setSimulationSessionId('')
     simulateCallMutation.mutate({ keyId: key.id, data })
+  }
+  const applySimulationTemplate = (template: SimulationTemplate) => {
+    selectSimulationApi(template.apiId)
+    setSimulationDestination(template.destination)
+    setSimulationCallerId(template.callerId)
+    setSimulationProfileId(template.profileId)
+    setSimulationLiveInstructions(template.liveInstructions)
+    setSimulationLiveContext(template.liveContext)
+    setSimulationPostCallContext(template.postCallContext)
+    setSimulationOutputSchema(template.outputSchema)
+    setSimulationTools(template.tools)
+    setSimulationTimeZone(template.timeZone)
+    setSimulationTimeFormat(template.timeFormat)
+    setSimulationIncludeLiveContext(template.includeLiveContext)
+    setSimulationRecording(template.recording)
+    setSimulationSessionId('')
   }
   const simulationCall = simulationCallsQuery.data?.items.find(item => item.session_id === simulationSessionId)
   const handleCreateNumberSelection = (value: string[] | string) => {
@@ -572,7 +602,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onBack={() => navigate(pagePaths.API)} onEdit={key => openEditApi(key)} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} />
           : <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
         {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
-        {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={selectSimulationProfile} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} submitting={simulateCallMutation.isPending} />}
+        {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={selectSimulationProfile} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} />}
         {page === 'Docs' && <DocsPage />}
       </div>
     </main>
@@ -901,13 +931,81 @@ function SimulationPage(props: {
   tools: string[]; onToolsChange: (value: string[]) => void; timeZone: string; onTimeZoneChange: (value: string) => void
   timeFormat: string; onTimeFormatChange: (value: string) => void; includeLiveContext: boolean; onIncludeLiveContextChange: (value: boolean) => void
   recording: boolean; onRecordingChange: (value: boolean) => void; call?: ApiCallLog; callLoading: boolean
-  onStart: () => void; submitting: boolean
+  onStart: (template?: SimulationTemplate) => void
+  onApplyTemplate: (template: SimulationTemplate) => void
+  submitting: boolean
 }) {
   const selected = props.keys.find(key => key.id === props.selectedApiId)
   const assignedNumbers = selected?.assigned_numbers || []
+  const [templates, setTemplates] = useState<SimulationTemplate[]>(() => {
+    try {
+      const parsed: unknown = JSON.parse(window.localStorage.getItem('chiefvoice.simulation-templates') || '[]')
+      return Array.isArray(parsed) ? parsed as SimulationTemplate[] : []
+    } catch { return [] }
+  })
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(false)
+  const [templateName, setTemplateName] = useState('')
+  const [editingTemplateId, setEditingTemplateId] = useState('')
+  const [templateNotice, setTemplateNotice] = useState('')
+  useEffect(() => {
+    try { window.localStorage.setItem('chiefvoice.simulation-templates', JSON.stringify(templates)) } catch { setTemplateNotice('Could not save templates in this browser storage.') }
+  }, [templates])
+  const canSaveTemplate = Boolean(selected && !selected.revoked_at && selected.voice_agent_enabled && props.destination.trim() && selected.assigned_numbers.some(number => `${number.provider}|${number.phone_number}` === props.callerId))
+  const openTemplateDialog = () => {
+    if (!canSaveTemplate) { setTemplateNotice('Select an API, caller ID, and destination before saving a template.'); return }
+    setEditingTemplateId('')
+    setTemplateName('')
+    setTemplateDialogOpen(true)
+  }
+  const saveTemplate = () => {
+    const name = templateName.trim()
+    if (!name || !selected) return
+    const template: SimulationTemplate = {
+      id: editingTemplateId || crypto.randomUUID(), name, apiId: props.selectedApiId,
+      destination: props.destination.trim(), callerId: props.callerId, profileId: props.profileId,
+      liveInstructions: props.liveInstructions, liveContext: props.liveContext,
+      postCallContext: props.postCallContext, outputSchema: props.outputSchema, tools: props.tools,
+      timeZone: props.timeZone, timeFormat: props.timeFormat,
+      includeLiveContext: props.includeLiveContext, recording: props.recording,
+    }
+    setTemplates(current => editingTemplateId
+      ? current.map(item => item.id === editingTemplateId ? template : item)
+      : [template, ...current])
+    setTemplateNotice(`Template “${name}” saved.`)
+    setTemplateDialogOpen(false)
+    setEditingTemplateId('')
+  }
+  const loadTemplateForEdit = (template: SimulationTemplate) => {
+    props.onApplyTemplate(template)
+    setEditingTemplateId(template.id)
+    setTemplateName(template.name)
+    setTemplateNotice(`Loaded “${template.name}”. Edit the call fields, then update this template.`)
+  }
+  const deleteTemplate = (template: SimulationTemplate) => {
+    if (!window.confirm(`Delete simulation template “${template.name}”?`)) return
+    setTemplates(current => current.filter(item => item.id !== template.id))
+    setTemplateNotice(`Template “${template.name}” deleted.`)
+    if (editingTemplateId === template.id) setEditingTemplateId('')
+  }
   return <>
     <PageIntro eyebrow="DEVELOPER TESTING" title="Simulation" subtitle="Place a real test call through a selected API and inspect its post-call result." />
     <Alert severity="warning" sx={{ mt: 2 }}>This places a real outbound call. The selected API’s billing plan, agent costs, and recording policy apply.</Alert>
+    <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1.5}>
+        <div><Typography variant="h6" sx={{ fontWeight: 800 }}>One-click simulation templates</Typography><Typography variant="body2" color="text.secondary">Save a complete call setup, then send a test call directly from its card. Templates are saved in this browser.</Typography></div>
+        <Button variant="outlined" onClick={openTemplateDialog} disabled={!canSaveTemplate}>Save current setup as template</Button>
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>Templates include the destination and context fields. Use placeholders instead of sensitive patient or customer data.</Typography>
+      {templateNotice && <Alert severity="info" sx={{ mt: 1.5 }} onClose={() => setTemplateNotice('')}>{templateNotice}</Alert>}
+      {templates.length ? <Stack gap={1.25} sx={{ mt: 2 }}>{templates.map(template => {
+        const templateApi = props.keys.find(key => key.id === template.apiId)
+        const isUsable = Boolean(templateApi && !templateApi.revoked_at && templateApi.voice_agent_enabled && templateApi.assigned_numbers.some(number => `${number.provider}|${number.phone_number}` === template.callerId))
+        return <Card key={template.id} variant="outlined" sx={{ p: 1.5 }}><Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'center' }} gap={1.5}>
+          <div><Typography sx={{ fontWeight: 800 }}>{template.name}</Typography><Typography variant="caption" color="text.secondary">{templateApi ? `${templateApi.customer_name} · ${templateApi.name}` : 'API unavailable'} · {template.destination} · {templateApi?.assigned_numbers.find(number => `${number.provider}|${number.phone_number}` === template.callerId)?.phone_number || 'Caller ID unavailable'}</Typography></div>
+          <Stack direction="row" gap={0.5} flexWrap="wrap"><Button size="small" onClick={() => loadTemplateForEdit(template)}>Load / edit</Button><Button size="small" color="error" onClick={() => deleteTemplate(template)}>Delete</Button><Button size="small" variant="contained" startIcon={<ScienceRoundedIcon />} disabled={!isUsable || props.submitting} onClick={() => props.onStart(template)}>{props.submitting ? 'Sending…' : 'Send test call'}</Button></Stack>
+        </Stack></Card>
+      })}</Stack> : <div className="empty-state" style={{ marginTop: 16 }}>No saved templates. Fill in the call setup below and save it for one-click testing.</div>}
+    </Card>
     <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
       {props.loading ? <CircularProgress size={24} /> : props.error ? <Alert severity="error">{errorText(props.error)}</Alert> : !props.keys.length ? <div className="empty-state">Create an API and assign a phone number before starting a simulation.</div> : <Stack gap={2.5}>
         <Typography variant="h6" sx={{ fontWeight: 800 }}>Call setup</Typography>
@@ -941,7 +1039,10 @@ function SimulationPage(props: {
         </>}
         {!selected?.recording_allowed && <Alert severity="warning">Recordings are disabled for this API. Enable them in the API’s Edit configuration before starting a call you want recorded.</Alert>}
         <FormControl><Stack direction="row" alignItems="center" gap={1}><Checkbox checked={props.recording} disabled={!selected?.recording_allowed} onChange={event => props.onRecordingChange(event.target.checked)} /><Typography variant="body2">Record this test call</Typography></Stack></FormControl>
-        <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={props.onStart} disabled={!selected || !selected.voice_agent_enabled || !props.callerId || !props.destination.trim() || props.submitting}>{props.submitting ? 'Starting call…' : 'Start test call'}</Button>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+          {editingTemplateId && <Button variant="outlined" onClick={() => setTemplateDialogOpen(true)} disabled={!canSaveTemplate}>Update current template</Button>}
+          <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={() => props.onStart()} disabled={!selected || !selected.voice_agent_enabled || !props.callerId || !props.destination.trim() || props.submitting}>{props.submitting ? 'Starting call…' : 'Start test call'}</Button>
+        </Stack>
       </Stack>}
     </Card>
     {props.call && <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
@@ -952,6 +1053,11 @@ function SimulationPage(props: {
         {props.call.end_reason && <Alert severity={props.call.status === 'completed' ? 'info' : 'error'}>Call ended: {props.call.end_reason}</Alert>}
       </Stack>
     </Card>}
+    <Dialog open={templateDialogOpen} onClose={() => setTemplateDialogOpen(false)} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>{editingTemplateId ? 'Update simulation template' : 'Save simulation template'}</DialogTitle>
+      <DialogContent><TextField autoFocus label="Template name" value={templateName} onChange={event => setTemplateName(event.target.value)} required fullWidth sx={{ mt: 1 }} /></DialogContent>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setTemplateDialogOpen(false)}>Cancel</Button><Button variant="contained" disabled={!templateName.trim() || !canSaveTemplate} onClick={saveTemplate}>{editingTemplateId ? 'Update template' : 'Save template'}</Button></DialogActions>
+    </Dialog>
   </>
 }
 
