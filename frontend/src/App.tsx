@@ -104,6 +104,7 @@ type ApiCallLog = {
   post_call_error?: string | null
   webhook_status?: string | null
 }
+type ApiCallDetail = ApiCallLog & { transcript: string | null }
 type VoiceAgentProfile = { id: string; name: string; language: string; voice: string; speaking_style: string; instructions: string }
 type ApiBillingUsage = {
   configured: boolean; billing_mode?: 'prepaid' | 'postpaid'; currency?: string; rate_per_minute_minor?: number
@@ -137,6 +138,8 @@ const api = {
   apiKeys: () => http.get<{ items: PlatformApiKey[] }>('/v1/admin/customers/api-keys').then(r => r.data.items),
   agentConfigs: () => http.get<{ items: AgentConfiguration[] }>('/v1/admin/customers/agent-configs').then(r => r.data.items),
   apiCalls: (id: string) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`).then(r => r.data),
+  apiCallDetail: (id: string, sessionId: string) => http.get<ApiCallDetail>(`/v1/admin/customers/api-keys/${id}/calls/${sessionId}`).then(r => r.data),
+  apiCallRecording: (id: string, sessionId: string) => http.get<Blob>(`/v1/admin/customers/api-keys/${id}/calls/${sessionId}/recording`, { responseType: 'blob' }).then(r => r.data),
   voiceProfiles: (id: string) => http.get<{ items: VoiceAgentProfile[] }>(`/v1/admin/customers/api-keys/${id}/voice-profiles`).then(r => r.data.items),
   simulateCall: (id: string, data: Record<string, unknown>) => http.post<{ session_id: string; status: string }>(`/v1/admin/customers/api-keys/${id}/simulate`, data, { headers: { 'Idempotency-Key': crypto.randomUUID() } }).then(r => r.data),
   apiBilling: (id: string) => http.get<ApiBillingUsage>(`/v1/admin/customers/api-keys/${id}/billing`).then(r => r.data),
@@ -178,7 +181,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const queryClient = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
-  const page = pageFromPath(location.pathname)
+  const apiDetailId = location.pathname.match(/^\/api\/([^/]+)\/?$/)?.[1] || null
+  const page = apiDetailId ? 'API' : pageFromPath(location.pathname)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null)
   const [token, setToken] = useState(sessionStorage.getItem('chiefvoice.token') || '')
@@ -223,7 +227,6 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [managedUnlimitedChannels, setManagedUnlimitedChannels] = useState('0')
   const [managedNumberTags, setManagedNumberTags] = useState('')
   const [managementKey, setManagementKey] = useState<PlatformApiKey | null>(null)
-  const [viewingKey, setViewingKey] = useState<PlatformApiKey | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null)
   const [deleteConfirmationText, setDeleteConfirmationText] = useState('')
   const [simulationApiId, setSimulationApiId] = useState('')
@@ -249,10 +252,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   useEffect(() => {
     const query = new URLSearchParams(location.search)
     if (query.has('code') || query.has('error')) return
-    if (!Object.values(pagePaths).includes(location.pathname.replace(/\/$/, ''))) {
+    if (!Object.values(pagePaths).includes(location.pathname.replace(/\/$/, '')) && !apiDetailId) {
       navigate(pagePaths.Numbers, { replace: true })
     }
-  }, [location.pathname, location.search, navigate])
+  }, [location.pathname, location.search, navigate, apiDetailId])
 
   useEffect(() => {
     let active = true
@@ -307,8 +310,9 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const agentsQuery = useQuery({ queryKey: ['platform-agent-configs'], queryFn: api.agentConfigs, enabled: connected && (page === 'API' || page === 'Agents'), retry: false })
   const simulationProfilesQuery = useQuery({ queryKey: ['simulation-voice-profiles', simulationApiId], queryFn: () => api.voiceProfiles(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
   const simulationCallsQuery = useQuery({ queryKey: ['simulation-call-logs', simulationApiId], queryFn: () => api.apiCalls(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false, refetchInterval: simulationSessionId ? 3000 : false })
-  const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', viewingKey?.id], queryFn: () => api.apiCalls(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 5000 : false })
-  const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', viewingKey?.id], queryFn: () => api.apiBilling(viewingKey!.id), enabled: connected && Boolean(viewingKey), retry: false, refetchInterval: viewingKey ? 10000 : false })
+  const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', apiDetailId], queryFn: () => api.apiCalls(apiDetailId!), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 5000 : false })
+  const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', apiDetailId], queryFn: () => api.apiBilling(apiDetailId!), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 10000 : false })
+  const apiDetailKey = keysQuery.data?.find(key => key.id === apiDetailId) || null
   const issueMutation = useMutation({
     mutationFn: ({ customerName, billingMode, billingAmountMinor, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed }: { customerName: string; billingMode: 'prepaid' | 'postpaid'; billingAmountMinor: number; name: string; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean }) => api.createApiKey(customerName, billingMode, billingAmountMinor, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed),
     onSuccess: result => {
@@ -348,7 +352,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   })
   const adjustBillingMutation = useMutation({
     mutationFn: ({ key, amountMinor, mode }: { key: PlatformApiKey; amountMinor: number; mode: 'prepaid' | 'postpaid' }) => api.adjustApiBilling(key.id, mode, amountMinor),
-    onSuccess: () => { if (viewingKey) void queryClient.invalidateQueries({ queryKey: ['platform-api-billing', viewingKey.id] }); setBillingAdjustmentOpen(false); setToast('API billing balance or limit updated.') },
+    onSuccess: (_result, variables) => { void queryClient.invalidateQueries({ queryKey: ['platform-api-billing', variables.key.id] }); setBillingAdjustmentOpen(false); setToast('API billing balance or limit updated.') },
     onError: error => setToast(errorText(error)),
   })
   const saveAgentConfigMutation = useMutation({
@@ -556,7 +560,9 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       </header>
       <div className="content">
         {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)); setManagedNumberTags((number.tags || []).join(', ')) }} />}
-        {page === 'API' && <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => setViewingKey(key)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />}
+        {page === 'API' && (apiDetailId
+          ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onBack={() => navigate(pagePaths.API)} onEdit={key => openEditApi(key)} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} />
+          : <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
         {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
         {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={selectSimulationProfile} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} submitting={simulateCallMutation.isPending} />}
         {page === 'Docs' && <DocsPage />}
@@ -696,40 +702,13 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAgentConfigOpen(false)}>Cancel</Button><Button variant="contained" disabled={saveAgentConfigMutation.isPending} onClick={saveAgentConfig}>{saveAgentConfigMutation.isPending ? 'Saving…' : 'Save agent'}</Button></DialogActions>
     </Dialog>
 
-    <Dialog open={Boolean(viewingKey)} onClose={() => setViewingKey(null)} maxWidth="lg" fullWidth>
-      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>API details · {viewingKey?.name}</DialogTitle>
-      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap">
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">API key</Typography><Typography><code>{viewingKey?.key_prefix}</code></Typography></Card>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Assigned numbers</Typography><Typography>{viewingKey?.assigned_numbers.map(item => item.phone_number).join(', ') || 'None'}</Typography></Card>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Calling agent</Typography><Typography>{agentsQuery.data?.find(agent => agent.id === viewingKey?.voice_agent_id)?.name || 'Not assigned'}</Typography></Card>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1, minWidth: 180 }}><Typography variant="caption">Post-call agent</Typography><Typography>{agentsQuery.data?.find(agent => agent.id === viewingKey?.post_call_agent_id)?.name || 'Not assigned'}</Typography></Card>
-        </Stack>
-        <Typography variant="h6" sx={{ fontWeight: 800 }}>Calls for this API</Typography>
-        {apiCallsQuery.isLoading ? <CircularProgress size={22} /> : apiCallsQuery.error ? <Alert severity="error">{errorText(apiCallsQuery.error)}</Alert> : apiCallsQuery.data?.items.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 900 }}><TableHead><TableRow>{['Started', 'Direction', 'From → To', 'Provider', 'Status', 'Duration', 'Post-call result', 'Session'].map(item => <TableCell className="table-head" key={item}>{item}</TableCell>)}</TableRow></TableHead><TableBody>{apiCallsQuery.data.items.map(call => <TableRow key={call.session_id}><TableCell className="table-cell">{new Date(call.started_at).toLocaleString()}</TableCell><TableCell className="table-cell">{call.direction || '—'}</TableCell><TableCell className="table-cell">{call.caller || '—'} → {call.callee || '—'}</TableCell><TableCell className="table-cell">{call.provider || '—'}</TableCell><TableCell className="table-cell"><StatusChip enabled={call.status === 'completed'} label={call.status} /></TableCell><TableCell className="table-cell">{call.duration_seconds == null ? '—' : `${call.duration_seconds}s`}</TableCell><TableCell className="table-cell">{call.post_call_status ? <><StatusChip enabled={call.post_call_status === 'completed'} label={call.post_call_status} />{call.post_call_error && <Typography variant="caption" color="error" display="block">{call.post_call_error}</Typography>}{call.post_call_result && <details style={{ marginTop: 6 }}><summary>View result</summary><pre style={{ whiteSpace: 'pre-wrap', maxWidth: 320, fontSize: 11 }}>{JSON.stringify(call.post_call_result, null, 2)}</pre></details>}</> : call.post_call_agent_enabled === false ? <StatusChip enabled={false} label="disabled" /> : 'Waiting for call to finish'}</TableCell><TableCell className="table-cell"><code>{call.session_id}</code></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state">No calls yet. Use the API key and the request example on the Docs page to place a test call.</div>}
-        <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Billing for this API</Typography>
-        {apiBillingQuery.isLoading ? <CircularProgress size={22} /> : apiBillingQuery.error ? <Alert severity="error">{errorText(apiBillingQuery.error)}</Alert> : apiBillingQuery.data?.configured ? <>
-          <Alert severity="info">Calls, rate, balance or credit limit, and ledger are isolated to this API customer. The per-minute rate is snapshotted from the selected agent costs when the API is created.</Alert>
-          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap">
-            <UsageCard label="Calls" value={String(apiBillingQuery.data.calls ?? 0)} />
-            <UsageCard label="Billable time" value={`${Math.floor((apiBillingQuery.data.billable_seconds || 0) / 60)}m ${(apiBillingQuery.data.billable_seconds || 0) % 60}s`} />
-            <UsageCard label="Attributed charges" value={formatMoney(apiBillingQuery.data.charges_minor || 0, apiBillingQuery.data.currency || 'INR')} />
-            <UsageCard label="API billing plan" value={`${apiBillingQuery.data.billing_mode} · ${formatMoney(apiBillingQuery.data.rate_per_minute_minor || 0, apiBillingQuery.data.currency || 'INR')}/min`} />
-            <UsageCard label="API customer balance" value={apiBillingQuery.data.billing_mode === 'prepaid' ? formatMoney(apiBillingQuery.data.customer_prepaid_balance_minor || 0, apiBillingQuery.data.currency || 'INR') : `${formatMoney(apiBillingQuery.data.customer_postpaid_used_minor || 0, apiBillingQuery.data.currency || 'INR')} used / ${formatMoney(apiBillingQuery.data.customer_postpaid_credit_limit_minor || 0, apiBillingQuery.data.currency || 'INR')} limit`} />
-          </Stack>
-          <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} onClick={() => { const minor = apiBillingQuery.data?.billing_mode === 'prepaid' ? apiBillingQuery.data.customer_prepaid_balance_minor : apiBillingQuery.data?.customer_postpaid_credit_limit_minor; setBillingAdjustmentAmount(((minor || 0) / 100).toFixed(2)); setBillingAdjustmentOpen(true) }}>Adjust balance / credit limit</Button>
-        </> : <Alert severity="warning">{apiBillingQuery.data?.message || 'No billing plan is configured for this API customer yet.'}</Alert>}
-      </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setViewingKey(null)}>Close</Button><Button onClick={() => { if (viewingKey) openEditApi(viewingKey); setViewingKey(null) }}>Edit API</Button></DialogActions>
-    </Dialog>
-
     <Dialog open={billingAdjustmentOpen} onClose={() => setBillingAdjustmentOpen(false)} maxWidth="xs" fullWidth>
       <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>{apiBillingQuery.data?.billing_mode === 'prepaid' ? 'Set prepaid balance' : 'Set postpaid credit limit'}</DialogTitle>
       <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        <Alert severity="info">This updates billing for {viewingKey?.customer_name || 'this API customer'} only. Amounts are in INR.</Alert>
+        <Alert severity="info">This updates billing for {apiDetailKey?.customer_name || 'this API customer'} only. Amounts are in INR.</Alert>
         <TextField autoFocus fullWidth type="number" label={apiBillingQuery.data?.billing_mode === 'prepaid' ? 'Prepaid balance (INR)' : 'Credit limit (INR)'} value={billingAdjustmentAmount} onChange={event => setBillingAdjustmentAmount(event.target.value)} inputProps={{ min: 0, step: 0.01 }} />
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setBillingAdjustmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={adjustBillingMutation.isPending || !billingAdjustmentAmount || Number(billingAdjustmentAmount) < 0 || !Number.isFinite(Number(billingAdjustmentAmount))} onClick={() => { if (!viewingKey || !apiBillingQuery.data?.billing_mode) return; adjustBillingMutation.mutate({ key: viewingKey, mode: apiBillingQuery.data.billing_mode, amountMinor: Math.round(Number(billingAdjustmentAmount) * 100) }) }}>{adjustBillingMutation.isPending ? 'Saving…' : 'Save billing'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setBillingAdjustmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={adjustBillingMutation.isPending || !billingAdjustmentAmount || Number(billingAdjustmentAmount) < 0 || !Number.isFinite(Number(billingAdjustmentAmount))} onClick={() => { if (!apiDetailKey || !apiBillingQuery.data?.billing_mode) return; adjustBillingMutation.mutate({ key: apiDetailKey, mode: apiBillingQuery.data.billing_mode, amountMinor: Math.round(Number(billingAdjustmentAmount) * 100) }) }}>{adjustBillingMutation.isPending ? 'Saving…' : 'Save billing'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={Boolean(deleteConfirmation)} onClose={() => { if (!deleteConfirmationPending) { setDeleteConfirmation(null); setDeleteConfirmationText('') } }} maxWidth="sm" fullWidth>
@@ -769,6 +748,126 @@ function ApiPage({ connected, numbers, keys, agents, loading, error, onCreate, o
       {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 900 }}><TableHead><TableRow>{['API name', 'Phone numbers', 'Customer', 'Calling agent', 'Post-call agent', 'Created', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><b>{key.name}</b><br /><Typography variant="caption"><code>{key.key_prefix}</code></Typography><TagChips tags={key.tags || []} /></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.voice_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.post_call_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onView(key)}>View</Button>{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Edit</Button><Button color="error" size="small" onClick={() => onDelete(key.id)}>Delete</Button></>}</TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No APIs created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API by naming it, choosing phone numbers, and assigning configured agents.' : 'Register an outbound-enabled phone number first.'}</div></div>}
     </Card>
   </>
+}
+
+function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsLoading, callsError, billing, billingLoading, billingError, onBack, onEdit, onAdjustBilling }: {
+  api: PlatformApiKey | null; agents: AgentConfiguration[]; loading: boolean; error: unknown
+  calls: ApiCallLog[]; callsLoading: boolean; callsError: unknown; billing?: ApiBillingUsage
+  billingLoading: boolean; billingError: unknown; onBack: () => void
+  onEdit: (key: PlatformApiKey) => void; onAdjustBilling: (amount: string) => void
+}) {
+  const voiceAgent = agents.find(agent => agent.id === apiKey?.voice_agent_id)
+  const postCallAgent = agents.find(agent => agent.id === apiKey?.post_call_agent_id)
+  return <>
+    <PageIntro eyebrow="API CUSTOMER" title={apiKey?.name || 'API details'} subtitle="Configuration, call history, recordings, transcripts, post-call results, and billing for this API." />
+    <Stack direction="row" gap={1} sx={{ mt: 2, mb: 2 }}>
+      <Button variant="outlined" onClick={onBack}>Back to APIs</Button>
+      {apiKey && !apiKey.revoked_at && <Button variant="contained" onClick={() => onEdit(apiKey)}>Edit API</Button>}
+    </Stack>
+    {loading ? <Card className="surface-card" sx={{ p: 3 }}><CircularProgress size={24} /></Card> : error ? <Alert severity="error">{errorText(error)}</Alert> : !apiKey ? <Alert severity="warning">This API could not be found. It may have been deleted.</Alert> : <Stack gap={2}>
+      <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
+        <Stack gap={2}>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
+            <Stack gap={0.5}><Typography variant="h5" sx={{ fontWeight: 800 }}>{apiKey.name}</Typography><Typography color="text.secondary">Customer: {apiKey.customer_name}</Typography><TagChips tags={apiKey.tags || []} /></Stack>
+            <StatusChip enabled={!apiKey.revoked_at} label={apiKey.revoked_at ? 'Revoked' : 'Active'} />
+          </Stack>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} flexWrap="wrap">
+            <UsageCard label="API key prefix" value={apiKey.key_prefix} />
+            <UsageCard label="Created" value={new Date(apiKey.created_at).toLocaleString()} />
+            <UsageCard label="Assigned numbers" value={apiKey.assigned_numbers.map(number => number.phone_number).join(', ') || 'None'} />
+          </Stack>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} flexWrap="wrap">
+            <UsageCard label="Calling agent" value={voiceAgent ? `${voiceAgent.name} · ${voiceAgent.provider}` : 'Not assigned'} />
+            <UsageCard label="Calling model" value={apiKey.voice_agent_enabled === false ? 'Disabled' : apiKey.voice_model || voiceAgent?.model || 'Not configured'} />
+            <UsageCard label="Calling location" value={apiKey.voice_location || apiKey.vertex_location || voiceAgent?.location || '—'} />
+          </Stack>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} flexWrap="wrap">
+            <UsageCard label="Post-call agent" value={postCallAgent ? `${postCallAgent.name} · ${postCallAgent.provider}` : 'Not assigned'} />
+            <UsageCard label="Post-call model" value={apiKey.post_call_agent_enabled === false ? 'Disabled' : apiKey.post_call_model || postCallAgent?.model || 'Not configured'} />
+            <UsageCard label="Post-call location" value={apiKey.post_call_location || postCallAgent?.location || '—'} />
+          </Stack>
+        </Stack>
+      </Card>
+
+      <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1.5 }}>Call history</Typography>
+        {callsLoading ? <CircularProgress size={22} /> : callsError ? <Alert severity="error">{errorText(callsError)}</Alert> : calls.length ? <Stack gap={1.5}>
+          {calls.map(call => <ApiCallRecord key={call.session_id} apiId={apiKey.id} call={call} />)}
+        </Stack> : <div className="empty-state">No calls yet. Use this API from the Docs or Simulation page to place a test call.</div>}
+      </Card>
+
+      <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1.5 }}>Billing</Typography>
+        {billingLoading ? <CircularProgress size={22} /> : billingError ? <Alert severity="error">{errorText(billingError)}</Alert> : billing?.configured ? <Stack gap={1.5}>
+          <Alert severity="info">Billing usage and balance are scoped to this API customer. Amounts are in INR.</Alert>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap">
+            <UsageCard label="Calls" value={String(billing.calls ?? 0)} />
+            <UsageCard label="Billable time" value={`${Math.floor((billing.billable_seconds || 0) / 60)}m ${(billing.billable_seconds || 0) % 60}s`} />
+            <UsageCard label="Attributed charges" value={formatMoney(billing.charges_minor || 0, billing.currency || 'INR')} />
+            <UsageCard label="Plan / rate" value={`${billing.billing_mode} · ${formatMoney(billing.rate_per_minute_minor || 0, billing.currency || 'INR')}/min`} />
+            <UsageCard label="Balance / credit" value={billing.billing_mode === 'prepaid' ? formatMoney(billing.customer_prepaid_balance_minor || 0, billing.currency || 'INR') : `${formatMoney(billing.customer_postpaid_used_minor || 0, billing.currency || 'INR')} used / ${formatMoney(billing.customer_postpaid_credit_limit_minor || 0, billing.currency || 'INR')} limit`} />
+          </Stack>
+          <Button variant="outlined" sx={{ alignSelf: 'flex-start' }} onClick={() => {
+            const minor = billing.billing_mode === 'prepaid' ? billing.customer_prepaid_balance_minor : billing.customer_postpaid_credit_limit_minor
+            onAdjustBilling(((minor || 0) / 100).toFixed(2))
+          }}>Adjust balance / credit limit</Button>
+        </Stack> : <Alert severity="warning">{billing?.message || 'No billing plan is configured for this API customer.'}</Alert>}
+      </Card>
+    </Stack>}
+  </>
+}
+
+function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
+  const [expanded, setExpanded] = useState(false)
+  const [requestRecording, setRequestRecording] = useState(false)
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null)
+  const detail = useQuery({ queryKey: ['platform-api-call-detail', apiId, call.session_id], queryFn: () => api.apiCallDetail(apiId, call.session_id), enabled: expanded, retry: false, refetchInterval: expanded && (call.status !== 'completed' || call.post_call_status === 'queued' || call.post_call_status === 'running') ? 4000 : false })
+  const recording = useQuery({ queryKey: ['platform-api-call-recording', apiId, call.session_id], queryFn: () => api.apiCallRecording(apiId, call.session_id), enabled: expanded && requestRecording && Boolean(detail.data?.recording_available), retry: false })
+
+  useEffect(() => {
+    if (!recording.data) return
+    const url = URL.createObjectURL(recording.data)
+    setRecordingUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [recording.data])
+
+  return <Card variant="outlined" sx={{ p: { xs: 1.5, md: 2 } }}>
+    <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ md: 'center' }} gap={1.5} justifyContent="space-between">
+      <Stack gap={0.4}>
+        <Typography sx={{ fontWeight: 700 }}>{new Date(call.started_at).toLocaleString()} · {call.direction || 'call'}</Typography>
+        <Typography variant="body2" color="text.secondary">{call.caller || '—'} → {call.callee || '—'} · {call.provider || 'unknown provider'} · {call.duration_seconds == null ? 'duration pending' : `${call.duration_seconds}s`}</Typography>
+        <Typography variant="caption"><code>{call.session_id}</code></Typography>
+      </Stack>
+      <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
+        <StatusChip enabled={call.status === 'completed'} label={call.status} />
+        {call.post_call_status && <StatusChip enabled={call.post_call_status === 'completed'} label={`post-call ${call.post_call_status}`} />}
+        <Button size="small" variant={expanded ? 'outlined' : 'contained'} onClick={() => setExpanded(value => !value)}>{expanded ? 'Hide details' : 'View details'}</Button>
+      </Stack>
+    </Stack>
+    {expanded && <Stack gap={1.5} sx={{ mt: 2 }}>
+      {detail.isLoading ? <CircularProgress size={20} /> : detail.error ? <Alert severity="error">{errorText(detail.error)}</Alert> : detail.data && <>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Recording</Typography>
+            {detail.data.recording_available ? <Stack gap={1}>
+              {recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)}>{recording.isFetching ? 'Loading secure recording…' : 'Load recording'}</Button>}
+              {recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}
+            </Stack> : <Typography variant="body2" color="text.secondary">No recording is available for this call. Recording may have been disabled or outside retention.</Typography>}
+          </Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Post-call output</Typography>
+            {detail.data.post_call_status && <StatusChip enabled={detail.data.post_call_status === 'completed'} label={detail.data.post_call_status} />}
+            {detail.data.post_call_error && <Alert severity="error" sx={{ mt: 1 }}>{detail.data.post_call_error}</Alert>}
+            {detail.data.post_call_result ? <pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 320, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre> : <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>The structured result will appear here when post-call processing completes.</Typography>}
+          </Card>
+        </Stack>
+        <Card variant="outlined" sx={{ p: 1.5 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Transcript</Typography>
+          {detail.data.transcript ? <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 420, overflowY: 'auto', margin: 0, fontFamily: 'inherit' }}>{detail.data.transcript}</pre> : <Typography variant="body2" color="text.secondary">{detail.data.status === 'completed' ? 'Transcript is unavailable for this call.' : 'Transcript will appear here after it is saved.'}</Typography>}
+        </Card>
+      </>}
+    </Stack>}
+  </Card>
 }
 
 function AgentsPage({ agents, loading, error, onEdit, onCreate, onDelete }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onCreate: () => void; onDelete: (agent: AgentConfiguration) => void }) {

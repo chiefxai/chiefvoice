@@ -10,10 +10,33 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
 from chiefvoice.agents.post_call.replay import ReplayConflict, ReplayNotFound
 from chiefvoice.calls.coordinator import CallCoordinator, OutboundCallCommand
+from chiefvoice.core.config import settings
 from chiefvoice.identity.auth import Principal, require_scope
 from chiefvoice.observability.setup import call_start_event
 
 router = APIRouter()
+
+
+async def _get_platform_api_call_scope(
+    request: Request, key_id: str, principal: Principal
+):
+    if (
+        principal.auth_method != "oidc"
+        or principal.subject not in settings.platform_admin_subjects
+    ):
+        raise HTTPException(status_code=403, detail="Platform administrator access is required")
+    if "platform:customers:read" not in principal.scopes:
+        raise HTTPException(status_code=403, detail="Insufficient platform administrator scope")
+    directory = getattr(request.app.state, "api_key_directory", None)
+    if directory is None:
+        raise HTTPException(status_code=503, detail="API key storage is not configured")
+    key = next((item for item in await directory.list_all() if item.key_id == key_id), None)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    call_store = getattr(request.app.state, "call_session_store", None)
+    if call_store is None or not hasattr(call_store, "get_api_call_detail"):
+        raise HTTPException(status_code=503, detail="Call history storage is not configured")
+    return key, call_store
 
 
 class LiveAgentBody(BaseModel):
@@ -337,6 +360,85 @@ async def get_post_call_result(
         raise HTTPException(status_code=404, detail="Post-call result not found")
     await _enforce_number_binding(call_store, principal, session_id)
     return result
+
+
+@router.get(
+    "/v1/admin/customers/api-keys/{key_id}/calls/{session_id}",
+    tags=["platform administration"],
+)
+async def get_platform_api_call_detail(
+    key_id: str,
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("platform:customers:read"))],
+):
+    """Return transcript and post-call result for a call owned by one platform API."""
+    key, call_store = await _get_platform_api_call_scope(request, key_id, principal)
+    detail = await call_store.get_api_call_detail(key.tenant_id, key_id, session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Call not found")
+    if not detail["post_call_agent_enabled"]:
+        detail.update(post_call_status="disabled", post_call_result=None, post_call_error=None)
+        return detail
+    dispatcher = getattr(request.app.state, "post_call_dispatcher", None)
+    if dispatcher is not None and hasattr(dispatcher, "get_status"):
+        post_call = await dispatcher.get_status(key.tenant_id, session_id)
+        detail.update(
+            post_call_status=post_call["status"] if post_call else (
+                "failed" if detail["status"] == "completed" and not detail["transcript_available"]
+                else "queued" if detail["status"] == "completed" else None
+            ),
+            post_call_result=post_call.get("result") if post_call else None,
+            post_call_error=(
+                post_call.get("last_error_type") if post_call else
+                "transcript_missing" if detail["status"] == "completed" and not detail["transcript_available"] else None
+            ),
+        )
+    elif detail["status"] == "completed":
+        detail.update(
+            post_call_status="failed" if not detail["transcript_available"] else "queued",
+            post_call_result=None,
+            post_call_error="transcript_missing" if not detail["transcript_available"] else "dispatcher_unavailable",
+        )
+    return detail
+
+
+@router.get(
+    "/v1/admin/customers/api-keys/{key_id}/calls/{session_id}/recording",
+    tags=["platform administration"],
+)
+async def get_platform_api_call_recording(
+    key_id: str,
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("platform:customers:read"))],
+):
+    """Stream a call recording only after verifying the call belongs to the selected API."""
+    key, call_store = await _get_platform_api_call_scope(request, key_id, principal)
+    detail = await call_store.get_api_call_detail(key.tenant_id, key_id, session_id)
+    if detail is None or not detail["recording_available"]:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    recording_store = getattr(request.app.state, "recording_store", None)
+    if recording_store is None or not hasattr(recording_store, "read_wav"):
+        raise HTTPException(status_code=503, detail="Recording storage is not configured")
+    recording_uri = await call_store.get_recording_uri(key.tenant_id, session_id)
+    if recording_uri is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    try:
+        contents = await recording_store.read_wav(key.tenant_id, session_id, recording_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    if contents is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return Response(
+        content=contents,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": 'inline; filename="recording.wav"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post(

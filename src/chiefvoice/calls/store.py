@@ -490,6 +490,48 @@ class SqlCallSessionStore:
                 })
             return {"items": items, "total": int(count or 0), "limit": limit, "offset": offset}
 
+    async def get_api_call_detail(
+        self, tenant_id: str, api_key_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        """Load one API-owned call, including its decrypted transcript, for the admin console."""
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.api_key_id == api_key_id,
+                    CallSessionRow.session_id == session_id,
+                )
+            )
+            if row is None:
+                return None
+            session = self._decrypt_session(row.encrypted_session) if row.encrypted_session else None
+            transcript = None
+            if row.encrypted_transcript:
+                transcript = self._fernet.decrypt(
+                    row.encrypted_transcript.encode("ascii")
+                ).decode("utf-8")
+            duration = None
+            if row.answered_at and row.ended_at:
+                duration = max(0, int((row.ended_at - row.answered_at).total_seconds()))
+            return {
+                "session_id": row.session_id,
+                "provider": session.provider if session else None,
+                "channel": session.channel if session else None,
+                "direction": session.direction.value if session else None,
+                "caller": session.caller if session else None,
+                "callee": session.callee if session else None,
+                "status": row.status,
+                "end_reason": row.end_reason,
+                "started_at": row.started_at.isoformat(),
+                "answered_at": row.answered_at.isoformat() if row.answered_at else None,
+                "ended_at": row.ended_at.isoformat() if row.ended_at else None,
+                "duration_seconds": duration,
+                "transcript": transcript,
+                "transcript_available": bool(transcript),
+                "recording_available": bool(session and session.metadata.get("recording_uri")),
+                "post_call_agent_enabled": session.post_call_agent_enabled if session else True,
+            }
+
     async def matches_phone_binding(
         self, tenant_id: str, session_id: str, provider: str, phone_number: str
     ) -> bool:

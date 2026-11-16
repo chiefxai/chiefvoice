@@ -9,6 +9,7 @@ import logging
 import secrets
 import socket
 import time
+import traceback
 import urllib.parse
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -546,6 +547,7 @@ class SqlPostCallQueue:
                     "encrypted_payload": row.encrypted_payload,
                 }
 
+        failure_stage = "payload_decryption"
         try:
             payload = json.loads(self._fernet.decrypt(job["encrypted_payload"].encode("ascii")))
             completed_call = CompletedCall(
@@ -566,13 +568,17 @@ class SqlPostCallQueue:
                 time_format=payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
                 live_agent_context=payload.get("live_agent_context"),
             )
+            failure_stage = "agent_processing"
             result = await asyncio.wait_for(
                 agent.process(completed_call), timeout=self.lease_duration.total_seconds() / 2
             )
+            failure_stage = "result_encryption"
             encrypted_result = self._fernet.encrypt(
                 json.dumps(asdict(result), ensure_ascii=False).encode("utf-8")
             ).decode("ascii")
         except Exception as exc:
+            trace = traceback.extract_tb(exc.__traceback__)
+            origin = trace[-1] if trace else None
             retry_at = datetime.now(UTC) + timedelta(seconds=min(2**attempt, 300))
             new_status = "queued" if attempt < self.max_attempts else "failed"
             async with self._sessions.begin() as session:
@@ -599,6 +605,12 @@ class SqlPostCallQueue:
                     "tenant_id": job["tenant_id"],
                     "attempt": attempt,
                     "error_type": type(exc).__name__,
+                    # Exception messages can include call data. Stage and traceback
+                    # location are enough to identify the failing code path safely.
+                    "failure_stage": failure_stage,
+                    "error_origin_file": origin.filename.rsplit("/", 1)[-1] if origin else None,
+                    "error_origin_function": origin.name if origin else None,
+                    "error_origin_line": origin.lineno if origin else None,
                 },
             )
             post_call_job_event("retrying" if new_status == "queued" else "failed")
