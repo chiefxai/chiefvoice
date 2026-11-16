@@ -82,6 +82,7 @@ type PlatformApiKey = {
   post_call_agent_enabled?: boolean
   voice_agent_id?: string | null
   post_call_agent_id?: string | null
+  recording_allowed?: boolean
   tags: string[]
 }
 type AgentConfiguration = {
@@ -104,7 +105,7 @@ type ApiCallLog = {
   post_call_error?: string | null
   webhook_status?: string | null
 }
-type ApiCallDetail = ApiCallLog & { transcript: string | null }
+type ApiCallDetail = ApiCallLog & { transcript: string | null; recording_allowed: boolean }
 type VoiceAgentProfile = { id: string; name: string; language: string; voice: string; speaking_style: string; instructions: string }
 type ApiBillingUsage = {
   configured: boolean; billing_mode?: 'prepaid' | 'postpaid'; currency?: string; rate_per_minute_minor?: number
@@ -149,7 +150,7 @@ const api = {
   updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean, standardChannels: number, unlimitedChannels: number, tags: string[]) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound, standard_channels: standardChannels, unlimited_channels: unlimitedChannels, tags }, { params: { customer_id: number.customer_id } }),
   deleteNumber: (number: RegisteredNumber) => http.delete(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { params: { customer_id: number.customer_id } }),
   createApiKey: (customerName: string, billingMode: 'prepaid' | 'postpaid', billingAmountMinor: number, name: string, tags: string[], numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string, recordingAllowed: boolean) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { customer_name: customerName, billing_mode: billingMode, prepaid_balance_minor: billingMode === 'prepaid' ? billingAmountMinor : 0, postpaid_credit_limit_minor: billingMode === 'postpaid' ? billingAmountMinor : 0, name, tags, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation, recording_allowed: recordingAllowed }).then(r => r.data),
-  updateApiConfig: (id: string, name: string, tags: string[], numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { name, tags, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials || null, voice_location: voiceLocation, post_call_location: postCallLocation }),
+  updateApiConfig: (id: string, name: string, tags: string[], numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string, recordingAllowed: boolean) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { name, tags, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials || null, voice_location: voiceLocation, post_call_location: postCallLocation, recording_allowed: recordingAllowed }),
   createAgentConfig: (data: { name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string; tags: string[]; auto_hangup_when_complete: boolean }) => http.post<AgentConfiguration>('/v1/admin/customers/agent-configs', data).then(r => r.data),
   updateAgentConfig: (id: string, data: { name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string; tags: string[]; auto_hangup_when_complete: boolean }) => http.put<AgentConfiguration>(`/v1/admin/customers/agent-configs/${id}`, data).then(r => r.data),
   deleteAgentConfig: (id: string) => http.delete(`/v1/admin/customers/agent-configs/${id}`),
@@ -340,7 +341,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onError: error => setToast(errorText(error)),
   })
   const manageNumbersMutation = useMutation({
-    mutationFn: ({ key, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation }: { key: PlatformApiKey; name: string; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string }) => api.updateApiConfig(key.id, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation),
+    mutationFn: ({ key, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed }: { key: PlatformApiKey; name: string; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean }) => api.updateApiConfig(key.id, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -508,6 +509,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`))
     setApiName(key.name); setApiTags((key.tags || []).join(', ')); setVoiceAgentId(key.voice_agent_id || ''); setPostCallAgentId(key.post_call_agent_id || '')
     setApiCredentials(''); setVoiceLocation(key.voice_location || key.vertex_location || 'us-central1'); setPostCallLocation(key.post_call_location || 'global')
+    setApiRecordingAllowed(key.recording_allowed === true)
   }
   const openCreateAgentConfig = () => { setEditingAgentConfig(null); setAgentName(''); setAgentTags(''); setAgentKind('calling'); setAgentModel('google/gemini-live-2.5-flash-native-audio'); setAgentLocation('us-central1'); setAgentCost('0.00'); setAgentCurrency('INR'); setAgentAutoHangup(false); setAgentConfigOpen(true) }
   const openEditAgentConfig = (agent: AgentConfiguration) => { setEditingAgentConfig(agent); setAgentName(agent.name); setAgentTags((agent.tags || []).join(', ')); setAgentKind(agent.kind); setAgentModel(agent.model); setAgentLocation(agent.location); setAgentCost((agent.cost_per_minute_minor / 100).toFixed(2)); setAgentCurrency(agent.currency); setAgentAutoHangup(agent.auto_hangup_when_complete); setAgentConfigOpen(true) }
@@ -662,6 +664,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <Alert severity="info" sx={{ fontSize: 12 }}>Agent model and default location are configured in Agents. This API stores its own Google credentials and may override each agent's location.</Alert>
         <TextField label="API name" value={apiName} onChange={event => setApiName(event.target.value)} required fullWidth />
         <TextField label="Tags" value={apiTags} onChange={event => setApiTags(event.target.value)} fullWidth placeholder="clinic, priority, us-east" helperText="Optional. Separate tags with commas." />
+        <FormControlLabel control={<Switch checked={apiRecordingAllowed} onChange={event => setApiRecordingAllowed(event.target.checked)} />} label="Enable call recordings for this API" />
+        <Typography variant="caption" color="text.secondary">This authorizes recordings for future calls on the API. Each call must also request recording.</Typography>
         {(() => { const choices = agentsQuery.data || []; return <>
           <FormControl fullWidth><InputLabel id="edit-voice-agent-label">Calling agent</InputLabel><Select labelId="edit-voice-agent-label" label="Calling agent" value={voiceAgentId} onChange={event => { const id = event.target.value; setVoiceAgentId(id); const agent = (agentsQuery.data || []).find(item => item.id === id); if (agent) setVoiceLocation(agent.location) }}><MenuItem value="">None</MenuItem>{choices.filter(agent => agent.kind === 'calling').map(agent => <MenuItem key={agent.id} value={agent.id}>{agent.name} · {agent.provider} · {agent.model}</MenuItem>)}</Select></FormControl>
           <FormControl fullWidth><InputLabel id="edit-post-agent-label">Post-call agent</InputLabel><Select labelId="edit-post-agent-label" label="Post-call agent" value={postCallAgentId} onChange={event => { const id = event.target.value; setPostCallAgentId(id); const agent = (agentsQuery.data || []).find(item => item.id === id); if (agent) setPostCallLocation(agent.location) }}><MenuItem value="">None</MenuItem>{choices.filter(agent => agent.kind === 'post_call').map(agent => <MenuItem key={agent.id} value={agent.id}>{agent.name} · {agent.provider} · {agent.model}</MenuItem>)}</Select></FormControl>
@@ -680,7 +684,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           </Select>
         </FormControl>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, name: apiName.trim(), tags: parseTags(apiTags), numbers, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim() }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, name: apiName.trim(), tags: parseTags(apiTags), numbers, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim(), recordingAllowed: apiRecordingAllowed }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={agentConfigOpen} onClose={() => setAgentConfigOpen(false)} maxWidth="sm" fullWidth>
@@ -775,6 +779,7 @@ function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsLoadi
             <UsageCard label="API key prefix" value={apiKey.key_prefix} />
             <UsageCard label="Created" value={new Date(apiKey.created_at).toLocaleString()} />
             <UsageCard label="Assigned numbers" value={apiKey.assigned_numbers.map(number => number.phone_number).join(', ') || 'None'} />
+            <UsageCard label="Call recordings" value={apiKey.recording_allowed ? 'Enabled' : 'Disabled'} />
           </Stack>
           <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} flexWrap="wrap">
             <UsageCard label="Calling agent" value={voiceAgent ? `${voiceAgent.name} · ${voiceAgent.provider}` : 'Not assigned'} />
@@ -852,7 +857,7 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
             {detail.data.recording_available ? <Stack gap={1}>
               {recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)}>{recording.isFetching ? 'Loading secure recording…' : 'Load recording'}</Button>}
               {recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}
-            </Stack> : <Typography variant="body2" color="text.secondary">No recording is available for this call. Recording may have been disabled or outside retention.</Typography>}
+            </Stack> : <Typography variant="body2" color="text.secondary">{detail.data.recording_allowed ? 'Recording was allowed, but no audio was saved or it has expired. Check the recording storage logs.' : 'Recording was disabled for this call. Enable recordings for the API and for the call before placing a new one.'}</Typography>}
           </Card>
           <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Post-call output</Typography>
@@ -926,7 +931,8 @@ function SimulationPage(props: {
           </Stack>
           <FormControl><Stack direction="row" alignItems="center" gap={1}><Checkbox checked={props.includeLiveContext} onChange={event => props.onIncludeLiveContextChange(event.target.checked)} /><Typography variant="body2">Include the live-call context in post-call analysis</Typography></Stack></FormControl>
         </>}
-        <FormControl><Stack direction="row" alignItems="center" gap={1}><Checkbox checked={props.recording} onChange={event => props.onRecordingChange(event.target.checked)} /><Typography variant="body2">Record this test call (subject to the API billing plan)</Typography></Stack></FormControl>
+        {!selected?.recording_allowed && <Alert severity="warning">Recordings are disabled for this API. Enable them in the API’s Edit configuration before starting a call you want recorded.</Alert>}
+        <FormControl><Stack direction="row" alignItems="center" gap={1}><Checkbox checked={props.recording} disabled={!selected?.recording_allowed} onChange={event => props.onRecordingChange(event.target.checked)} /><Typography variant="body2">Record this test call</Typography></Stack></FormControl>
         <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={props.onStart} disabled={!selected || !selected.voice_agent_enabled || !props.callerId || !props.destination.trim() || props.submitting}>{props.submitting ? 'Starting call…' : 'Start test call'}</Button>
       </Stack>}
     </Card>

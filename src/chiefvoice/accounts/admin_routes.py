@@ -140,6 +140,7 @@ class UpdatePhoneApiKeyConfigBody(BaseModel):
     gcp_credentials_json: str | None = Field(default=None, max_length=20000)
     voice_location: str | None = Field(default=None, max_length=64)
     post_call_location: str | None = Field(default=None, max_length=64)
+    recording_allowed: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -771,11 +772,17 @@ async def list_platform_api_keys(
     del principal
     account_store, api_key_directory = _stores(request)
     items = []
+    billing = getattr(request.app.state, "billing_directory", None)
     for key in await api_key_directory.list_all():
         account = await account_store.get(key.tenant_id)
         if account is None:
             continue
-        items.append({**_key_json(key), "customer_name": account.display_name})
+        plan = await billing.get_plan(key.tenant_id) if billing is not None else None
+        items.append({
+            **_key_json(key),
+            "customer_name": account.display_name,
+            "recording_allowed": bool(plan and plan.get("recording_allowed")),
+        })
     return {"items": items}
 
 
@@ -1075,7 +1082,11 @@ async def issue_phone_api_key(
     )
     response = {
         "key": token,
-        "api_key_record": {**_key_json(key), "customer_name": account.display_name},
+        "api_key_record": {
+            **_key_json(key),
+            "customer_name": account.display_name,
+            "recording_allowed": body.recording_allowed,
+        },
         "message": "Copy this API key now; its secret will not be shown again.",
     }
     if vertex_project is not None:
@@ -1121,6 +1132,13 @@ async def update_phone_api_key_config(
         project_id = credentials["project_id"]
     if not project_id or (not key.vertex_credentials_configured and credentials_json is None):
         raise HTTPException(status_code=422, detail="GCP service account JSON is required for this API")
+    billing = getattr(request.app.state, "billing_directory", None)
+    current_plan = await billing.get_plan(key.tenant_id) if billing is not None else None
+    recording_allowed = (
+        body.recording_allowed
+        if body.recording_allowed is not None
+        else bool(current_plan and current_plan.get("recording_allowed"))
+    )
     try:
         replaced = await api_key_directory.update_config_and_numbers(
             key.tenant_id, key_id,
@@ -1148,9 +1166,8 @@ async def update_phone_api_key_config(
     # The API's customer price is a snapshot of its currently assigned templates.
     # Updating the assignment changes future reservations while preserving the
     # customer's balance, credit usage, and billing history.
-    billing = getattr(request.app.state, "billing_directory", None)
     if billing is not None:
-        plan = await billing.get_plan(key.tenant_id)
+        plan = current_plan
         if plan is not None:
             rate_per_minute_minor = sum(
                 agent.cost_per_minute_minor
@@ -1167,14 +1184,18 @@ async def update_phone_api_key_config(
                     max_call_seconds=plan["max_call_seconds"],
                     allowed_channels=plan["allowed_channels"],
                     max_concurrent_sessions=channel_capacity,
-                    recording_allowed=plan["recording_allowed"],
+                    recording_allowed=recording_allowed,
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
     refreshed = next(item for item in await api_key_directory.list_for_tenant(key.tenant_id) if item.key_id == key_id)
     account = await account_store.get(key.tenant_id)
     logger.info("platform_api_config_updated", extra={"actor_subject": principal.subject, "api_key_id": key_id, "tenant_id": key.tenant_id})
-    return {**_key_json(refreshed), "customer_name": account.display_name if account else ""}
+    return {
+        **_key_json(refreshed),
+        "customer_name": account.display_name if account else "",
+        "recording_allowed": recording_allowed,
+    }
 
 
 @router.put("/api-keys/{key_id}/phone-numbers")

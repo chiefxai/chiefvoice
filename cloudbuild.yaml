@@ -119,7 +119,7 @@ steps:
         function_url="$(cat /workspace/post-call-function-url)"
         test -n "$${function_url}"
         gcloud compute ssh ${_VM_NAME} --zone=${_ZONE} --tunnel-through-iap \
-          --command="sudo sed -i -e 's#^OIDC_ISSUER=.*#OIDC_ISSUER=${_OIDC_ISSUER}#' -e 's#^OIDC_AUDIENCE=.*#OIDC_AUDIENCE=${_OIDC_AUDIENCE}#' -e 's#^OIDC_JWKS_URL=.*#OIDC_JWKS_URL=${_OIDC_JWKS_URL}#' -e 's#^OIDC_TENANT_CLAIM=.*#OIDC_TENANT_CLAIM=${_OIDC_TENANT_CLAIM}#' -e 's#^PLATFORM_ADMIN_SUBJECTS=.*#PLATFORM_ADMIN_SUBJECTS=${_PLATFORM_ADMIN_SUBJECTS}#' /opt/chiefvoice/api.env && sudo /usr/local/bin/chiefvoice-deploy '$${image}' '$${frontend_image}' '$${function_url}'" \
+          --command="sudo sed -i -e 's#^OIDC_ISSUER=.*#OIDC_ISSUER=${_OIDC_ISSUER}#' -e 's#^OIDC_AUDIENCE=.*#OIDC_AUDIENCE=${_OIDC_AUDIENCE}#' -e 's#^OIDC_JWKS_URL=.*#OIDC_JWKS_URL=${_OIDC_JWKS_URL}#' -e 's#^OIDC_TENANT_CLAIM=.*#OIDC_TENANT_CLAIM=${_OIDC_TENANT_CLAIM}#' -e 's#^PLATFORM_ADMIN_SUBJECTS=.*#PLATFORM_ADMIN_SUBJECTS=${_PLATFORM_ADMIN_SUBJECTS}#' -e 's#^RECORDINGS_ENABLED=.*#RECORDINGS_ENABLED=true#' /opt/chiefvoice/api.env && sudo /usr/local/bin/chiefvoice-deploy '$${image}' '$${frontend_image}' '$${function_url}'" \
           --quiet
 
   - id: smoke-test-public-endpoint

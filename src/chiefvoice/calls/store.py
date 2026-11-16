@@ -529,6 +529,7 @@ class SqlCallSessionStore:
                 "transcript": transcript,
                 "transcript_available": bool(transcript),
                 "recording_available": bool(session and session.metadata.get("recording_uri")),
+                "recording_allowed": bool(session and session.recording_allowed),
                 "post_call_agent_enabled": session.post_call_agent_enabled if session else True,
             }
 
