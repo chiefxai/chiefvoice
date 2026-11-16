@@ -23,7 +23,6 @@ def _schema():
 def test_call_contract_keeps_live_and_post_call_context_separate():
     body = OutboundCallBody.model_validate(
         {
-            "provider": "vobiz",
             "channel": "phone",
             "destination": "+15551234567",
             "live_agent": {
@@ -31,9 +30,12 @@ def test_call_contract_keeps_live_and_post_call_context_separate():
                 "context": {"patient_name": "Alex"},
             },
             "post_call": {
-                "context": "Extract the confirmed appointment outcome.",
+                "context": {"task_note": "confirmed appointment outcome"},
                 "output_schema": _schema(),
-                "tools": ["calculator", "time"],
+                "tools": [
+                    {"type": "builtin", "name": "calculator"},
+                    {"type": "builtin", "name": "time"},
+                ],
                 "time_zone": "Asia/Kolkata",
                 "time_format": "%Y-%m-%dT%H:%M:%S%z",
                 "include_live_agent_context": True,
@@ -42,22 +44,21 @@ def test_call_contract_keeps_live_and_post_call_context_separate():
     )
 
     assert body.live_agent.context == {"patient_name": "Alex"}
-    assert body.post_call.context == "Extract the confirmed appointment outcome."
+    assert body.post_call.context == {"task_note": "confirmed appointment outcome"}
     assert body.post_call.output_schema.type == "object"
-    assert body.post_call.tools == ["calculator", "time"]
+    assert [tool.name for tool in body.post_call.tools] == ["calculator", "time"]
     assert body.post_call.time_zone == "Asia/Kolkata"
     assert body.post_call.include_live_agent_context is True
 
 
 def test_time_tool_requires_valid_zone_and_explicit_offset_format():
     request = {
-        "provider": "vobiz",
         "channel": "phone",
         "destination": "+15551234567",
         "post_call": {
-            "context": "Extract the appointment time.",
+            "context": {},
             "output_schema": _schema(),
-            "tools": ["time"],
+            "tools": [{"type": "builtin", "name": "time"}],
         },
     }
     with pytest.raises(ValidationError):
@@ -102,7 +103,6 @@ def test_outbound_body_rejects_conflicting_agent_ids():
     with pytest.raises(ValidationError):
         OutboundCallBody.model_validate(
             {
-                "provider": "vobiz",
                 "channel": "phone",
                 "destination": "+15551234567",
                 "bot_config_id": "agent-a",
