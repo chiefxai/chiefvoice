@@ -35,15 +35,23 @@ def create_s3_compatible_client():
     import boto3
     from botocore.config import Config
 
+    config_options = {
+        "connect_timeout": 3,
+        "read_timeout": 30,
+        "retries": {"max_attempts": 3, "mode": "standard"},
+        "s3": {"addressing_style": settings.object_storage_addressing_style},
+    }
+    if settings.object_storage_endpoint_url:
+        # Many S3-compatible providers, including GCS XML interoperability,
+        # reject botocore's optional x-amz checksum headers on PutObject.
+        # Keep the AWS SDK default for native AWS S3, and only send checksums
+        # to custom endpoints when an operation explicitly requires one.
+        config_options["request_checksum_calculation"] = "when_required"
+
     options = {
         "service_name": "s3",
         "region_name": settings.object_storage_region,
-        "config": Config(
-            connect_timeout=3,
-            read_timeout=30,
-            retries={"max_attempts": 3, "mode": "standard"},
-            s3={"addressing_style": settings.object_storage_addressing_style},
-        ),
+        "config": Config(**config_options),
     }
     if settings.object_storage_endpoint_url:
         options["endpoint_url"] = settings.object_storage_endpoint_url
