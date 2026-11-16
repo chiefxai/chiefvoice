@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent, PostCallResult
@@ -170,4 +170,17 @@ class LangChainPostCallAgent(PostCallAgent):
                 )
         else:
             raise ValueError("Post-call agent exceeded the tool round limit")
+        # Gemini 3.5 Flash-Lite rejects requests whose final history turn is an
+        # assistant/model message. Tool selection can end with such a message
+        # when no more tools are requested, so explicitly prompt for the final
+        # structured analysis after gathering the tool results.
+        messages.append(
+            HumanMessage(
+                content=(
+                    "Now complete the post-call analysis using the transcript and any "
+                    "tool results above. Follow the system instructions and return "
+                    "the requested structured output. Do not call tools again."
+                )
+            )
+        )
         return messages
