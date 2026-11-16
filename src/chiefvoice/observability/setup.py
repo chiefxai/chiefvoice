@@ -43,6 +43,10 @@ class JsonFormatter(logging.Formatter):
             "wire_bytes",
             "sample_rate",
             "audio_stages",
+            "failure_stage",
+            "error_origin_file",
+            "error_origin_function",
+            "error_origin_line",
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
