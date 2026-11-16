@@ -44,6 +44,8 @@ MAX_CALL_STATE_TOKEN_LENGTH = 16_384
 AGENT_HANGUP_AUDIO_GRACE_SECONDS = 1.5
 AGENT_HANGUP_AUDIO_QUIET_SECONDS = 0.5
 AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS = 12.0
+PROVIDER_HANGUP_PIPELINE_STOP_TIMEOUT_SECONDS = 12.0
+PROVIDER_HANGUP_SOCKET_FALLBACK_TIMEOUT_SECONDS = 3.0
 
 
 class _InvalidCallState(ValueError):
@@ -64,6 +66,14 @@ class VobizInboundCall:
     direction: Direction = Direction.INBOUND
 
 
+@dataclass(slots=True)
+class _ActiveMediaSession:
+    websocket: WebSocket
+    pipeline_task: Any = None
+    runner_task: asyncio.Task[None] | None = None
+    pipeline_ready: asyncio.Event | None = None
+
+
 class VobizAdapter:
     """Tenant-aware Vobiz adapter; account credentials are resolved per call."""
 
@@ -79,11 +89,10 @@ class VobizAdapter:
         self.integration_store = integration_store
         self.nonce_store = nonce_store
         self.call_session_store = call_session_store
-        # The provider hangup webhook is separate from the media WebSocket and
-        # can arrive before Pipecat flushes its recording buffer. Keep the live
-        # socket indexed so the webhook can close it and let its normal finally
-        # path persist the transcript and recording before completing the call.
-        self._active_media_websockets: dict[str, WebSocket] = {}
+        # The provider hangup webhook is separate from the media WebSocket.
+        # Keep the Pipecat task as well as the socket so hangup can stop the
+        # pipeline cleanly and let its finally path flush recording/transcript.
+        self._active_media_sessions: dict[str, _ActiveMediaSession] = {}
         if not settings.vobiz_webhook_secret:
             raise ValueError("VOBIZ_WEBHOOK_SECRET is required")
         if settings.vobiz_public_url and not settings.vobiz_public_url.startswith("https://"):
@@ -345,18 +354,78 @@ class VobizAdapter:
         return session
 
     async def close_active_media_session(self, session_id: str) -> bool:
-        """Close an active media socket so its pipeline can flush before call finalization."""
-        websocket = self._active_media_websockets.get(session_id)
-        if websocket is None:
+        """Gracefully stop live media and await its normal persistence finalizer."""
+        active = self._active_media_sessions.get(session_id)
+        if active is None:
             return False
+
+        ready = active.pipeline_ready
+        if active.pipeline_task is None and ready is not None:
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+
+        runner_task = active.runner_task
+        pipeline_task = active.pipeline_task
+        if runner_task is not None and pipeline_task is not None and not runner_task.done():
+            try:
+                await pipeline_task.stop_when_done()
+                logger.info(
+                    "vobiz_hangup_callback_pipeline_stop_requested",
+                    extra={"session_id": session_id, "provider": self.provider},
+                )
+                await asyncio.wait_for(
+                    asyncio.shield(runner_task),
+                    timeout=PROVIDER_HANGUP_PIPELINE_STOP_TIMEOUT_SECONDS,
+                )
+                logger.info(
+                    "vobiz_hangup_callback_pipeline_finalized",
+                    extra={"session_id": session_id, "provider": self.provider},
+                )
+                return True
+            except TimeoutError:
+                logger.warning(
+                    "vobiz_hangup_callback_pipeline_stop_timeout",
+                    extra={
+                        "session_id": session_id,
+                        "provider": self.provider,
+                        "timeout_seconds": PROVIDER_HANGUP_PIPELINE_STOP_TIMEOUT_SECONDS,
+                    },
+                )
+            except Exception as exc:
+                logger.error(
+                    "vobiz_hangup_callback_pipeline_stop_failed",
+                    extra={
+                        "session_id": session_id,
+                        "provider": self.provider,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+        # Closing the socket is only a fallback signal. Unlike the old code,
+        # also wait for the runner so run_media_session's finally block executes.
+        websocket = active.websocket
         if websocket.client_state.name != "DISCONNECTED":
             try:
                 await websocket.close(code=1000, reason="Provider reported call ended")
             except RuntimeError:
-                # The peer may have closed between checking state and close().
                 pass
+        if runner_task is not None and not runner_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(runner_task),
+                    timeout=PROVIDER_HANGUP_SOCKET_FALLBACK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.error(
+                    "vobiz_hangup_callback_pipeline_forced_stop",
+                    extra={"session_id": session_id, "provider": self.provider},
+                )
+                runner_task.cancel()
+                await asyncio.gather(runner_task, return_exceptions=True)
         logger.info(
-            "vobiz_hangup_callback_closed_media_session",
+            "vobiz_hangup_callback_media_session_stopped",
             extra={"session_id": session_id, "provider": self.provider},
         )
         return True
@@ -430,7 +499,8 @@ class VobizAdapter:
             persistence_result = attach_session_persistence(session)
             if inspect.isawaitable(persistence_result):
                 await persistence_result
-        self._active_media_websockets[session.session_id] = websocket
+        active_media = _ActiveMediaSession(websocket=websocket, pipeline_ready=asyncio.Event())
+        self._active_media_sessions[session.session_id] = active_media
         end_reason = "completed"
         agent_hangup_request = asyncio.Event()
         agent_hangup_task: asyncio.Task[None] | None = None
@@ -531,6 +601,10 @@ class VobizAdapter:
                 PipelineRunner(handle_sigint=False).run(task),
                 name=f"vobiz-pipeline-{session.session_id}",
             )
+            active_media.pipeline_task = task
+            active_media.runner_task = runner_task
+            if active_media.pipeline_ready is not None:
+                active_media.pipeline_ready.set()
             agent_hangup_task = asyncio.create_task(
                 hang_up_after_audio_drain(),
                 name=f"vobiz-agent-hangup-{session.session_id}",
@@ -624,8 +698,8 @@ class VobizAdapter:
             try:
                 await end_session(session, end_reason)
             finally:
-                if self._active_media_websockets.get(session.session_id) is websocket:
-                    self._active_media_websockets.pop(session.session_id, None)
+                if self._active_media_sessions.get(session.session_id) is active_media:
+                    self._active_media_sessions.pop(session.session_id, None)
 
     async def hangup(self, session: AcceptedSession, reason: str | None = None) -> None:
         if not session.provider_call_id:
