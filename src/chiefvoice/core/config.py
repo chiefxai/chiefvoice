@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -62,6 +62,17 @@ class Settings:
     vertex_voice: str = os.getenv("VERTEX_VOICE", "Charon")
     vertex_system_instruction: str = os.getenv(
         "VERTEX_SYSTEM_INSTRUCTION", "You are a helpful, concise voice assistant."
+    )
+    gemini_response_watchdog_seconds: float = float(
+        os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "10")
+    )
+    gemini_recovery_grace_seconds: float = float(
+        os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "8")
+    )
+    gemini_fallback_audio_path: Path | None = (
+        Path(os.environ["GEMINI_FALLBACK_AUDIO_PATH"])
+        if os.getenv("GEMINI_FALLBACK_AUDIO_PATH")
+        else None
     )
     vertex_credentials_json: str | None = os.getenv("VERTEX_CREDENTIALS_JSON") or None
     vertex_credentials_path: str | None = os.getenv("VERTEX_CREDENTIALS_PATH") or None

@@ -43,6 +43,16 @@ class CallAudioDiagnostics:
             "dropped": 0,
         }
         self._gemini_reconnects = 0
+        self._vad_events = {
+            "caller_speech_started": 0,
+            "caller_speech_stopped": 0,
+            "gemini_interruption_accepted": 0,
+            "gemini_interruption_suppressed": 0,
+            "gemini_echo_interruption_suppressed": 0,
+            "response_watchdog_fired": 0,
+            "response_watchdog_recovered": 0,
+            "response_watchdog_fallback": 0,
+        }
 
     def record_gemini_audio(self, outcome: str, *, frames: int = 1) -> None:
         """Count model-bound frames, including frames lost during reconnects."""
@@ -53,6 +63,11 @@ class CallAudioDiagnostics:
     def record_gemini_reconnect(self) -> int:
         self._gemini_reconnects += 1
         return self._gemini_reconnects
+
+    def record_conversation_event(self, event: str, *, count: int = 1) -> None:
+        if event not in self._vad_events:
+            raise ValueError(f"Unsupported conversation diagnostic: {event}")
+        self._vad_events[event] += max(0, count)
 
     def record(
         self,
@@ -115,6 +130,7 @@ class CallAudioDiagnostics:
                 "audio_stages": stages,
                 "gemini_audio_frames": dict(self._gemini_audio),
                 "gemini_reconnect_attempts": self._gemini_reconnects,
+                "conversation_events": dict(self._vad_events),
             },
         )
 

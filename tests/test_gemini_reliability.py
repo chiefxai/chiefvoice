@@ -3,9 +3,16 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from pipecat.frames.frames import InputAudioRawFrame
+from pipecat.frames.frames import (
+    InputAudioRawFrame,
+    OutputAudioRawFrame,
+    TTSAudioRawFrame,
+    UserStartedSpeakingFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection
 
 from chiefvoice.agents.call.audio_diagnostics import CallAudioDiagnostics
+from chiefvoice.agents.call.conversation_reliability import GeminiConversationWatchdog
 from chiefvoice.agents.call.gemini_reliability import (
     BoundedGeminiAudioBuffer,
     reliable_vertex_service_class,
@@ -54,8 +61,12 @@ class FakeGeminiService:
         self._user_audio_preroll_buffer_sample_rate = None
         self._settings = SimpleNamespace(model="test-model")
         self._consecutive_failures = 0
+        self._bot_is_responding = False
+        self.interruptions = 0
         self.sent = []
         self.reconnects = 0
+        self.pushed_frames = []
+        self._chiefvoice_hangup_callback = None
 
     async def _handle_connection_error(self, _error):
         self._consecutive_failures += 1
@@ -73,6 +84,20 @@ class FakeGeminiService:
         import asyncio
 
         await asyncio.sleep(0.01)
+
+    async def broadcast_interruption(self):
+        self.interruptions += 1
+
+    async def _handle_interruption(self):
+        self._bot_is_responding = False
+
+    async def push_frame(self, frame):
+        self.pushed_frames.append(frame)
+
+    def create_task(self, coroutine, name=None):
+        import asyncio
+
+        return asyncio.create_task(coroutine, name=name)
 
 
 class FakeSession:
@@ -155,3 +180,134 @@ async def test_simultaneous_reconnect_requests_create_only_one_session():
 
     await asyncio.gather(service._reconnect(), service._reconnect())
     assert service.reconnects == 1
+
+
+@pytest.mark.asyncio
+async def test_server_interruption_requires_local_caller_speech_confirmation(monkeypatch):
+    import chiefvoice.agents.call.gemini_reliability as reliability
+
+    diagnostics = CallAudioDiagnostics(SimpleNamespace(session_id="vad-session"))
+    service_class = reliable_vertex_service_class(
+        FakeGeminiService,
+        session_id="vad-session",
+        diagnostics=diagnostics,
+    )
+    service = service_class()
+
+    await service.broadcast_interruption()
+    assert service.interruptions == 0
+    assert diagnostics._vad_events["gemini_interruption_suppressed"] == 1
+
+    service._user_is_speaking = True
+    service._bot_is_responding = True
+    original_sleep = reliability.asyncio.sleep
+
+    async def short_wait(_seconds):
+        await original_sleep(0)
+
+    monkeypatch.setattr(reliability.asyncio, "sleep", short_wait)
+    await service.broadcast_interruption()
+    assert service._chiefvoice_pending_interruption_task is not None
+    await service._chiefvoice_pending_interruption_task
+    assert service.interruptions == 1
+    assert diagnostics._vad_events["gemini_interruption_accepted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_interruption_matching_recent_model_transcript_is_suppressed_as_echo(monkeypatch):
+    import chiefvoice.agents.call.gemini_reliability as reliability
+
+    diagnostics = CallAudioDiagnostics(SimpleNamespace(session_id="echo-session"))
+    service_class = reliable_vertex_service_class(
+        FakeGeminiService,
+        session_id="echo-session",
+        diagnostics=diagnostics,
+    )
+    service = service_class()
+    service._bot_is_responding = True
+    service._user_is_speaking = True
+    service._chiefvoice_recent_input_transcript = "please tell me your name and address"
+    service._chiefvoice_recent_output_transcript = "please tell me your name and address"
+    service._chiefvoice_recent_input_transcript_at = reliability.time.monotonic()
+    service._chiefvoice_recent_output_transcript_at = reliability.time.monotonic()
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(reliability.asyncio, "sleep", no_wait)
+    await service._confirm_interruption_after_echo_check()
+
+    assert service.interruptions == 0
+    assert diagnostics._vad_events["gemini_echo_interruption_suppressed"] == 1
+    assert diagnostics._vad_events["gemini_interruption_accepted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_watchdog_counts_local_vad_and_recovers_then_falls_back(monkeypatch):
+    import chiefvoice.agents.call.conversation_reliability as reliability
+
+    diagnostics = CallAudioDiagnostics(SimpleNamespace(session_id="watchdog-session"))
+    calls = []
+
+    class WatchdogService:
+        _session = object()
+        _ready_for_realtime_input = True
+        _bot_is_responding = False
+
+        async def recover_unanswered_turn(self):
+            calls.append("recover")
+            return True
+
+        async def play_fallback_and_hangup(self):
+            calls.append("fallback")
+            return True
+
+    async def no_wait(_seconds):
+        return None
+
+    async def discard_frame(_frame, _direction=FrameDirection.DOWNSTREAM):
+        return None
+
+    monkeypatch.setattr(reliability.asyncio, "sleep", no_wait)
+    watchdog = GeminiConversationWatchdog(
+        SimpleNamespace(session_id="watchdog-session", provider="vobiz"),
+        WatchdogService(),
+        diagnostics,
+        response_timeout_seconds=0,
+        recovery_grace_seconds=0,
+    )
+    watchdog.push_frame = discard_frame
+    await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+    await watchdog._watch_turn(0, "test")
+
+    assert diagnostics._vad_events["caller_speech_started"] == 1
+    assert diagnostics._vad_events["response_watchdog_fired"] == 1
+    assert calls == ["recover", "fallback"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_fallback_plays_bundled_pcm_then_requests_hangup():
+    diagnostics = CallAudioDiagnostics(SimpleNamespace(session_id="fallback-session"))
+    service_class = reliable_vertex_service_class(
+        FakeGeminiService,
+        session_id="fallback-session",
+        diagnostics=diagnostics,
+    )
+    service = service_class()
+    hangups = []
+    service._bot_is_responding = True
+
+    async def hang_up():
+        hangups.append(True)
+
+    service._chiefvoice_hangup_callback = hang_up
+
+    assert await service.play_fallback_and_hangup() is True
+    assert service._bot_is_responding is False
+    assert diagnostics._vad_events["response_watchdog_fallback"] == 1
+    assert len(hangups) == 1
+    audio_frames = [frame for frame in service.pushed_frames if isinstance(frame, TTSAudioRawFrame)]
+    assert len(audio_frames) == 1
+    assert isinstance(audio_frames[0], OutputAudioRawFrame)
+    assert audio_frames[0].sample_rate == 24000
+    assert audio_frames[0].audio

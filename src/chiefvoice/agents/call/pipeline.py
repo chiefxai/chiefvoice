@@ -1,6 +1,8 @@
-from collections.abc import Sequence
 import asyncio
+from collections.abc import Sequence
 
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -8,9 +10,12 @@ from pipecat.frames.frames import (
     OutputAudioRawFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.transports.base_transport import BaseTransport
 
 from chiefvoice.agents.call.audio_diagnostics import (
@@ -18,7 +23,9 @@ from chiefvoice.agents.call.audio_diagnostics import (
     CallAudioDiagnostics,
     GeminiInputResampler,
 )
+from chiefvoice.agents.call.conversation_reliability import GeminiConversationWatchdog
 from chiefvoice.agents.post_call.transcript import TranscriptCollector
+from chiefvoice.sessions import AcceptedSession
 
 
 class BotSpeechDrainObserver(FrameProcessor):
@@ -52,6 +59,7 @@ def build_pipeline(
     assistant_transcript_processor: TranscriptCollector | None = None,
     audio_diagnostics: CallAudioDiagnostics | None = None,
     bot_speech_drain_event: asyncio.Event | None = None,
+    session: AcceptedSession | None = None,
 ) -> Pipeline:
     """Assemble a channel-neutral Pipecat pipeline around provider transport I/O.
 
@@ -67,7 +75,22 @@ def build_pipeline(
         "role": "user",
         "content": "The phone call has just connected. Greet the caller briefly in the configured language and ask the first question needed for this call's task.",
     }])
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
+    local_vad = SileroVADAnalyzer(
+        sample_rate=16000,
+        params=VADParams(
+            confidence=0.75,
+            start_secs=0.30,
+            stop_secs=0.60,
+            min_volume=0.60,
+        ),
+    )
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=local_vad,
+            user_turn_stop_timeout=1.5,
+        ),
+    )
 
     # Vobiz supplies narrowband 8 kHz PCM, while Gemini Live requires 16 kHz
     # PCM input. Resample before both diagnostics and the realtime model.
@@ -83,6 +106,17 @@ def build_pipeline(
         processors.append(
             AudioFrameCounter(audio_diagnostics, "gemini_input", InputAudioRawFrame)
         )
+    model_service = next(
+        (
+            processor
+            for processor in conversation_processors
+            if callable(getattr(processor, "recover_unanswered_turn", None))
+            and callable(getattr(processor, "play_fallback_and_hangup", None))
+        ),
+        None,
+    )
+    if session is not None and model_service is not None and audio_diagnostics is not None:
+        processors.append(GeminiConversationWatchdog(session, model_service, audio_diagnostics))
     processors.extend(conversation_processors)
     if assistant_transcript_processor is not None:
         processors.append(assistant_transcript_processor)

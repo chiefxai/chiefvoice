@@ -62,7 +62,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
     async def create_processors(self, session: AcceptedSession) -> Sequence[FrameProcessor]:
         # Import lazily so deployments using another backend do not require Google packages.
-        from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+        from pipecat.services.google.gemini_live.llm import (
+            EndSensitivity,
+            GeminiLiveLLMService,
+            GeminiVADParams,
+            StartSensitivity,
+        )
         from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
 
         from chiefvoice.agents.call.audio_diagnostics import diagnostics_for_session
@@ -151,6 +156,24 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             if not project_id:
                 raise HTTPException(status_code=503, detail="Vertex AI project is not configured")
 
+        # Use conservative server VAD thresholds for telephony echo and pauses,
+        # while the pipeline's independent local VAD verifies interruptions.
+        # Gemini's docs recommend 500–800 ms silence for complete utterances;
+        # 700 ms balances phone-call responsiveness with fewer split turns.
+        if params is None:
+            settings_type = (
+                GeminiLiveLLMService.Settings
+                if service_type == "google_ai"
+                else GeminiLiveVertexLLMService.Settings
+            )
+            params = settings_type(model=model, voice=voice)
+        params.vad = GeminiVADParams(
+            start_sensitivity=StartSensitivity.START_SENSITIVITY_LOW,
+            end_sensitivity=EndSensitivity.END_SENSITIVITY_LOW,
+            prefix_padding_ms=200,
+            silence_duration_ms=700,
+        )
+
         if session.live_agent_context:
             context_json = json.dumps(
                 session.live_agent_context, ensure_ascii=False, separators=(",", ":")
@@ -213,7 +236,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 handler=hang_up_call,
             )])
         if service_type == "google_ai":
-            service = GeminiLiveLLMService(
+            reliable_service = reliable_vertex_service_class(
+                GeminiLiveLLMService,
+                session_id=session.session_id,
+                diagnostics=diagnostics_for_session(session),
+            )
+            service = reliable_service(
                 api_key=self.google_ai_api_key,
                 model=model,
                 voice_id=voice,
@@ -221,6 +249,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 settings=params,
                 tools=tools,
             )
+            service._chiefvoice_hangup_callback = session.metadata.get("hang_up_call")
             return (service,)
 
         reliable_service = reliable_vertex_service_class(
@@ -239,4 +268,5 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             settings=params,
             tools=tools,
         )
+        service._chiefvoice_hangup_callback = session.metadata.get("hang_up_call")
         return (service,)

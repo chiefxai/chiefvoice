@@ -38,6 +38,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chiefvoice", "src/chiefvoice_sdk"]
+artifacts = ["src/chiefvoice/agents/call/assets/*.wav"]
 
 [tool.ruff]
 line-length = 100

@@ -3,15 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import random
+import re
 import time
+import wave
 from collections import deque
 from dataclasses import dataclass
+from difflib import SequenceMatcher
+from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 from google.genai.types import Blob
-from pipecat.frames.frames import InputAudioRawFrame
+from pipecat.frames.frames import (
+    InputAudioRawFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    TTSAudioRawFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
+)
 
 from chiefvoice.agents.call.audio_diagnostics import CallAudioDiagnostics
 
@@ -113,7 +126,15 @@ def reliable_vertex_service_class(
             self._chiefvoice_audio_buffer = BoundedGeminiAudioBuffer()
             self._chiefvoice_reconnect_lock = asyncio.Lock()
             self._chiefvoice_replay_lock = asyncio.Lock()
+            self._chiefvoice_ready_event = asyncio.Event()
             self._chiefvoice_last_ready = False
+            self._chiefvoice_fallback_active = False
+            self._chiefvoice_recent_input_transcript = ""
+            self._chiefvoice_recent_input_transcript_at = 0.0
+            self._chiefvoice_recent_output_transcript = ""
+            self._chiefvoice_recent_output_transcript_at = 0.0
+            self._chiefvoice_pending_interruption = False
+            self._chiefvoice_pending_interruption_task: asyncio.Task | None = None
             super().__init__(*args, **kwargs)
 
         async def _handle_connection_error(self, error: Exception) -> bool:
@@ -171,6 +192,12 @@ def reliable_vertex_service_class(
 
         async def _disconnect(self) -> None:
             was_ready = bool(self._ready_for_realtime_input)
+            self._chiefvoice_ready_event.clear()
+            pending_interruption = self._chiefvoice_pending_interruption_task
+            self._chiefvoice_pending_interruption_task = None
+            self._chiefvoice_pending_interruption = False
+            if pending_interruption is not None and not pending_interruption.done():
+                await self.cancel_task(pending_interruption, timeout=1.0)
             await super()._disconnect()
             if was_ready:
                 logger.info(
@@ -282,6 +309,8 @@ def reliable_vertex_service_class(
         async def _handle_session_ready(self, session: Any) -> None:
             await super()._handle_session_ready(session)
             self._chiefvoice_last_ready = bool(self._ready_for_realtime_input)
+            if self._chiefvoice_last_ready:
+                self._chiefvoice_ready_event.set()
             logger.info(
                 "gemini_session_readiness_changed",
                 extra={
@@ -294,11 +323,263 @@ def reliable_vertex_service_class(
             if self._ready_for_realtime_input:
                 await self._chiefvoice_flush_audio()
 
+        async def broadcast_interruption(self) -> None:
+            if self._chiefvoice_fallback_active:
+                return
+            # Gemini's server VAD can interpret handset/line echo as caller
+            # speech. Require independent local Silero VAD confirmation before
+            # canceling the assistant's current audio.
+            if not self._user_is_speaking:
+                diagnostics.record_conversation_event("gemini_interruption_suppressed")
+                logger.info(
+                    "gemini_interruption_suppressed_without_local_speech",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "bot_responding": bool(self._bot_is_responding),
+                        "session_ready": bool(self._ready_for_realtime_input),
+                    },
+                )
+                return
+            if not self._bot_is_responding:
+                return
+            if self._chiefvoice_pending_interruption:
+                return
+            self._chiefvoice_pending_interruption = True
+            self._chiefvoice_pending_interruption_task = self.create_task(
+                self._confirm_interruption_after_echo_check(),
+                name="gemini_interruption_echo_check",
+            )
+
+        async def _confirm_interruption_after_echo_check(self) -> None:
+            try:
+                # Input transcription may arrive in the next server message.
+                # A short delay lets us compare it with recent assistant speech
+                # before stopping the audio currently being played.
+                await asyncio.sleep(0.20)
+                if (
+                    self._disconnecting
+                    or self._chiefvoice_fallback_active
+                    or not self._bot_is_responding
+                ):
+                    return
+                now = time.monotonic()
+                input_text = self._chiefvoice_recent_input_transcript
+                output_text = self._chiefvoice_recent_output_transcript
+                recent_echo_candidate = (
+                    now - self._chiefvoice_recent_input_transcript_at <= 2.0
+                    and now - self._chiefvoice_recent_output_transcript_at <= 5.0
+                    and self._transcript_looks_like_echo(input_text, output_text)
+                )
+                if recent_echo_candidate:
+                    diagnostics.record_conversation_event("gemini_echo_interruption_suppressed")
+                    logger.warning(
+                        "gemini_interruption_suppressed_as_telephone_echo",
+                        extra={
+                            "session_id": session_id,
+                            "provider": "vertex",
+                            "comparison_window_ms": 200,
+                        },
+                    )
+                    return
+                diagnostics.record_conversation_event("gemini_interruption_accepted")
+                logger.info(
+                    "gemini_interruption_confirmed_by_local_vad",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "bot_responding": bool(self._bot_is_responding),
+                    },
+                )
+                await super().broadcast_interruption()
+            finally:
+                self._chiefvoice_pending_interruption = False
+                if self._chiefvoice_pending_interruption_task is asyncio.current_task():
+                    self._chiefvoice_pending_interruption_task = None
+
+        @staticmethod
+        def _transcript_looks_like_echo(caller_text: str, assistant_text: str) -> bool:
+            def normalize(value: str) -> str:
+                return " ".join(re.findall(r"[^\W_]+", value.casefold()))
+
+            caller = normalize(caller_text)
+            assistant = normalize(assistant_text)
+            if len(caller) < 8 or len(assistant) < 8:
+                return False
+            if caller in assistant or assistant in caller:
+                return True
+            return SequenceMatcher(None, caller, assistant).ratio() >= 0.90
+
+        async def _handle_msg_model_turn(self, message: Any) -> None:
+            if self._chiefvoice_fallback_active:
+                logger.warning(
+                    "gemini_late_response_suppressed_during_fallback",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
+                return
+            await super()._handle_msg_model_turn(message)
+
+        async def _handle_msg_output_transcription(self, message: Any) -> None:
+            if self._chiefvoice_fallback_active:
+                return
+            server_content = getattr(message, "server_content", None)
+            output = getattr(server_content, "output_transcription", None)
+            text = getattr(output, "text", None)
+            if text:
+                if not self._bot_is_responding:
+                    self._chiefvoice_recent_output_transcript = ""
+                self._chiefvoice_recent_output_transcript = (
+                    f"{self._chiefvoice_recent_output_transcript} {text}".strip()
+                )[-1000:]
+                self._chiefvoice_recent_output_transcript_at = time.monotonic()
+            await super()._handle_msg_output_transcription(message)
+
+        async def _handle_msg_input_transcription(self, message: Any) -> None:
+            server_content = getattr(message, "server_content", None)
+            incoming = getattr(server_content, "input_transcription", None)
+            text = getattr(incoming, "text", None)
+            if text:
+                if not self._user_transcription_buffer:
+                    self._chiefvoice_recent_input_transcript = ""
+                self._chiefvoice_recent_input_transcript = (
+                    f"{self._chiefvoice_recent_input_transcript} {text}".strip()[-1000:]
+                )
+                self._chiefvoice_recent_input_transcript_at = time.monotonic()
+            await super()._handle_msg_input_transcription(message)
+
+        async def recover_unanswered_turn(self) -> bool:
+            """Reconnect once if needed, then ask Gemini to finish the pending turn."""
+            if self._disconnecting or self._chiefvoice_fallback_active:
+                return False
+            try:
+                if not self._session or not self._ready_for_realtime_input:
+                    self._chiefvoice_ready_event.clear()
+                    await self._reconnect()
+                    await asyncio.wait_for(self._chiefvoice_ready_event.wait(), timeout=8.0)
+                if not self._session or not self._ready_for_realtime_input:
+                    return False
+                if self._bot_is_responding:
+                    # A response-start frame without any audio must not block
+                    # the recovery nudge indefinitely.
+                    await self._handle_interruption()
+                await self._session.send_realtime_input(
+                    text="Please respond briefly to the caller's most recent statement."
+                )
+                logger.warning(
+                    "gemini_unanswered_turn_recovery_requested",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "connection_ready": True,
+                        "generation_active": bool(self._bot_is_responding),
+                    },
+                )
+                diagnostics.record_conversation_event("response_watchdog_recovered")
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.error(
+                    "gemini_unanswered_turn_recovery_failed",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "error_type": type(error).__name__,
+                        "error_status": getattr(error, "status", None),
+                    },
+                )
+                return False
+
+        async def play_fallback_and_hangup(self) -> bool:
+            """Play the packaged/configured PCM fallback once, then end the call."""
+            if self._chiefvoice_fallback_active:
+                return False
+            self._chiefvoice_fallback_active = True
+            try:
+                if self._bot_is_responding:
+                    # The watchdog invokes fallback only after observing no
+                    # model audio for the whole recovery window. Stop a stuck
+                    # response before injecting the fallback so streams cannot
+                    # overlap.
+                    await self._handle_interruption()
+                from chiefvoice.core.config import settings
+
+                configured_path: Path | None = settings.gemini_fallback_audio_path
+                wav_data = (
+                    configured_path.read_bytes()
+                    if configured_path is not None
+                    else files("chiefvoice.agents.call")
+                    .joinpath("assets/gemini_unavailable.wav")
+                    .read_bytes()
+                )
+                with wave.open(io.BytesIO(wav_data), "rb") as audio_file:
+                    if (
+                        audio_file.getnchannels() != 1
+                        or audio_file.getsampwidth() != 2
+                        or audio_file.getframerate() != 24000
+                        or audio_file.getcomptype() != "NONE"
+                    ):
+                        raise ValueError("Fallback audio must be mono 24 kHz 16-bit PCM WAV")
+                    audio = audio_file.readframes(audio_file.getnframes())
+                if not audio:
+                    raise ValueError("Fallback audio is empty")
+
+                # Mark fallback active before the first await; late Gemini
+                # output is suppressed above so it cannot overlap this clip.
+                await self.push_frame(TTSStartedFrame())
+                await self.push_frame(LLMFullResponseStartFrame())
+                await self.push_frame(
+                    TTSAudioRawFrame(audio=audio, sample_rate=24000, num_channels=1)
+                )
+                await self.push_frame(TTSStoppedFrame())
+                await self.push_frame(LLMFullResponseEndFrame())
+                diagnostics.record_conversation_event("response_watchdog_fallback")
+                logger.error(
+                    "gemini_fallback_audio_played",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "audio_bytes": len(audio),
+                        "sample_rate": 24000,
+                    },
+                )
+                callback = self._chiefvoice_hangup_callback
+                if callable(callback):
+                    await callback()
+                else:
+                    logger.error(
+                        "gemini_fallback_hangup_unavailable",
+                        extra={"session_id": session_id, "provider": "vertex"},
+                    )
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.exception(
+                    "gemini_fallback_audio_failed",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "error_type": type(error).__name__,
+                    },
+                )
+                callback = self._chiefvoice_hangup_callback
+                if callable(callback):
+                    try:
+                        await callback()
+                    except Exception:
+                        logger.exception(
+                            "gemini_fallback_hangup_failed",
+                            extra={"session_id": session_id, "provider": "vertex"},
+                        )
+                return False
+
         async def _handle_context(self, context: Any) -> None:
             # The initial context can arrive after the websocket has connected.
             # Pipecat marks realtime input ready only after seeding that context.
             await super()._handle_context(context)
             if self._ready_for_realtime_input:
+                self._chiefvoice_ready_event.set()
                 logger.info(
                     "gemini_session_readiness_changed",
                     extra={
