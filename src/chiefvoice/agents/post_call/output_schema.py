@@ -16,6 +16,7 @@ from pydantic import (
 )
 
 JsonScalar = StrictStr | StrictInt | StrictFloat | StrictBool
+JsonType = Literal["object", "string", "integer", "number", "boolean", "array", "null"]
 
 
 class OutputSchema(BaseModel):
@@ -23,7 +24,9 @@ class OutputSchema(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["object", "string", "integer", "number", "boolean", "array"]
+    # JSON Schema permits a list of types to express nullable values, e.g.
+    # {"type": ["integer", "null"]}. Keep this subset bounded to known JSON types.
+    type: JsonType | list[JsonType]
     description: str | None = Field(default=None, max_length=500)
     properties: dict[str, "OutputSchema"] = Field(default_factory=dict)
     required: list[str] = Field(default_factory=list)
@@ -33,7 +36,17 @@ class OutputSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_schema_shape(self) -> "OutputSchema":
-        if self.type == "object":
+        types = [self.type] if isinstance(self.type, str) else self.type
+        if not types or len(set(types)) != len(types):
+            raise ValueError("type must contain one or more unique JSON Schema types")
+        if len(types) > 2 or (len(types) == 2 and "null" not in types):
+            raise ValueError("type unions may only combine one JSON type with null")
+        non_null_types = [value for value in types if value != "null"]
+        if len(non_null_types) > 1:
+            raise ValueError("type unions may only combine one JSON type with null")
+        effective_type = non_null_types[0] if non_null_types else "null"
+
+        if effective_type == "object":
             if not self.properties:
                 raise ValueError("object schemas must define at least one property")
             if len(self.properties) > 50:
@@ -44,7 +57,7 @@ class OutputSchema(BaseModel):
                 raise ValueError("required must contain only defined properties")
             if self.items is not None or self.enum is not None:
                 raise ValueError("object schemas cannot define items or enum")
-        elif self.type == "array":
+        elif effective_type == "array":
             if self.items is None:
                 raise ValueError("array schemas must define items")
             if self.properties or self.required or self.enum is not None:
@@ -61,7 +74,7 @@ class OutputSchema(BaseModel):
                 "integer": int,
                 "number": (int, float),
                 "boolean": bool,
-            }.get(self.type)
+            }.get(effective_type)
             expected_types = (expected,) if isinstance(expected, type) else expected
             if expected_types is None or any(type(value) not in expected_types for value in self.enum):
                 raise ValueError("enum values must match a scalar schema type")
@@ -92,25 +105,35 @@ def build_output_model(schema: OutputSchema, *, name: str = "CallOutput") -> typ
     """Compile the accepted schema into a strict Pydantic model."""
 
     def annotation_for(node: OutputSchema, field_index: int) -> Any:
-        if node.type == "object":
-            return build_output_model(node, name=f"{name}_Object{field_index}")
-        if node.type == "array":
+        types = [node.type] if isinstance(node.type, str) else node.type
+        nullable = "null" in types
+        effective_type = next((value for value in types if value != "null"), "null")
+        if effective_type == "object":
+            annotation = build_output_model(node, name=f"{name}_Object{field_index}")
+        elif effective_type == "array":
             assert node.items is not None
-            return list[annotation_for(node.items, field_index)]
-        types = {
-            "string": StrictStr,
-            "integer": StrictInt,
-            "number": StrictFloat,
-            "boolean": StrictBool,
-        }
-        base_type = types[node.type]
-        if node.enum is None:
-            return base_type
-        enum_type = Enum(
-            f"{name}_Enum{field_index}",
-            {f"value_{index}": value for index, value in enumerate(node.enum)},
-        )
-        return enum_type
+            annotation = list[annotation_for(node.items, field_index)]
+        elif effective_type == "null":
+            annotation = type(None)
+        else:
+            types_by_name = {
+                "string": StrictStr,
+                "integer": StrictInt,
+                "number": StrictFloat,
+                "boolean": StrictBool,
+            }
+            base_type = types_by_name[effective_type]
+            if node.enum is None:
+                annotation = base_type
+            else:
+                enum_type = Enum(
+                    f"{name}_Enum{field_index}",
+                    {f"value_{index}": value for index, value in enumerate(node.enum)},
+                )
+                annotation = enum_type
+        if nullable:
+            return annotation | type(None)
+        return annotation
 
     fields: dict[str, tuple[Any, Any]] = {}
     for field_index, (field_name, node) in enumerate(schema.properties.items()):
