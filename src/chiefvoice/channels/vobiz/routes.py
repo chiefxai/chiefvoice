@@ -53,7 +53,12 @@ async def hangup_callback(request: Request):
     if coordinator is None:
         raise HTTPException(status_code=503, detail="Call services are not configured")
     session = await adapter.hangup_callback(request)
-    await coordinator.end_session(session, "completed")
+    # If media is still active, let its WebSocket finalizer flush the Pipecat
+    # audio buffer and persist recording/transcript state before ending the call.
+    # Only calls without an active media session are finalized directly here.
+    media_session_closed = await adapter.close_active_media_session(session.session_id)
+    if not media_session_closed:
+        await coordinator.end_session(session, "completed")
     return Response(
         content=tostring(Element("Response"), encoding="unicode"),
         media_type="application/xml",

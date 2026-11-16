@@ -79,6 +79,11 @@ class VobizAdapter:
         self.integration_store = integration_store
         self.nonce_store = nonce_store
         self.call_session_store = call_session_store
+        # The provider hangup webhook is separate from the media WebSocket and
+        # can arrive before Pipecat flushes its recording buffer. Keep the live
+        # socket indexed so the webhook can close it and let its normal finally
+        # path persist the transcript and recording before completing the call.
+        self._active_media_websockets: dict[str, WebSocket] = {}
         if not settings.vobiz_webhook_secret:
             raise ValueError("VOBIZ_WEBHOOK_SECRET is required")
         if settings.vobiz_public_url and not settings.vobiz_public_url.startswith("https://"):
@@ -339,6 +344,23 @@ class VobizAdapter:
             session.provider_call_id = provider_call_id[:256]
         return session
 
+    async def close_active_media_session(self, session_id: str) -> bool:
+        """Close an active media socket so its pipeline can flush before call finalization."""
+        websocket = self._active_media_websockets.get(session_id)
+        if websocket is None:
+            return False
+        if websocket.client_state.name != "DISCONNECTED":
+            try:
+                await websocket.close(code=1000, reason="Provider reported call ended")
+            except RuntimeError:
+                # The peer may have closed between checking state and close().
+                pass
+        logger.info(
+            "vobiz_hangup_callback_closed_media_session",
+            extra={"session_id": session_id, "provider": self.provider},
+        )
+        return True
+
     async def build_transport(self, session: AcceptedSession, connection: object) -> BaseTransport:
         if not isinstance(connection, WebSocket):
             raise TypeError("Vobiz media transport requires a FastAPI WebSocket")
@@ -408,6 +430,7 @@ class VobizAdapter:
             persistence_result = attach_session_persistence(session)
             if inspect.isawaitable(persistence_result):
                 await persistence_result
+        self._active_media_websockets[session.session_id] = websocket
         end_reason = "completed"
         agent_hangup_request = asyncio.Event()
         agent_hangup_task: asyncio.Task[None] | None = None
@@ -598,7 +621,11 @@ class VobizAdapter:
             # The buffer must flush only after Pipecat's runner has drained and
             # stopped. A separate provider hangup webhook can race this cleanup.
             session.metadata["recording_pipeline_finished"] = True
-            await end_session(session, end_reason)
+            try:
+                await end_session(session, end_reason)
+            finally:
+                if self._active_media_websockets.get(session.session_id) is websocket:
+                    self._active_media_websockets.pop(session.session_id, None)
 
     async def hangup(self, session: AcceptedSession, reason: str | None = None) -> None:
         if not session.provider_call_id:
