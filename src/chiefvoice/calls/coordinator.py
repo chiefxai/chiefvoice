@@ -39,14 +39,19 @@ class OutboundCallCommand:
     caller_id: str | None = None
     bot_config_id: str | None = None
     live_agent_instructions: str | None = None
+    live_agent_template_id: str | None = None
+    live_agent_template_revision: int | None = None
     live_agent_context: dict[str, Any] | None = None
     post_call_context: str | None = None
+    post_call_template_id: str | None = None
+    post_call_template_revision: int | None = None
     post_call_output_schema: dict[str, Any] | None = None
     post_call_tools: list[str] | None = None
     post_call_time_zone: str | None = None
     post_call_time_format: str | None = None
     include_live_agent_context: bool = False
     recording_allowed: bool = False
+    auto_hangup_when_complete: bool = False
     idempotency_key: str | None = None
 
 
@@ -80,7 +85,7 @@ class CallCoordinator:
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
         post_call_agent_enabled = True
-        auto_hangup_when_complete = False
+        auto_hangup_when_complete = command.auto_hangup_when_complete
         if command.api_key_id is not None:
             if self.api_key_directory is None:
                 raise HTTPException(status_code=503, detail="API agent configuration is unavailable")
@@ -92,7 +97,7 @@ class CallCoordinator:
             if not api_config.project_id or not api_config.credentials_json:
                 raise HTTPException(status_code=503, detail="Configure Google Cloud credentials for this API before placing calls")
             post_call_agent_enabled = api_config.post_call_agent_enabled
-            auto_hangup_when_complete = api_config.auto_hangup_when_complete
+            auto_hangup_when_complete = auto_hangup_when_complete or api_config.auto_hangup_when_complete
         if post_call_agent_enabled:
             self._require_post_call_ready()
         await self._require_vertex_project(command.tenant_id)
@@ -117,8 +122,12 @@ class CallCoordinator:
             api_key_id=command.api_key_id,
             bot_config_id=command.bot_config_id,
             live_agent_instructions=command.live_agent_instructions,
+            live_agent_template_id=command.live_agent_template_id,
+            live_agent_template_revision=command.live_agent_template_revision,
             live_agent_context=command.live_agent_context,
             post_call_context=command.post_call_context,
+            post_call_template_id=command.post_call_template_id,
+            post_call_template_revision=command.post_call_template_revision,
             post_call_output_schema=command.post_call_output_schema,
             post_call_tools=command.post_call_tools,
             post_call_time_zone=command.post_call_time_zone,
@@ -136,8 +145,12 @@ class CallCoordinator:
                 "caller_id": command.caller_id,
                 "bot_config_id": command.bot_config_id,
                 "live_agent_instructions": command.live_agent_instructions,
+                "live_agent_template_id": command.live_agent_template_id,
+                "live_agent_template_revision": command.live_agent_template_revision,
                 "live_agent_context": command.live_agent_context,
                 "post_call_context": command.post_call_context,
+                "post_call_template_id": command.post_call_template_id,
+                "post_call_template_revision": command.post_call_template_revision,
                 "post_call_output_schema": command.post_call_output_schema,
                 "post_call_tools": command.post_call_tools,
                 "post_call_time_zone": command.post_call_time_zone,

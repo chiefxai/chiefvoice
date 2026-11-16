@@ -21,6 +21,8 @@ from chiefvoice.accounts.store import SqlAccountStore
 from chiefvoice.agents.call.configs.routes import router as agent_profiles_router
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.configuration_store import SqlAgentConfigurationDirectory
+from chiefvoice.agents.template_store import SqlAgentTemplateDirectory
+from chiefvoice.agents.template_routes import router as agent_template_router
 from chiefvoice.agents.call.configs.store import SqlAgentProfileDirectory
 from chiefvoice.agents.call.factory import create_realtime_pipeline_factory
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
@@ -82,6 +84,7 @@ async def lifespan(_app: FastAPI):
     account_store = getattr(_app.state, "account_store", None)
     api_key_directory = getattr(_app.state, "api_key_directory", None)
     agent_configuration_directory = getattr(_app.state, "agent_configuration_directory", None)
+    agent_template_directory = getattr(_app.state, "agent_template_directory", None)
     post_call_webhook_directory = getattr(_app.state, "post_call_webhook_directory", None)
     agent_profile_directory = getattr(_app.state, "agent_profile_directory", None)
     post_call_dispatcher = getattr(_app.state, "post_call_dispatcher", None)
@@ -122,6 +125,8 @@ async def lifespan(_app: FastAPI):
             await api_key_directory.initialize()
         if agent_configuration_directory is not None:
             await agent_configuration_directory.initialize()
+        if agent_template_directory is not None:
+            await agent_template_directory.initialize()
         if post_call_webhook_directory is not None:
             await post_call_webhook_directory.initialize()
         if agent_profile_directory is not None:
@@ -210,6 +215,8 @@ async def lifespan(_app: FastAPI):
             await api_key_directory.close()
         if agent_configuration_directory is not None:
             await agent_configuration_directory.close()
+        if agent_template_directory is not None:
+            await agent_template_directory.close()
         if account_store is not None:
             await account_store.close()
         if call_session_store is not None:
@@ -230,6 +237,7 @@ def create_app(
     account_store: SqlAccountStore | None = None,
     api_key_directory: SqlApiKeyDirectory | None = None,
     agent_configuration_directory: SqlAgentConfigurationDirectory | None = None,
+    agent_template_directory: SqlAgentTemplateDirectory | None = None,
     post_call_webhook_directory: SqlPostCallWebhookDirectory | None = None,
     agent_profile_directory: AgentProfileDirectory | None = None,
     billing_directory: SqlBillingDirectory | None = None,
@@ -251,6 +259,8 @@ def create_app(
         agent_configuration_directory = SqlAgentConfigurationDirectory(
             settings.database_url
         )
+    if agent_template_directory is None and settings.database_url:
+        agent_template_directory = SqlAgentTemplateDirectory(settings.database_url)
     if settings.vertex_project_isolation_enabled:
         required_gcp_config = {
             "DATABASE_URL": settings.database_url,
@@ -548,6 +558,7 @@ def create_app(
     application.state.billing_directory = billing_directory
     application.state.api_key_directory = api_key_directory
     application.state.agent_configuration_directory = agent_configuration_directory
+    application.state.agent_template_directory = agent_template_directory
     application.state.post_call_webhook_directory = post_call_webhook_directory
     application.state.agent_profile_directory = agent_profile_directory
     application.state.object_storage_checks = object_storage_checks
@@ -595,6 +606,7 @@ def create_app(
     application.include_router(api_key_router)
     application.include_router(post_call_webhook_router)
     application.include_router(agent_profiles_router)
+    application.include_router(agent_template_router)
     application.include_router(billing_router)
     return application
 

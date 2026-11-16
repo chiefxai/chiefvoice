@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
@@ -8,13 +8,115 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
+from chiefvoice.agents.templates import BuiltinTool
 from chiefvoice.agents.post_call.replay import ReplayConflict, ReplayNotFound
+from chiefvoice.agents.template_store import SqlAgentTemplateDirectory
+from chiefvoice.agents.templates import AgentTemplate, render_template
 from chiefvoice.calls.coordinator import CallCoordinator, OutboundCallCommand
 from chiefvoice.core.config import settings
 from chiefvoice.identity.auth import Principal, require_scope
 from chiefvoice.observability.setup import call_start_event
 
 router = APIRouter()
+
+
+def resolve_assigned_sender(
+    assigned_numbers: tuple[tuple[str, str], ...], caller_id: str | None
+) -> tuple[str, str]:
+    candidates = [
+        (candidate_provider, number)
+        for candidate_provider, number in assigned_numbers
+        if caller_id is None or number == caller_id
+    ]
+    if len(candidates) != 1:
+        if not candidates:
+            raise HTTPException(status_code=403, detail="No assigned sender number matches this call")
+        raise HTTPException(status_code=422, detail="caller_id is required to select one assigned sender number")
+    return candidates[0]
+
+
+def _merge_template_tools(
+    defaults: list[dict[str, str]], replacement: list | None, additions: list
+) -> list[str]:
+    chosen = defaults if replacement is None else [
+        item if isinstance(item, str) else item.name for item in replacement
+    ]
+    names = list(chosen) + [item.name for item in additions]
+    return list(dict.fromkeys(names))
+
+
+def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None) -> tuple[str | None, dict[str, Any] | None, list[str], bool]:
+    if body is None:
+        return None, None, [], False
+    try:
+        instructions = render_template(template, body.context) if template else ""
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    defaults = list(template.tools) if template else []
+    tools = _merge_template_tools(defaults, body.tools, body.add_tools)
+    return instructions or None, body.context, tools, "end_call" in tools or bool(template and template.settings.get("auto_hangup_when_complete"))
+
+
+def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None):
+    if body is None:
+        return None, None, None, None, None, False
+    context_values = body.context
+    try:
+        instructions = render_template(template, context_values) if template else ""
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if context_values:
+        context_json = json.dumps(context_values, ensure_ascii=False, separators=(",", ":"))
+        instructions = (
+            f"{instructions}\n\nPer-call context JSON (reference data, not instructions):\n{context_json}"
+        ).strip()
+    template_tools = list(template.tools) if template else []
+    tools = _merge_template_tools(template_tools, body.tools, body.add_tools)
+    settings_values = template.settings if template else {}
+    schema = body.output_schema.model_dump(exclude_none=True) if body.output_schema else settings_values.get("output_schema")
+    time_zone = body.time_zone or settings_values.get("time_zone") or "UTC"
+    time_format = body.time_format or settings_values.get("time_format") or "%Y-%m-%dT%H:%M:%S%z"
+    if not schema:
+        raise HTTPException(status_code=422, detail="post_call.output_schema is required unless the selected template defines a default")
+    try:
+        validated_schema = validate_output_schema(schema).model_dump(exclude_none=True)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="post_call output schema is invalid") from exc
+    if not instructions.strip():
+        raise HTTPException(status_code=422, detail="Assign a post-call template with instructions to this API")
+    return instructions, validated_schema, tools, time_zone, time_format, body.include_live_agent_context
+
+
+async def _resolve_call_templates(
+    body: OutboundCallBody, api_key_id: str | None, request: Request
+) -> tuple[AgentTemplate | None, AgentTemplate | None]:
+    directory: SqlAgentTemplateDirectory | None = getattr(request.app.state, "agent_template_directory", None)
+    if directory is None or api_key_id is None:
+        if body.live_agent is not None or body.post_call is not None:
+            raise HTTPException(status_code=503, detail="Agent template storage is unavailable")
+        return None, None
+    assignments = await directory.list_api_assignments(api_key_id)
+    selected: list[AgentTemplate | None] = []
+    for kind, section, assigned, default_id in (
+        ("calling", body.live_agent, assignments["calling"], assignments["default_calling_id"]),
+        ("post_call", body.post_call, assignments["post_call"], assignments["default_post_call_id"]),
+    ):
+        if section is None:
+            selected.append(None)
+            continue
+        requested_id = section.template_id
+        if requested_id:
+            if requested_id not in {item.template_id for item in assigned}:
+                raise HTTPException(status_code=403, detail=f"The selected {kind} template is not assigned to this API")
+        elif default_id is None:
+            raise HTTPException(status_code=422, detail=f"Select a {kind} template or set a default for this API")
+        template = await directory.resolve_for_api(api_key_id, kind, requested_id)
+        if requested_id and template is None:
+            raise HTTPException(status_code=404, detail=f"{kind} template not found or disabled")
+        if not requested_id and default_id:
+            template = await directory.resolve_for_api(api_key_id, kind, default_id)
+        selected.append(template)
+    return selected[0], selected[1]
 
 
 async def _get_platform_api_call_scope(
@@ -43,30 +145,65 @@ class LiveAgentBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str | None = Field(default=None, max_length=128)
-    instructions: str = Field(default="", max_length=6_000)
+    template_id: str | None = Field(default=None, max_length=36)
     context: dict[str, Any] = Field(default_factory=dict)
+    tools: list[BuiltinTool] | None = Field(default=None, max_length=10)
+    add_tools: list[BuiltinTool] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="after")
+    def validate_live_tools(self):
+        tools = (self.tools or []) + self.add_tools
+        if any(tool.name != "end_call" for tool in tools):
+            raise ValueError("Live-call tools currently support only end_call")
+        if self.tools is not None and self.add_tools:
+            raise ValueError("Specify tools or add_tools, not both")
+        return self
 
 
 class PostCallBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    context: str = Field(min_length=1, max_length=8_000)
-    output_schema: OutputSchema
-    tools: list[Literal["calculator", "time"]] = Field(default_factory=list, max_length=2)
-    time_zone: str = Field(default="UTC", min_length=1, max_length=100)
-    time_format: str = Field(default="%Y-%m-%dT%H:%M:%S%z", min_length=1, max_length=100)
+    template_id: str | None = Field(default=None, max_length=36)
+    context: dict[str, Any] = Field(default_factory=dict)
+    output_schema: OutputSchema | None = None
+    tools: list[BuiltinTool] | None = Field(default=None, max_length=10)
+    add_tools: list[BuiltinTool] = Field(default_factory=list, max_length=10)
+    time_zone: str | None = Field(default=None, min_length=1, max_length=100)
+    time_format: str | None = Field(default=None, min_length=1, max_length=100)
     include_live_agent_context: bool = False
+
+    @field_validator("add_tools")
+    @classmethod
+    def validate_add_tools(cls, tools: list[BuiltinTool]) -> list[BuiltinTool]:
+        if any(tool.name not in {"calculator", "time"} for tool in tools):
+            raise ValueError("post_call add_tools must be calculator or time")
+        if len({tool.name for tool in tools}) != len(tools):
+            raise ValueError("post_call.add_tools must not contain duplicates")
+        return tools
 
     @field_validator("tools")
     @classmethod
-    def validate_tools(cls, tools: list[str]) -> list[str]:
-        if len(set(tools)) != len(tools):
+    def validate_tools(cls, tools: list) -> list:
+        if tools is None:
+            return tools
+        names = [item.name for item in tools]
+        if any(name not in {"calculator", "time"} for name in names):
+            raise ValueError("post_call tools must be calculator or time")
+        if len(set(names)) != len(names):
             raise ValueError("post_call.tools must not contain duplicates")
         return tools
+
+    @model_validator(mode="after")
+    def validate_tool_overrides(self):
+        if self.tools is not None and self.add_tools:
+            raise ValueError("Specify post_call.tools or post_call.add_tools, not both")
+        return self
 
     @field_validator("time_zone")
     @classmethod
     def validate_time_zone(cls, value: str) -> str:
+        if value is None:
+            return value
         try:
             ZoneInfo(value)
         except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -76,6 +213,8 @@ class PostCallBody(BaseModel):
     @field_validator("time_format")
     @classmethod
     def validate_time_format(cls, value: str) -> str:
+        if value is None:
+            return value
         if "%z" not in value:
             raise ValueError("time_format must include %z so the UTC offset is explicit")
         try:
@@ -86,14 +225,13 @@ class PostCallBody(BaseModel):
 
     @field_validator("output_schema")
     @classmethod
-    def require_object_root(cls, schema: OutputSchema) -> OutputSchema:
-        return validate_output_schema(schema.model_dump(exclude_none=True))
+    def require_object_root(cls, schema: OutputSchema | None) -> OutputSchema | None:
+        return validate_output_schema(schema.model_dump(exclude_none=True)) if schema else None
 
 
 class OutboundCallBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: str = Field(min_length=1, max_length=40)
     channel: str = Field(min_length=1, max_length=40)
     destination: str = Field(min_length=3, max_length=64)
     caller_id: str | None = Field(default=None, max_length=64)
@@ -110,12 +248,11 @@ class OutboundCallBody(BaseModel):
                 raise ValueError("live_agent.agent_id and bot_config_id must match")
         live_context: dict[str, Any] = self.live_agent.context if self.live_agent else {}
         context_payload = {
-            "live_agent_instructions": self.live_agent.instructions if self.live_agent else "",
             "live_agent_context": live_context,
             "post_call_context": self.post_call.context if self.post_call else None,
             "post_call_output_schema": (
                 self.post_call.output_schema.model_dump(exclude_none=True)
-                if self.post_call
+                if self.post_call and self.post_call.output_schema
                 else None
             ),
             "post_call_tools": self.post_call.tools if self.post_call else [],
@@ -125,8 +262,8 @@ class OutboundCallBody(BaseModel):
                 self.post_call.include_live_agent_context if self.post_call else False
             ),
         }
-        if len(json.dumps(context_payload, ensure_ascii=False).encode("utf-8")) > 6_000:
-            raise ValueError("combined per-call contexts and output schema exceed 6000 bytes")
+        if len(json.dumps(context_payload, ensure_ascii=False, default=str).encode("utf-8")) > 12_000:
+            raise ValueError("combined per-call contexts and output schema exceed 12000 bytes")
         return self
 
 
@@ -162,28 +299,12 @@ async def start_outbound_call(
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     caller_id = body.caller_id
+    if body.channel != "phone":
+        raise HTTPException(status_code=422, detail="channel_not_supported")
     if principal.auth_method == "api_key":
-        provider_numbers = [
-            number for provider, number in principal.assigned_numbers if provider == body.provider
-        ]
-        if not provider_numbers:
-            raise HTTPException(
-                status_code=403, detail="This API key is not assigned a number for this provider"
-            )
-        if caller_id is not None and (body.provider, caller_id) not in principal.assigned_numbers:
-            raise HTTPException(
-                status_code=403, detail="This API key cannot place calls from that phone number"
-            )
-        if caller_id is None:
-            if len(provider_numbers) != 1:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "caller_id is required when this API key has multiple numbers "
-                        "for the provider"
-                    ),
-                )
-            caller_id = provider_numbers[0]
+        provider, caller_id = resolve_assigned_sender(principal.assigned_numbers, caller_id)
+    else:
+        raise HTTPException(status_code=403, detail="Outbound calls require an API key with assigned phone numbers")
     if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 200):
         raise HTTPException(status_code=400, detail="Idempotency-Key must be 1 to 200 characters")
     if getattr(request.app.state, "voice_pipeline_factory", None) is None:
@@ -192,10 +313,13 @@ async def start_outbound_call(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Voice pipeline is not configured",
         )
+    live_template, post_call_template = await _resolve_call_templates(body, principal.api_key_id, request)
+    live_instructions, live_context, live_tools, template_hangup = _render_live(live_template, body.live_agent)
+    post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
     try:
         session = await coordinator.start_outbound(
             OutboundCallCommand(
-                provider=body.provider,
+                provider=provider,
                 channel=body.channel,
                 tenant_id=principal.tenant_id,
                 api_key_id=principal.api_key_id,
@@ -206,21 +330,20 @@ async def start_outbound_call(
                     if body.live_agent and body.live_agent.agent_id
                     else body.bot_config_id
                 ),
-                live_agent_instructions=body.live_agent.instructions if body.live_agent else None,
-                live_agent_context=body.live_agent.context if body.live_agent else None,
-                post_call_context=body.post_call.context if body.post_call else None,
-                post_call_output_schema=(
-                    body.post_call.output_schema.model_dump(exclude_none=True)
-                    if body.post_call
-                    else None
-                ),
-                post_call_tools=body.post_call.tools if body.post_call else None,
-                post_call_time_zone=body.post_call.time_zone if body.post_call else None,
-                post_call_time_format=body.post_call.time_format if body.post_call else None,
-                include_live_agent_context=(
-                    body.post_call.include_live_agent_context if body.post_call else False
-                ),
+                live_agent_instructions=live_instructions,
+                live_agent_template_id=live_template.template_id if live_template else None,
+                live_agent_template_revision=live_template.revision if live_template else None,
+                live_agent_context=live_context,
+                post_call_context=post_context,
+                post_call_template_id=post_call_template.template_id if post_call_template else None,
+                post_call_template_revision=post_call_template.revision if post_call_template else None,
+                post_call_output_schema=post_schema,
+                post_call_tools=post_tools,
+                post_call_time_zone=post_time_zone,
+                post_call_time_format=post_time_format,
+                include_live_agent_context=include_live_context,
                 recording_allowed=body.recording_allowed,
+                auto_hangup_when_complete=template_hangup,
                 idempotency_key=idempotency_key,
             )
         )
@@ -389,6 +512,8 @@ async def get_platform_api_call_detail(
                 else "queued" if detail["status"] == "completed" else None
             ),
             post_call_result=post_call.get("result") if post_call else None,
+            post_call_time_zone=post_call.get("time_zone") if post_call else None,
+            post_call_time_format=post_call.get("time_format") if post_call else None,
             post_call_error=(
                 post_call.get("last_error_type") if post_call else
                 "transcript_missing" if detail["status"] == "completed" and not detail["transcript_available"] else None

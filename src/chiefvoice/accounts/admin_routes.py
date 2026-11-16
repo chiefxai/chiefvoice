@@ -17,7 +17,14 @@ from chiefvoice.agents.post_call.queue import validate_public_webhook_url
 from chiefvoice.billing import BillingMode
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
 from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
-from chiefvoice.calls.routes import OutboundCallBody, get_call_coordinator
+from chiefvoice.calls.routes import (
+    OutboundCallBody,
+    _render_live,
+    _render_post_call,
+    _resolve_call_templates,
+    get_call_coordinator,
+    resolve_assigned_sender,
+)
 from chiefvoice.core.config import settings
 from chiefvoice.core.tags import normalize_tags
 from chiefvoice.identity.api_keys import ApiKeyDirectory, ApiKeySummary
@@ -823,6 +830,8 @@ async def list_platform_api_calls(
                 else "queued" if call["status"] == "completed" else None
             )
             call["post_call_result"] = post_call["result"] if post_call else None
+            call["post_call_time_zone"] = post_call.get("time_zone") if post_call else None
+            call["post_call_time_format"] = post_call.get("time_format") if post_call else None
             call["webhook_status"] = post_call["webhook_status"] if post_call else None
             call["post_call_error"] = (
                 post_call.get("last_error_type") if post_call else
@@ -878,30 +887,29 @@ async def simulate_api_call(
         raise HTTPException(status_code=403, detail="Selected API does not have calls:write scope")
     if body.channel != "phone":
         raise HTTPException(status_code=422, detail="Simulation currently supports phone calls")
-    assigned = [number for provider, number in key.assigned_numbers if provider == body.provider]
-    if not assigned:
-        raise HTTPException(status_code=403, detail="Selected API has no number assigned for this provider")
-    caller_id = body.caller_id
-    if caller_id is None:
-        if len(assigned) != 1:
-            raise HTTPException(status_code=422, detail="Select a caller ID when this API has multiple assigned numbers")
-        caller_id = assigned[0]
-    if (body.provider, caller_id) not in key.assigned_numbers:
-        raise HTTPException(status_code=403, detail="Caller ID is not assigned to the selected API")
+    provider, caller_id = resolve_assigned_sender(key.assigned_numbers, body.caller_id)
+    live_template, post_call_template = await _resolve_call_templates(body, key.key_id, request)
+    live_instructions, live_context, _live_tools, template_hangup = _render_live(live_template, body.live_agent)
+    post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
     coordinator = get_call_coordinator(request)
     try:
         session = await coordinator.start_outbound(OutboundCallCommand(
-            provider=body.provider, channel=body.channel, tenant_id=key.tenant_id,
+            provider=provider, channel=body.channel, tenant_id=key.tenant_id,
             api_key_id=key.key_id, destination=body.destination, caller_id=caller_id,
             bot_config_id=(body.live_agent.agent_id if body.live_agent else None),
-            live_agent_instructions=(body.live_agent.instructions if body.live_agent else None),
-            live_agent_context=(body.live_agent.context if body.live_agent else None),
-            post_call_context=(body.post_call.context if body.post_call else None),
-            post_call_output_schema=(body.post_call.output_schema.model_dump(exclude_none=True) if body.post_call else None),
-            post_call_tools=(body.post_call.tools if body.post_call else None),
-            post_call_time_zone=(body.post_call.time_zone if body.post_call else None),
-            post_call_time_format=(body.post_call.time_format if body.post_call else None),
-            include_live_agent_context=(body.post_call.include_live_agent_context if body.post_call else False),
+            live_agent_instructions=live_instructions,
+            live_agent_template_id=live_template.template_id if live_template else None,
+            live_agent_template_revision=live_template.revision if live_template else None,
+            live_agent_context=live_context,
+            post_call_context=post_context,
+            post_call_template_id=post_call_template.template_id if post_call_template else None,
+            post_call_template_revision=post_call_template.revision if post_call_template else None,
+            post_call_output_schema=post_schema,
+            post_call_tools=post_tools,
+            post_call_time_zone=post_time_zone,
+            post_call_time_format=post_time_format,
+            include_live_agent_context=include_live_context,
+            auto_hangup_when_complete=template_hangup,
             recording_allowed=body.recording_allowed, idempotency_key=idempotency_key,
         ))
     except HTTPException as exc:

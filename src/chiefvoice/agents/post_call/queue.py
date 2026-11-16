@@ -342,6 +342,7 @@ class SqlPostCallQueue:
             if row is None:
                 return None
             result = None
+            payload = json.loads(self._fernet.decrypt(row.encrypted_payload.encode("ascii")))
             if row.status == "completed" and row.encrypted_result:
                 result = json.loads(self._fernet.decrypt(row.encrypted_result.encode("ascii")))
             delivery = await session.scalar(
@@ -356,6 +357,8 @@ class SqlPostCallQueue:
                 "attempts": row.attempts,
                 "last_error_type": row.last_error_type,
                 "result": result,
+                "time_zone": payload.get("time_zone", "UTC"),
+                "time_format": payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
                 "webhook_status": delivery.status if delivery else None,
                 "webhook_attempts": delivery.attempts if delivery else 0,
             }
@@ -724,6 +727,7 @@ class SqlPostCallQueue:
                             started_at=job.started_at.isoformat() if job.started_at else None,
                             ended_at=job.ended_at.isoformat(),
                             encrypted_result=job.encrypted_result,
+                            encrypted_payload=job.encrypted_payload,
                         )
 
         if delivery is None:
@@ -738,6 +742,9 @@ class SqlPostCallQueue:
             result = json.loads(
                 self._fernet.decrypt(delivery["encrypted_result"].encode("ascii"))
             )
+            call_payload = json.loads(
+                self._fernet.decrypt(delivery["encrypted_payload"].encode("ascii"))
+            )
             body = {
                 "event": "call.analysis.completed",
                 "event_id": delivery["event_id"],
@@ -748,6 +755,10 @@ class SqlPostCallQueue:
                     "direction": delivery["direction"],
                     "started_at": delivery["started_at"],
                     "ended_at": delivery["ended_at"],
+                },
+                "post_call": {
+                    "time_zone": call_payload.get("time_zone", "UTC"),
+                    "time_format": call_payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
                 },
                 "result": result,
             }

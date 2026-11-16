@@ -26,18 +26,8 @@ type Page = 'Numbers' | 'Agents' | 'API' | 'Simulation' | 'Docs'
 const pagePaths: Record<Page, string> = {
   Numbers: '/numbers', Agents: '/agents', API: '/api', Simulation: '/simulation', Docs: '/docs',
 }
-const defaultSimulationPostCallContext = 'Summarize the call and extract the requested fields. Use unknown when information is not stated; do not guess.'
+const defaultSimulationPostCallContext = '{}'
 const defaultSimulationOutputSchema = JSON.stringify({ type: 'object', properties: { summary: { type: 'string' }, outcome: { type: 'string', enum: ['completed', 'follow_up_needed', 'unknown'] } }, required: ['summary', 'outcome'] }, null, 2)
-const livePromptContainsPostCallDirective = (instructions: string) =>
-  instructions.split(/[\n.!?]+/).some(clause => {
-    if (/\b(?:do not|don't|never|avoid|must not|should not)\b/i.test(clause)) return false
-    return (
-      /\b(?:summari[sz]e|analy[sz]e)\b.{0,80}\b(?:the )?call\b/i.test(clause) ||
-      /\b(?:extract|transcribe)\b.{0,100}\b(?:transcript|from the call)\b/i.test(clause) ||
-      /\b(?:post[- ]call|after the call|following the call)\b.{0,100}\b(?:extract|summari[sz]e|analy[sz]e|transcribe|return|output)\b/i.test(clause) ||
-      /\b(?:extract|summari[sz]e|analy[sz]e|transcribe)\b.{0,100}\b(?:post[- ]call|after the call|following the call)\b/i.test(clause)
-    )
-  })
 const pageFromPath = (pathname: string): Page => {
   const match = (Object.entries(pagePaths) as [Page, string][]).find(([, path]) => path === pathname.replace(/\/$/, ''))
   return match?.[0] || 'Numbers'
@@ -93,6 +83,15 @@ type AgentConfiguration = {
   enabled: boolean
   tags: string[]
 }
+type AgentPromptTemplate = {
+  id: string; kind: 'calling' | 'post_call'; name: string; instructions: string
+  tools: { type: 'builtin'; name: string }[]; variables: Record<string, unknown>
+  settings: Record<string, unknown>; revision: number; enabled: boolean
+}
+type ApiAgentTemplates = {
+  calling: AgentPromptTemplate[]; post_call: AgentPromptTemplate[]
+  default_calling_id: string | null; default_post_call_id: string | null
+}
 type IssuedApiKey = {
   key: string
   api_key_record: PlatformApiKey
@@ -115,6 +114,7 @@ type SimulationTemplate = {
   id: string; name: string; apiId: string; destination: string; callerId: string; profileId: string
   liveInstructions: string; liveContext: string; postCallContext: string; outputSchema: string
   tools: string[]; timeZone: string; timeFormat: string; includeLiveContext: boolean; recording: boolean
+  callingTemplateId?: string; postCallTemplateId?: string
 }
 type VoiceAgentProfile = { id: string; name: string; language: string; voice: string; speaking_style: string; instructions: string }
 type ApiBillingUsage = {
@@ -148,6 +148,12 @@ const api = {
   phoneNumbers: () => http.get<{ items: RegisteredNumber[] }>('/v1/admin/customers/phone-numbers').then(r => r.data.items),
   apiKeys: () => http.get<{ items: PlatformApiKey[] }>('/v1/admin/customers/api-keys').then(r => r.data.items),
   agentConfigs: () => http.get<{ items: AgentConfiguration[] }>('/v1/admin/customers/agent-configs').then(r => r.data.items),
+  agentTemplates: () => http.get<{ items: AgentPromptTemplate[] }>('/v1/admin/customers/agent-templates').then(r => r.data.items),
+  createAgentTemplate: (data: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'>) => http.post<AgentPromptTemplate>('/v1/admin/customers/agent-templates', data).then(r => r.data),
+  updateAgentTemplate: (id: string, data: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'>) => http.put<AgentPromptTemplate>(`/v1/admin/customers/agent-templates/${id}`, data).then(r => r.data),
+  deleteAgentTemplate: (id: string) => http.delete(`/v1/admin/customers/agent-templates/${id}`),
+  apiAgentTemplates: (id: string) => http.get<ApiAgentTemplates>(`/v1/admin/customers/api-keys/${id}/agent-templates`).then(r => r.data),
+  setApiAgentTemplates: (id: string, data: { calling_template_ids: string[]; post_call_template_ids: string[]; default_calling_template_id: string | null; default_post_call_template_id: string | null }) => http.put<ApiAgentTemplates>(`/v1/admin/customers/api-keys/${id}/agent-templates`, data).then(r => r.data),
   apiCalls: (id: string, limit = 50, offset = 0) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`, { params: { limit, offset } }).then(r => r.data),
   apiCallDetail: (id: string, sessionId: string) => http.get<ApiCallDetail>(`/v1/admin/customers/api-keys/${id}/calls/${sessionId}`).then(r => r.data),
   apiCallRecording: (id: string, sessionId: string) => http.get<Blob>(`/v1/admin/customers/api-keys/${id}/calls/${sessionId}/recording`, { responseType: 'blob' }).then(r => r.data),
@@ -213,6 +219,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [apiRecordingAllowed, setApiRecordingAllowed] = useState(false)
   const [voiceAgentId, setVoiceAgentId] = useState('')
   const [postCallAgentId, setPostCallAgentId] = useState('')
+  const [apiCallingTemplateIds, setApiCallingTemplateIds] = useState<string[]>([])
+  const [apiPostCallTemplateIds, setApiPostCallTemplateIds] = useState<string[]>([])
+  const [apiDefaultCallingTemplateId, setApiDefaultCallingTemplateId] = useState('')
+  const [apiDefaultPostCallTemplateId, setApiDefaultPostCallTemplateId] = useState('')
   const [agentConfigOpen, setAgentConfigOpen] = useState(false)
   const [editingAgentConfig, setEditingAgentConfig] = useState<AgentConfiguration | null>(null)
   const [agentName, setAgentName] = useState('')
@@ -250,6 +260,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [simulationLiveInstructions, setSimulationLiveInstructions] = useState('')
   const [simulationLiveContext, setSimulationLiveContext] = useState('{}')
   const [simulationPostCallContext, setSimulationPostCallContext] = useState(defaultSimulationPostCallContext)
+  const [simulationCallingTemplateId, setSimulationCallingTemplateId] = useState('')
+  const [simulationPostCallTemplateId, setSimulationPostCallTemplateId] = useState('')
   const [simulationOutputSchema, setSimulationOutputSchema] = useState(defaultSimulationOutputSchema)
   const [simulationTools, setSimulationTools] = useState<string[]>([])
   const [simulationTimeZone, setSimulationTimeZone] = useState('Asia/Kolkata')
@@ -326,14 +338,36 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
   const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && (page === 'API' || page === 'Agents' || page === 'Simulation'), retry: false })
   const agentsQuery = useQuery({ queryKey: ['platform-agent-configs'], queryFn: api.agentConfigs, enabled: connected && (page === 'API' || page === 'Agents'), retry: false })
+  const agentTemplatesQuery = useQuery({ queryKey: ['platform-agent-templates'], queryFn: api.agentTemplates, enabled: connected && (page === 'API' || page === 'Agents' || page === 'Simulation'), retry: false })
+  const apiAgentTemplatesQuery = useQuery({ queryKey: ['api-agent-templates', managementKey?.id], queryFn: () => api.apiAgentTemplates(managementKey!.id), enabled: connected && Boolean(managementKey), retry: false })
+  const simulationAgentTemplatesQuery = useQuery({ queryKey: ['api-agent-templates', 'simulation', simulationApiId], queryFn: () => api.apiAgentTemplates(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
   const simulationProfilesQuery = useQuery({ queryKey: ['simulation-voice-profiles', simulationApiId], queryFn: () => api.voiceProfiles(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
   const simulationCallsQuery = useQuery({ queryKey: ['simulation-call-logs', simulationApiId], queryFn: () => api.apiCalls(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false, refetchInterval: simulationSessionId ? 3000 : false })
   const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', apiDetailId, apiCallsPage, apiCallsPageSize], queryFn: () => api.apiCalls(apiDetailId!, apiCallsPageSize, apiCallsPage * apiCallsPageSize), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', apiDetailId], queryFn: () => api.apiBilling(apiDetailId!), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 10000 : false })
   const apiDetailKey = keysQuery.data?.find(key => key.id === apiDetailId) || null
+  useEffect(() => {
+    const assignments = apiAgentTemplatesQuery.data
+    if (!managementKey || !assignments) return
+    setApiCallingTemplateIds(assignments.calling.map(item => item.id))
+    setApiPostCallTemplateIds(assignments.post_call.map(item => item.id))
+    setApiDefaultCallingTemplateId(assignments.default_calling_id || '')
+    setApiDefaultPostCallTemplateId(assignments.default_post_call_id || '')
+  }, [managementKey?.id, apiAgentTemplatesQuery.data])
   const issueMutation = useMutation({
     mutationFn: ({ customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl }: { customerName: string; billingMode: 'prepaid' | 'postpaid'; billingAmountMinor: number; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean; webhookUrl: string }) => api.createApiKey(customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl),
-    onSuccess: result => {
+    onSuccess: async result => {
+      let assignmentFailed = false
+      try {
+        await api.setApiAgentTemplates(result.api_key_record.id, {
+          calling_template_ids: apiCallingTemplateIds, post_call_template_ids: apiPostCallTemplateIds,
+          default_calling_template_id: apiDefaultCallingTemplateId || null,
+          default_post_call_template_id: apiDefaultPostCallTemplateId || null,
+        })
+      } catch (error) {
+        assignmentFailed = true
+        setToast(`API created, but template assignment failed: ${errorText(error)}`)
+      }
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-agent-configs'] })
@@ -341,7 +375,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       setAssignmentOpen(false)
       setSelectedNumbers([])
       setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setApiRecordingAllowed(false)
-      setToast('API key created for the selected phone number.')
+      setApiCallingTemplateIds([]); setApiPostCallTemplateIds([]); setApiDefaultCallingTemplateId(''); setApiDefaultPostCallTemplateId('')
+      if (!assignmentFailed) setToast('API key created for the selected phone numbers and agent templates.')
     },
     onError: error => setToast(errorText(error)),
   })
@@ -358,7 +393,10 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     onError: error => setToast(errorText(error)),
   })
   const manageNumbersMutation = useMutation({
-    mutationFn: ({ key, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed }: { key: PlatformApiKey; name: string; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean }) => api.updateApiConfig(key.id, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed),
+    mutationFn: async ({ key, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, templates }: { key: PlatformApiKey; name: string; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean; templates: { calling_template_ids: string[]; post_call_template_ids: string[]; default_calling_template_id: string | null; default_post_call_template_id: string | null } }) => {
+      await api.updateApiConfig(key.id, name, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed)
+      return api.setApiAgentTemplates(key.id, templates)
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -449,6 +487,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (!selected.length) { setToast('Required: select at least one unassigned outbound phone number.'); return }
     if (!apiCustomerName.trim()) { setToast('Enter the customer name for this API.'); return }
     if (!voiceAgentId && !postCallAgentId) { setToast('Select at least one agent for this API.'); return }
+    if (voiceAgentId && !apiCallingTemplateIds.length) { setToast('Assign at least one calling template to this API.'); return }
+    if (postCallAgentId && !apiPostCallTemplateIds.length) { setToast('Assign at least one post-call template to this API.'); return }
     if (apiWebhookUrl.trim() && !postCallAgentId) { setToast('Select a post-call agent to use a completion webhook.'); return }
     if (!apiCredentials.trim()) { setToast('Add a Google Cloud service account JSON for this API.'); return }
     const configuredRate = (agentsQuery.data || []).filter(agent => agent.id === voiceAgentId || agent.id === postCallAgentId).reduce((sum, agent) => sum + agent.cost_per_minute_minor, 0)
@@ -465,18 +505,14 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setSimulationProfileId('')
     setSimulationLiveInstructions('')
     setSimulationLiveContext('{}')
-    setSimulationPostCallContext(defaultSimulationPostCallContext)
+    setSimulationPostCallContext('{}')
+    setSimulationCallingTemplateId('')
+    setSimulationPostCallTemplateId('')
     setSimulationOutputSchema(defaultSimulationOutputSchema)
     setSimulationTools([])
     setSimulationTimeZone('Asia/Kolkata')
     setSimulationTimeFormat('%Y-%m-%d %H:%M:%S %z')
     setSimulationIncludeLiveContext(false)
-  }
-  const selectSimulationProfile = (id: string) => {
-    setSimulationProfileId(id)
-    const profile = (simulationProfilesQuery.data || []).find(item => item.id === id)
-    setSimulationLiveInstructions(profile?.instructions || '')
-    setSimulationLiveContext('{}')
   }
   const startSimulation = (template?: SimulationTemplate) => {
     const config: Omit<SimulationTemplate, 'id' | 'name'> = template || {
@@ -486,31 +522,32 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       outputSchema: simulationOutputSchema, tools: simulationTools, timeZone: simulationTimeZone,
       timeFormat: simulationTimeFormat, includeLiveContext: simulationIncludeLiveContext,
       recording: simulationRecording,
+      callingTemplateId: simulationCallingTemplateId, postCallTemplateId: simulationPostCallTemplateId,
     }
     const key = (keysQuery.data || []).find(item => item.id === config.apiId)
     if (!key || key.revoked_at) { setToast('Select an active API first.'); return }
     if (!config.destination.trim()) { setToast('Enter the destination phone number.'); return }
     if (!config.callerId) { setToast('Choose an assigned caller ID.'); return }
     if (!key.voice_agent_enabled) { setToast('This API has no calling agent enabled.'); return }
-    if (livePromptContainsPostCallDirective(config.liveInstructions)) {
-      setToast('These look like post-call instructions. Put transcript extraction or call summaries in the Post-call task field.'); return
-    }
     let liveContext: Record<string, unknown>
+    let postCallContext: Record<string, unknown>
     let outputSchema: Record<string, unknown>
     try {
       liveContext = JSON.parse(config.liveContext || '{}')
       if (!liveContext || Array.isArray(liveContext) || typeof liveContext !== 'object') throw new Error('Live-call context must be a JSON object.')
+      postCallContext = JSON.parse(config.postCallContext || '{}')
+      if (!postCallContext || Array.isArray(postCallContext) || typeof postCallContext !== 'object') throw new Error('Post-call context must be a JSON object.')
       outputSchema = JSON.parse(config.outputSchema)
       if (!outputSchema || Array.isArray(outputSchema) || typeof outputSchema !== 'object') throw new Error('Output schema must be a JSON object.')
     } catch (error) { setToast(error instanceof Error ? error.message : 'Check the JSON fields.'); return }
-    const [provider] = config.callerId.split('|')
     const data: Record<string, unknown> = {
-      provider, channel: 'phone', destination: config.destination.trim(), caller_id: config.callerId.split('|')[1],
-      live_agent: { agent_id: config.profileId || null, instructions: config.liveInstructions, context: liveContext },
+      channel: 'phone', destination: config.destination.trim(), caller_id: config.callerId.split('|')[1],
+      live_agent: { agent_id: config.profileId || null, template_id: config.callingTemplateId || null, context: liveContext },
       recording_allowed: config.recording,
     }
     if (key.post_call_agent_enabled) data.post_call = {
-      context: config.postCallContext.trim(), output_schema: outputSchema, tools: config.tools,
+      template_id: config.postCallTemplateId || null, context: postCallContext, output_schema: outputSchema,
+      ...(config.tools.length ? { tools: config.tools.map(name => ({ type: 'builtin', name })) } : {}),
       time_zone: config.timeZone, time_format: config.timeFormat,
       include_live_agent_context: config.includeLiveContext,
     }
@@ -523,6 +560,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setSimulationDestination(template.destination)
     setSimulationCallerId(template.callerId)
     setSimulationProfileId(template.profileId)
+    setSimulationCallingTemplateId(template.callingTemplateId || '')
+    setSimulationPostCallTemplateId(template.postCallTemplateId || '')
     setSimulationLiveInstructions(template.liveInstructions)
     setSimulationLiveContext(template.liveContext)
     setSimulationPostCallContext(template.postCallContext)
@@ -545,11 +584,12 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setPostCallLocation(availableAgents.find(agent => agent.id === postCallAgentId)?.location || availableAgents.find(agent => agent.kind === 'post_call')?.location || 'global')
   }
   const openCreateApi = () => {
-    setSelectedNumbers([]); setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('global'); setApiRecordingAllowed(false); setAssignmentOpen(true)
+    setSelectedNumbers([]); setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCallingTemplateIds([]); setApiPostCallTemplateIds([]); setApiDefaultCallingTemplateId(''); setApiDefaultPostCallTemplateId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('global'); setApiRecordingAllowed(false); setAssignmentOpen(true)
   }
   const openEditApi = (key: PlatformApiKey) => {
     setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`))
     setApiName(key.name); setApiTags((key.tags || []).join(', ')); setVoiceAgentId(key.voice_agent_id || ''); setPostCallAgentId(key.post_call_agent_id || '')
+    setApiCallingTemplateIds([]); setApiPostCallTemplateIds([]); setApiDefaultCallingTemplateId(''); setApiDefaultPostCallTemplateId('')
     setApiCredentials(''); setVoiceLocation(key.voice_location || key.vertex_location || 'us-central1'); setPostCallLocation(key.post_call_location || 'global')
     setApiRecordingAllowed(key.recording_allowed === true)
   }
@@ -607,8 +647,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         {page === 'API' && (apiDetailId
           ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsTotal={apiCallsQuery.data?.total || 0} callsPage={apiCallsPage} callsPageSize={apiCallsPageSize} onCallsPageChange={setApiCallsPage} onCallsPageSizeChange={size => { setApiCallsPageSize(size); setApiCallsPage(0) }} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onBack={() => navigate(pagePaths.API)} onEdit={key => openEditApi(key)} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} />
           : <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
-        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
-        {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={selectSimulationProfile} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} />}
+        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} templates={agentTemplatesQuery.data || []} templatesLoading={agentTemplatesQuery.isLoading} templatesError={agentTemplatesQuery.error} />}
+        {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={setSimulationProfileId} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} templates={simulationAgentTemplatesQuery.data} templatesLoading={simulationAgentTemplatesQuery.isLoading} callingTemplateId={simulationCallingTemplateId} onCallingTemplateChange={setSimulationCallingTemplateId} postCallTemplateId={simulationPostCallTemplateId} onPostCallTemplateChange={setSimulationPostCallTemplateId} />}
         {page === 'Docs' && <DocsPage />}
       </div>
     </main>
@@ -682,12 +722,21 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           {voiceAgentId && <TextField label="Calling Vertex location for this API" value={voiceLocation} onChange={event => setVoiceLocation(event.target.value)} fullWidth />}
           {postCallAgentId && <TextField label="Post-call Vertex location for this API" value={postCallLocation} onChange={event => setPostCallLocation(event.target.value)} fullWidth />}
         </> })()}
+        <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Reusable prompts and tools</Typography>
+        {(() => { const choices = agentTemplatesQuery.data || []; const calling = choices.filter(item => item.kind === 'calling'); const post = choices.filter(item => item.kind === 'post_call'); return <>
+          <FormControl fullWidth><InputLabel id="api-calling-templates">Allowed calling templates</InputLabel><Select multiple labelId="api-calling-templates" label="Allowed calling templates" value={apiCallingTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiCallingTemplateIds(ids); if (!ids.includes(apiDefaultCallingTemplateId)) setApiDefaultCallingTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} calling template${ids.length === 1 ? '' : 's'} assigned`}>{calling.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiCallingTemplateIds.includes(item.id)} /><ListItemText primary={item.name} secondary={`${item.tools.map(tool => tool.name).join(', ') || 'No tools'} · v${item.revision}`} /></MenuItem>)}</Select></FormControl>
+          {!!apiCallingTemplateIds.length && <FormControl fullWidth><InputLabel id="api-default-calling-template">Default calling template</InputLabel><Select labelId="api-default-calling-template" label="Default calling template" value={apiDefaultCallingTemplateId} onChange={event => setApiDefaultCallingTemplateId(event.target.value)}>{calling.filter(item => apiCallingTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
+          <FormControl fullWidth><InputLabel id="api-post-templates">Allowed post-call templates</InputLabel><Select multiple labelId="api-post-templates" label="Allowed post-call templates" value={apiPostCallTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiPostCallTemplateIds(ids); if (!ids.includes(apiDefaultPostCallTemplateId)) setApiDefaultPostCallTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} post-call template${ids.length === 1 ? '' : 's'} assigned`}>{post.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiPostCallTemplateIds.includes(item.id)} /><ListItemText primary={item.name} secondary={`${item.tools.map(tool => tool.name).join(', ') || 'No tools'} · v${item.revision}`} /></MenuItem>)}</Select></FormControl>
+          {!!apiPostCallTemplateIds.length && <FormControl fullWidth><InputLabel id="api-default-post-template">Default post-call template</InputLabel><Select labelId="api-default-post-template" label="Default post-call template" value={apiDefaultPostCallTemplateId} onChange={event => setApiDefaultPostCallTemplateId(event.target.value)}>{post.filter(item => apiPostCallTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
+        </> })()}
+        {voiceAgentId && !apiCallingTemplateIds.length && <Alert severity="warning">Assign at least one calling template. The first template is selected as this API’s default.</Alert>}
+        {postCallAgentId && !apiPostCallTemplateIds.length && <Alert severity="warning">Assign at least one post-call template for post-call requests.</Alert>}
         {(() => { const rate = (agentsQuery.data || []).filter(agent => agent.id === voiceAgentId || agent.id === postCallAgentId).reduce((sum, agent) => sum + agent.cost_per_minute_minor, 0); return <Alert severity={rate > 0 ? 'info' : 'warning'}>API billing rate: <b>{formatMoney(rate, 'INR')}/minute</b>. It is calculated from the selected calling and post-call agent template costs.</Alert> })()}
         <TextField label="Post-call webhook URL (optional)" type="url" value={apiWebhookUrl} onChange={event => setApiWebhookUrl(event.target.value)} fullWidth placeholder="https://your-service.example.com/webhooks/chiefvoice" helperText="After post-call processing finishes, Chiefvoice sends the result to this HTTPS endpoint. A signing secret is shown once after creation." />
         <TextField label="Google Cloud service account JSON" value={apiCredentials} onChange={event => setApiCredentials(event.target.value)} multiline minRows={5} required fullWidth placeholder="Paste the service account JSON for this API's Vertex project" />
         {!voiceAgentId && postCallAgentId && <Alert severity="warning">This API has only a post-call agent assigned. Outbound phone calls require a calling agent.</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiCustomerName.trim() || (!voiceAgentId && !postCallAgentId) || !apiCredentials.trim() || Number(apiBillingAmount) <= 0} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiCustomerName.trim() || (!voiceAgentId && !postCallAgentId) || (voiceAgentId && !apiCallingTemplateIds.length) || (postCallAgentId && !apiPostCallTemplateIds.length) || !apiCredentials.trim() || Number(apiBillingAmount) <= 0} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={!!oneTimeKey} onClose={() => setOneTimeKey(null)} maxWidth="sm" fullWidth>
@@ -716,6 +765,13 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           {voiceAgentId && <TextField label="Calling Vertex location for this API" value={voiceLocation} onChange={event => setVoiceLocation(event.target.value)} fullWidth />}
           {postCallAgentId && <TextField label="Post-call Vertex location for this API" value={postCallLocation} onChange={event => setPostCallLocation(event.target.value)} fullWidth />}
         </> })()}
+        <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Allowed reusable templates</Typography>
+        {(() => { const choices = agentTemplatesQuery.data || []; const calling = choices.filter(item => item.kind === 'calling'); const post = choices.filter(item => item.kind === 'post_call'); return <>
+          <FormControl fullWidth><InputLabel id="edit-calling-templates">Calling templates</InputLabel><Select multiple labelId="edit-calling-templates" label="Calling templates" value={apiCallingTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiCallingTemplateIds(ids); if (!ids.includes(apiDefaultCallingTemplateId)) setApiDefaultCallingTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} calling templates assigned`}>{calling.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiCallingTemplateIds.includes(item.id)} /><ListItemText primary={item.name} /></MenuItem>)}</Select></FormControl>
+          {!!apiCallingTemplateIds.length && <FormControl fullWidth><InputLabel id="edit-default-calling">Default calling template</InputLabel><Select labelId="edit-default-calling" label="Default calling template" value={apiDefaultCallingTemplateId} onChange={event => setApiDefaultCallingTemplateId(event.target.value)}>{calling.filter(item => apiCallingTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
+          <FormControl fullWidth><InputLabel id="edit-post-templates">Post-call templates</InputLabel><Select multiple labelId="edit-post-templates" label="Post-call templates" value={apiPostCallTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiPostCallTemplateIds(ids); if (!ids.includes(apiDefaultPostCallTemplateId)) setApiDefaultPostCallTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} post-call templates assigned`}>{post.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiPostCallTemplateIds.includes(item.id)} /><ListItemText primary={item.name} /></MenuItem>)}</Select></FormControl>
+          {!!apiPostCallTemplateIds.length && <FormControl fullWidth><InputLabel id="edit-default-post">Default post-call template</InputLabel><Select labelId="edit-default-post" label="Default post-call template" value={apiDefaultPostCallTemplateId} onChange={event => setApiDefaultPostCallTemplateId(event.target.value)}>{post.filter(item => apiPostCallTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
+        </> })()}
         <TextField label="Replace Google Cloud service account JSON (optional)" value={apiCredentials} onChange={event => setApiCredentials(event.target.value)} multiline minRows={5} fullWidth placeholder="Saved API credentials are encrypted. Leave blank to keep them." />
         {!voiceAgentId && postCallAgentId && <Alert severity="warning">This API has only a post-call agent assigned. Outbound phone calls require a calling agent.</Alert>}
         <FormControl fullWidth disabled={!managementKey}>
@@ -728,7 +784,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           </Select>
         </FormControl>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, name: apiName.trim(), tags: parseTags(apiTags), numbers, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim(), recordingAllowed: apiRecordingAllowed }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || (voiceAgentId && !apiCallingTemplateIds.length) || (postCallAgentId && !apiPostCallTemplateIds.length) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, name: apiName.trim(), tags: parseTags(apiTags), numbers, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim(), recordingAllowed: apiRecordingAllowed, templates: { calling_template_ids: apiCallingTemplateIds, post_call_template_ids: apiPostCallTemplateIds, default_calling_template_id: apiDefaultCallingTemplateId || null, default_post_call_template_id: apiDefaultPostCallTemplateId || null } }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={agentConfigOpen} onClose={() => setAgentConfigOpen(false)} maxWidth="sm" fullWidth>
@@ -932,12 +988,78 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
   </Card>
 }
 
-function AgentsPage({ agents, loading, error, onEdit, onCreate, onDelete }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onCreate: () => void; onDelete: (agent: AgentConfiguration) => void }) {
+function AgentsPage({ agents, loading, error, onEdit, onCreate, onDelete, templates, templatesLoading, templatesError }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onCreate: () => void; onDelete: (agent: AgentConfiguration) => void; templates: AgentPromptTemplate[]; templatesLoading: boolean; templatesError: unknown }) {
   return <><PageIntro eyebrow="AGENT CONFIGURATION" title="Agents" subtitle="Create platform-owned calling and post-call templates with provider, model, default location, and cost." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate}>Create agent</Button>} />
     <Alert severity="info" sx={{ mt: 2 }}>Google Vertex AI is currently available for calling and post-call agents. API credentials and location overrides are configured on each API.</Alert>
     <Card className="surface-card" sx={{ mt: 2 }}>
       {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : agents.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 980 }}><TableHead><TableRow>{['Agent', 'Type', 'Provider / model', 'Default location', 'Cost / minute', 'Auto hang-up', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{agents.map(agent => <TableRow key={agent.id} hover><TableCell className="table-cell"><b>{agent.name}</b><TagChips tags={agent.tags || []} /></TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{agent.provider} · {agent.model}</TableCell><TableCell className="table-cell">{agent.location}</TableCell><TableCell className="table-cell">{formatMoney(agent.cost_per_minute_minor, agent.currency)}/min</TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? <StatusChip enabled={agent.auto_hangup_when_complete} label={agent.auto_hangup_when_complete ? 'enabled' : 'disabled'} /> : '—'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(agent)}>Edit</Button><Button size="small" color="error" onClick={() => onDelete(agent)}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create calling or post-call agents first, then assign them to an API.</div><Button variant="contained" sx={{ mt: 2 }} onClick={onCreate}>Create agent</Button></div>}
     </Card>
+    <PromptTemplatesPanel templates={templates} loading={templatesLoading} error={templatesError} />
+  </>
+}
+
+function PromptTemplatesPanel({ templates, loading, error }: { templates: AgentPromptTemplate[]; loading: boolean; error: unknown }) {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState<AgentPromptTemplate | null>(null)
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState('')
+  const [kind, setKind] = useState<'calling' | 'post_call'>('calling')
+  const [instructions, setInstructions] = useState('')
+  const [tools, setTools] = useState<string[]>([])
+  const [variablesJson, setVariablesJson] = useState('{}')
+  const [settingsJson, setSettingsJson] = useState('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
+  const [formError, setFormError] = useState('')
+  const saveMutation = useMutation({
+    mutationFn: (value: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'>) => editing ? api.updateAgentTemplate(editing.id, value) : api.createAgentTemplate(value),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-agent-templates'] }); setOpen(false); setFormError('') },
+    onError: err => setFormError(errorText(err)),
+  })
+  const deleteMutation = useMutation({
+    mutationFn: api.deleteAgentTemplate,
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-agent-templates'] }) },
+    onError: err => setFormError(errorText(err)),
+  })
+  const openNew = () => {
+    setEditing(null); setName(''); setKind('calling'); setInstructions(''); setTools([])
+    setVariablesJson('{}'); setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
+    setFormError(''); setOpen(true)
+  }
+  const openEdit = (item: AgentPromptTemplate) => {
+    setEditing(item); setName(item.name); setKind(item.kind); setInstructions(item.instructions)
+    setTools(item.tools.map(tool => tool.name)); setVariablesJson(JSON.stringify(item.variables, null, 2))
+    setSettingsJson(JSON.stringify(item.settings, null, 2)); setFormError(''); setOpen(true)
+  }
+  const save = () => {
+    try {
+      const variables = JSON.parse(variablesJson)
+      const settings = JSON.parse(settingsJson)
+      if (!variables || Array.isArray(variables) || typeof variables !== 'object') throw new Error('Variables must be a JSON object.')
+      if (!settings || Array.isArray(settings) || typeof settings !== 'object') throw new Error('Settings must be a JSON object.')
+      saveMutation.mutate({ name: name.trim(), kind, instructions: instructions.trim(), tools: tools.map(tool => ({ type: 'builtin', name: tool })), variables, settings })
+    } catch (err) { setFormError(err instanceof Error ? err.message : 'Check the JSON fields.') }
+  }
+  const allowedTools = kind === 'calling' ? ['end_call'] : ['calculator', 'time']
+  return <>
+    <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1.5}>
+        <div><Typography variant="h6" sx={{ fontWeight: 800 }}>Reusable prompt templates</Typography><Typography variant="body2" color="text.secondary">Instructions, tools, and placeholders reused by API customers. Select templates in API configuration.</Typography></div>
+        <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openNew}>Create template</Button>
+      </Stack>
+      {loading ? <CircularProgress size={22} sx={{ mt: 2 }} /> : error ? <Alert severity="error" sx={{ mt: 2 }}>{errorText(error)}</Alert> : templates.length ? <TableContainer sx={{ mt: 2, overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 760 }}><TableHead><TableRow>{['Template', 'Kind', 'Tools', 'Revision', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{templates.map(item => <TableRow key={item.id}><TableCell className="table-cell"><b>{item.name}</b><br /><Typography variant="caption"><code>{item.id}</code></Typography></TableCell><TableCell className="table-cell">{item.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{item.tools.map(tool => tool.name).join(', ') || 'None'}</TableCell><TableCell className="table-cell">v{item.revision}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => openEdit(item)}>Edit</Button><Button size="small" color="error" onClick={() => { if (window.confirm(`Disable template “${item.name}”?`)) deleteMutation.mutate(item.id) }}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state" style={{ marginTop: 18 }}>No reusable prompt templates yet. Create a calling or post-call template to use it across API customers.</div>}
+    </Card>
+    <Dialog open={open} onClose={() => setOpen(false)} maxWidth="md" fullWidth>
+      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>{editing ? 'Edit reusable template' : 'Create reusable template'}</DialogTitle>
+      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
+        {formError && <Alert severity="error">{formError}</Alert>}
+        <TextField label="Template name" value={name} onChange={event => setName(event.target.value)} required fullWidth />
+        <FormControl fullWidth disabled={Boolean(editing)}><InputLabel id="prompt-template-kind">Agent kind</InputLabel><Select labelId="prompt-template-kind" label="Agent kind" value={kind} onChange={event => { const next = event.target.value as 'calling' | 'post_call'; setKind(next); setTools([]); if (next === 'post_call') setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}'); else setSettingsJson('{}') }}><MenuItem value="calling">Calling agent</MenuItem><MenuItem value="post_call">Post-call agent</MenuItem></Select></FormControl>
+        <TextField label="Instructions" value={instructions} onChange={event => setInstructions(event.target.value)} multiline minRows={5} required fullWidth helperText="Use placeholders like {{patient_name}} and declare them in Variables below." />
+        <Stack direction="row" gap={1} flexWrap="wrap">{allowedTools.map(tool => <Chip key={tool} clickable color={tools.includes(tool) ? 'primary' : 'default'} variant={tools.includes(tool) ? 'filled' : 'outlined'} label={tool} onClick={() => setTools(current => current.includes(tool) ? current.filter(item => item !== tool) : [...current, tool])} />)}</Stack>
+        <TextField label="Variables (JSON object)" value={variablesJson} onChange={event => setVariablesJson(event.target.value)} multiline minRows={4} fullWidth helperText={'Example: { "patient_name": { "type": "string", "required": true } }'} />
+        <TextField label="Template settings (JSON object)" value={settingsJson} onChange={event => setSettingsJson(event.target.value)} multiline minRows={3} fullWidth helperText={kind === 'post_call' ? 'Optional defaults: time_zone, time_format, output_schema.' : 'Optional: auto_hangup_when_complete.'} />
+      </Stack></DialogContent>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="contained" disabled={saveMutation.isPending || !name.trim() || !instructions.trim()} onClick={save}>{saveMutation.isPending ? 'Saving…' : 'Save template'}</Button></DialogActions>
+    </Dialog>
   </>
 }
 
@@ -950,6 +1072,9 @@ function SimulationPage(props: {
   tools: string[]; onToolsChange: (value: string[]) => void; timeZone: string; onTimeZoneChange: (value: string) => void
   timeFormat: string; onTimeFormatChange: (value: string) => void; includeLiveContext: boolean; onIncludeLiveContextChange: (value: boolean) => void
   recording: boolean; onRecordingChange: (value: boolean) => void; call?: ApiCallLog; callLoading: boolean
+  templates?: ApiAgentTemplates; templatesLoading: boolean
+  callingTemplateId: string; onCallingTemplateChange: (id: string) => void
+  postCallTemplateId: string; onPostCallTemplateChange: (id: string) => void
   onStart: (template?: SimulationTemplate) => void
   onApplyTemplate: (template: SimulationTemplate) => void
   submitting: boolean
@@ -986,6 +1111,7 @@ function SimulationPage(props: {
       postCallContext: props.postCallContext, outputSchema: props.outputSchema, tools: props.tools,
       timeZone: props.timeZone, timeFormat: props.timeFormat,
       includeLiveContext: props.includeLiveContext, recording: props.recording,
+      callingTemplateId: props.callingTemplateId, postCallTemplateId: props.postCallTemplateId,
     }
     setTemplates(current => editingTemplateId
       ? current.map(item => item.id === editingTemplateId ? template : item)
@@ -1038,13 +1164,14 @@ function SimulationPage(props: {
         </Stack>
         {!assignedNumbers.length && selected && <Alert severity="error">This API has no assigned phone number. Assign a number in API settings first.</Alert>}
         <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Live-call agent</Typography>
+        <FormControl fullWidth disabled={!selected}><InputLabel id="simulation-live-template">Calling template</InputLabel><Select labelId="simulation-live-template" label="Calling template" value={props.callingTemplateId} onChange={event => props.onCallingTemplateChange(event.target.value)}><MenuItem value="">API default template</MenuItem>{(props.templates?.calling || []).map(item => <MenuItem key={item.id} value={item.id}>{item.name} · v{item.revision}</MenuItem>)}</Select></FormControl>
         <FormControl fullWidth disabled={!selected}><InputLabel id="simulation-profile-label">Agent profile (optional)</InputLabel><Select labelId="simulation-profile-label" label="Agent profile (optional)" value={props.profileId} onChange={event => props.onProfileChange(event.target.value)}><MenuItem value="">API default voice</MenuItem>{props.profiles.map(profile => <MenuItem key={profile.id} value={profile.id}>{profile.name} · {profile.language} · {profile.voice}</MenuItem>)}</Select></FormControl>
         {props.profilesLoading && <Typography variant="caption" color="text.secondary">Loading profiles owned by this API customer…</Typography>}
-        <TextField fullWidth multiline minRows={4} label="Live-call prompt / instructions" value={props.liveInstructions} onChange={event => props.onLiveInstructionsChange(event.target.value)} placeholder="Tell the caller who the agent is, the goal of the call, and how it should handle questions." helperText="Give spoken-conversation directions here. Put transcript extraction, summaries, and result formatting in the Post-call task below." />
-        <TextField fullWidth multiline minRows={3} label="Live-call context (JSON object)" value={props.liveContext} onChange={event => props.onLiveContextChange(event.target.value)} helperText="Per-call facts for personalization. Instructions belong in the prompt above." />
+        <TextField fullWidth multiline minRows={3} label="Live-call context (JSON object)" value={props.liveContext} onChange={event => props.onLiveContextChange(event.target.value)} helperText="Values matching template placeholders are rendered; all context remains available as reference data." />
         <Typography variant="h6" sx={{ fontWeight: 800, mt: 1 }}>Post-call agent</Typography>
         {!selected?.post_call_agent_enabled ? <Alert severity="info">Post-call analysis is disabled for this API. Enable a post-call agent in API settings to test extraction.</Alert> : <>
-          <TextField fullWidth multiline minRows={3} label="Post-call task / prompt" value={props.postCallContext} onChange={event => props.onPostCallContextChange(event.target.value)} />
+          <FormControl fullWidth><InputLabel id="simulation-post-template">Post-call template</InputLabel><Select labelId="simulation-post-template" label="Post-call template" value={props.postCallTemplateId} onChange={event => props.onPostCallTemplateChange(event.target.value)}><MenuItem value="">API default template</MenuItem>{(props.templates?.post_call || []).map(item => <MenuItem key={item.id} value={item.id}>{item.name} · v{item.revision}</MenuItem>)}</Select></FormControl>
+          <TextField fullWidth multiline minRows={3} label="Post-call context (JSON object)" value={props.postCallContext} onChange={event => props.onPostCallContextChange(event.target.value)} helperText="Task instructions live in the selected template. Context supplies values for placeholders and structured reference data." />
           <TextField fullWidth multiline minRows={8} label="Expected output schema (JSON)" value={props.outputSchema} onChange={event => props.onOutputSchemaChange(event.target.value)} helperText="The result is validated against this schema before delivery." />
           <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
             <TextField fullWidth label="Time zone (IANA)" value={props.timeZone} onChange={event => props.onTimeZoneChange(event.target.value)} placeholder="Asia/Kolkata" />
@@ -1091,18 +1218,17 @@ function DocsPage() {
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: appointment-123" \\
   -d '{
-    "provider": "vobiz",
     "channel": "phone",
     "destination": "+15551234567",
     "caller_id": "+15557654321",
     "recording_allowed": true,
     "live_agent": {
-      "agent_id": "agent-profile-id",
-      "instructions": "Confirm the appointment politely. Do not make up availability.",
+      "template_id": "calling-template-id",
       "context": {"patient_name": "Avery", "appointment": "Tuesday 10:30"}
     },
     "post_call": {
-      "context": "Extract the appointment confirmation. Use unknown when not stated.",
+      "template_id": "post-call-template-id",
+      "context": {"appointment": "Tuesday 10:30"},
       "output_schema": {
         "type": "object",
         "properties": {
@@ -1112,7 +1238,7 @@ function DocsPage() {
         "required": ["confirmed", "preferred_time"],
         "additionalProperties": false
       },
-      "tools": ["time"],
+      "tools": [{"type": "builtin", "name": "time"}],
       "time_zone": "Asia/Kolkata",
       "time_format": "%Y-%m-%dT%H:%M:%S%z",
       "include_live_agent_context": true
@@ -1138,12 +1264,12 @@ function DocsPage() {
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
   return <><PageIntro eyebrow="DEVELOPER GUIDE" title="API documentation" subtitle="Start a call, check its progress, and receive structured post-call results." />
     <Stack gap={2} sx={{ mt: 3 }}>
-      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Authentication and phone numbers</Typography><Typography sx={{ mt: 1 }}>Use the full API key shown once when the API was created. Send it as a Bearer token. It can only call from phone numbers assigned to that API. If you assigned multiple numbers for a provider, include <code>caller_id</code>.</Typography><Typography sx={{ mt: 1 }}>Create the API key in the API page. Credentials and phone number assignments are editable from the API’s detail view.</Typography></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Authentication and phone numbers</Typography><Typography sx={{ mt: 1 }}>Use the full API key shown once when the API was created. Send it as a Bearer token. Provider is resolved from the sender number assigned to that API, so clients do not send a provider field. If multiple sender numbers are assigned, include <code>caller_id</code>.</Typography><Typography sx={{ mt: 1 }}>Create templates in Agents and assign them to an API. The API can use its default template or choose one of its assigned template IDs per call.</Typography></Card>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Start an outbound call</Typography><Typography sx={{ mt: 1, mb: 1.5 }}>The call request returns an accepted session ID quickly; it does not hold the HTTP connection open while the conversation runs. Use the Simulation page to run the same flow from the console with an API, prompts, and extraction schema.</Typography><CopyableCode value={callBody} minRows={21} /></Card>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Useful call endpoints</Typography><Typography sx={{ mt: 1, mb: 2 }}>Replace <code>$SESSION_ID</code> with the session ID returned when the call starts. Each example includes a copy button.</Typography>
         <Stack gap={2}><DocCodeBlock title="Check call status" value={statusExample} /><DocCodeBlock title="Get post-call status and result" value={postCallExample} /><DocCodeBlock title="Download the recording" value={recordingExample} /><DocCodeBlock title="Retry post-call analysis after a failure" value={retryAnalysisExample} /></Stack>
       </Card>
-      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Context, output schema, and tools</Typography><Typography sx={{ mt: 1 }}>Keep live conversation context in <code>live_agent.context</code>. Put extraction instructions and the JSON output schema in <code>post_call</code>. The schema is validated with strict types before the result is stored or delivered. Supported post-call tools are <code>calculator</code> and <code>time</code>; when using the time tool, set an IANA timezone and a format containing <code>%z</code>.</Typography><Typography sx={{ mt: 1 }}>Use <code>include_live_agent_context</code> only when post-call extraction needs the live context too. Treat supplied context as reference data and provide an “unknown” option for facts the agent cannot establish.</Typography></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Context, output schema, and tools</Typography><Typography sx={{ mt: 1 }}>Instructions are stored in reusable templates, never in the call request. Put placeholder values and other reference data in each agent’s JSON <code>context</code>. The result is validated with strict types before it is stored or delivered. Supported post-call tools are <code>calculator</code> and <code>time</code>; when using the time tool, set an IANA timezone and a format containing <code>%z</code>. Those settings are returned in the post-call metadata alongside the schema-shaped <code>result</code>.</Typography><Typography sx={{ mt: 1 }}>Omitting <code>tools</code> inherits the template tools; passing <code>tools</code> replaces them; <code>add_tools</code> extends them. Use <code>include_live_agent_context</code> only when post-call extraction needs the live context too. Treat supplied context as reference data and provide an “unknown” option for facts the agent cannot establish.</Typography></Card>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Configure post-call webhooks</Typography><Typography sx={{ mt: 1, mb: 2 }}>The CRM or customer service exposes the receiving URL. Chiefvoice sends a signed callback after post-call analysis finishes. Return a 2xx response when received, and deduplicate retries by event ID. Polling remains available as a fallback.</Typography>
         <Alert severity="info" sx={{ mb: 2 }}>Webhook routes require <code>webhooks:read</code> and <code>webhooks:write</code>. New APIs created from the console receive these scopes. API keys created before webhook scopes were added will continue to return 403 on these routes.</Alert>
         <Stack gap={2}><DocCodeBlock title="Register or update the callback URL" value={configureWebhookExample} /><DocCodeBlock title="View or remove the callback URL" value={webhookManagementExample} /><DocCodeBlock title="Retry a failed webhook delivery" value={retryWebhookExample} /></Stack>
