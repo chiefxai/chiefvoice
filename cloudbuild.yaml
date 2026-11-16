@@ -48,14 +48,14 @@ steps:
     args:
       - build
       - --tag
-      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}
       - .
 
   - id: push-image
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}
 
   - id: build-frontend
     name: gcr.io/cloud-builders/docker
@@ -72,14 +72,14 @@ steps:
       - --build-arg
       - VITE_OIDC_SCOPE=${_OIDC_SCOPE}
       - --tag
-      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${BUILD_ID}
       - frontend
 
   - id: push-frontend
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${BUILD_ID}
 
   - id: deploy-post-call-function
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -114,8 +114,8 @@ steps:
     args:
       - -ceu
       - |
-        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
-        frontend_image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}"
+        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}"
+        frontend_image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${BUILD_ID}"
         function_url="$(cat /workspace/post-call-function-url)"
         test -n "$${function_url}"
         gcloud compute ssh ${_VM_NAME} --zone=${_ZONE} --tunnel-through-iap \
@@ -135,5 +135,5 @@ steps:
         done
 
 images:
-  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
-  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${BUILD_ID}
