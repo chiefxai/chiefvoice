@@ -46,6 +46,7 @@ AGENT_HANGUP_AUDIO_QUIET_SECONDS = 0.5
 AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS = 12.0
 PROVIDER_HANGUP_PIPELINE_STOP_TIMEOUT_SECONDS = 12.0
 PROVIDER_HANGUP_SOCKET_FALLBACK_TIMEOUT_SECONDS = 3.0
+PROVIDER_HANGUP_FINALIZER_TIMEOUT_SECONDS = 20.0
 
 
 class _InvalidCallState(ValueError):
@@ -69,6 +70,7 @@ class VobizInboundCall:
 @dataclass(slots=True)
 class _ActiveMediaSession:
     websocket: WebSocket
+    media_task: asyncio.Task[Any] | None = None
     pipeline_task: Any = None
     runner_task: asyncio.Task[None] | None = None
     pipeline_ready: asyncio.Event | None = None
@@ -379,6 +381,7 @@ class VobizAdapter:
                     asyncio.shield(runner_task),
                     timeout=PROVIDER_HANGUP_PIPELINE_STOP_TIMEOUT_SECONDS,
                 )
+                await self._await_media_finalizer(active, session_id)
                 logger.info(
                     "vobiz_hangup_callback_pipeline_finalized",
                     extra={"session_id": session_id, "provider": self.provider},
@@ -424,11 +427,41 @@ class VobizAdapter:
                 )
                 runner_task.cancel()
                 await asyncio.gather(runner_task, return_exceptions=True)
+        await self._await_media_finalizer(active, session_id)
         logger.info(
             "vobiz_hangup_callback_media_session_stopped",
             extra={"session_id": session_id, "provider": self.provider},
         )
         return True
+
+    async def _await_media_finalizer(
+        self, active: _ActiveMediaSession, session_id: str
+    ) -> None:
+        media_task = active.media_task
+        if media_task is None or media_task is asyncio.current_task() or media_task.done():
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(media_task), timeout=PROVIDER_HANGUP_FINALIZER_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            logger.error(
+                "vobiz_hangup_callback_finalizer_timeout",
+                extra={
+                    "session_id": session_id,
+                    "provider": self.provider,
+                    "timeout_seconds": PROVIDER_HANGUP_FINALIZER_TIMEOUT_SECONDS,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "vobiz_hangup_callback_finalizer_failed",
+                extra={
+                    "session_id": session_id,
+                    "provider": self.provider,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     async def build_transport(self, session: AcceptedSession, connection: object) -> BaseTransport:
         if not isinstance(connection, WebSocket):
@@ -499,7 +532,11 @@ class VobizAdapter:
             persistence_result = attach_session_persistence(session)
             if inspect.isawaitable(persistence_result):
                 await persistence_result
-        active_media = _ActiveMediaSession(websocket=websocket, pipeline_ready=asyncio.Event())
+        active_media = _ActiveMediaSession(
+            websocket=websocket,
+            media_task=asyncio.current_task(),
+            pipeline_ready=asyncio.Event(),
+        )
         self._active_media_sessions[session.session_id] = active_media
         end_reason = "completed"
         agent_hangup_request = asyncio.Event()
