@@ -1,0 +1,10 @@
+#!include:.gitignore
+
+# Local deployment credentials and environment files must never enter a build upload.
+.env*
+.gcloud/
+.codex/
+**/*.pem
+**/*.key
+**/*credentials*.json
+**/terraform.tfvars
