@@ -962,6 +962,7 @@ function DocsPage() {
     "channel": "phone",
     "destination": "+15551234567",
     "caller_id": "+15557654321",
+    "recording_allowed": true,
     "live_agent": {
       "agent_id": "agent-profile-id",
       "instructions": "Confirm the appointment politely. Do not make up availability.",
@@ -984,15 +985,49 @@ function DocsPage() {
       "include_live_agent_context": true
     }
   }'`
+  const statusExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
+  const postCallExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/post-call" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
+  const recordingExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/recording" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
+  --output recording.wav`
+  const retryAnalysisExample = `curl -X POST "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/post-call/retry" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
+  const configureWebhookExample = `curl -X PUT "$CHIEFVOICE_URL/v1/webhooks/post-call" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"target_url":"https://your-service.example.com/webhooks/chiefvoice"}'`
+  const webhookManagementExample = `# View the current webhook URL\ncurl "$CHIEFVOICE_URL/v1/webhooks/post-call" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"\n\n# Remove the webhook\ncurl -X DELETE "$CHIEFVOICE_URL/v1/webhooks/post-call" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
+  const retryWebhookExample = `curl -X POST "$CHIEFVOICE_URL/v1/webhooks/post-call/deliveries/$SESSION_ID/retry" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
   return <><PageIntro eyebrow="DEVELOPER GUIDE" title="API documentation" subtitle="Start a call, check its progress, and receive structured post-call results." />
     <Stack gap={2} sx={{ mt: 3 }}>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Authentication and phone numbers</Typography><Typography sx={{ mt: 1 }}>Use the full API key shown once when the API was created. Send it as a Bearer token. It can only call from phone numbers assigned to that API. If you assigned multiple numbers for a provider, include <code>caller_id</code>.</Typography><Typography sx={{ mt: 1 }}>Create the API key in the API page. Credentials and phone number assignments are editable from the API’s detail view.</Typography></Card>
-      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Start an outbound call</Typography><Typography sx={{ mt: 1, mb: 1.5 }}>The call request returns an accepted session ID quickly; it does not hold the HTTP connection open while the conversation runs. Use the Simulation page to run the same flow from the console with an API, prompts, and extraction schema.</Typography><TextField value={callBody} fullWidth multiline minRows={21} InputProps={{ readOnly: true }} /></Card>
-      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Check call status and results</Typography><Typography sx={{ mt: 1 }}>Poll <code>GET /v1/calls/{'{session_id}'}</code> for lifecycle status and <code>GET /v1/calls/{'{session_id}'}/post-call</code> for analysis status and result. Post-call processing starts after the call finishes. The API view refreshes its call log automatically while open.</Typography><TextField value={`curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID" \\\n  -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`} fullWidth multiline minRows={2} sx={{ mt: 1.5 }} InputProps={{ readOnly: true }} /></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Start an outbound call</Typography><Typography sx={{ mt: 1, mb: 1.5 }}>The call request returns an accepted session ID quickly; it does not hold the HTTP connection open while the conversation runs. Use the Simulation page to run the same flow from the console with an API, prompts, and extraction schema.</Typography><CopyableCode value={callBody} minRows={21} /></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Useful call endpoints</Typography><Typography sx={{ mt: 1, mb: 2 }}>Replace <code>$SESSION_ID</code> with the session ID returned when the call starts. Each example includes a copy button.</Typography>
+        <Stack gap={2}><DocCodeBlock title="Check call status" value={statusExample} /><DocCodeBlock title="Get post-call status and result" value={postCallExample} /><DocCodeBlock title="Download the recording" value={recordingExample} /><DocCodeBlock title="Retry post-call analysis after a failure" value={retryAnalysisExample} /></Stack>
+      </Card>
       <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Context, output schema, and tools</Typography><Typography sx={{ mt: 1 }}>Keep live conversation context in <code>live_agent.context</code>. Put extraction instructions and the JSON output schema in <code>post_call</code>. The schema is validated with strict types before the result is stored or delivered. Supported post-call tools are <code>calculator</code> and <code>time</code>; when using the time tool, set an IANA timezone and a format containing <code>%z</code>.</Typography><Typography sx={{ mt: 1 }}>Use <code>include_live_agent_context</code> only when post-call extraction needs the live context too. Treat supplied context as reference data and provide an “unknown” option for facts the agent cannot establish.</Typography></Card>
-      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Webhooks and polling</Typography><Typography sx={{ mt: 1 }}>Polling is available for call and post-call status. If a post-call webhook is configured, the platform sends a signed callback when analysis is ready. The recipient should deduplicate deliveries by event ID because failed delivery attempts are retried.</Typography></Card>
+      <Card className="surface-card" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ fontWeight: 800 }}>Configure post-call webhooks</Typography><Typography sx={{ mt: 1, mb: 2 }}>The CRM or customer service exposes the receiving URL. Chiefvoice sends a signed callback after post-call analysis finishes. Return a 2xx response when received, and deduplicate retries by event ID. Polling remains available as a fallback.</Typography>
+        <Alert severity="warning" sx={{ mb: 2 }}>Webhook routes require <code>webhooks:read</code> and <code>webhooks:write</code> scopes. Customer API keys currently receive call scopes only, so these webhook commands will return 403 until those scopes are enabled for the key.</Alert>
+        <Stack gap={2}><DocCodeBlock title="Register or update the callback URL" value={configureWebhookExample} /><DocCodeBlock title="View or remove the callback URL" value={webhookManagementExample} /><DocCodeBlock title="Retry a failed webhook delivery" value={retryWebhookExample} /></Stack>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>The signing secret is returned once when you configure the webhook. Store it securely to verify callback signatures.</Typography>
+      </Card>
     </Stack>
   </>
+}
+function CopyableCode({ value, minRows = 2 }: { value: string; minRows?: number }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    void navigator.clipboard.writeText(value).then(() => setCopied(true)).catch(() => setCopied(false))
+  }
+  return <TextField value={value} fullWidth multiline minRows={minRows} InputProps={{ readOnly: true, endAdornment: <InputAdornment position="end"><Tooltip title={copied ? 'Copied' : 'Copy'}><IconButton aria-label={copied ? 'Copied' : 'Copy code'} onClick={copy}>{copied ? <CheckCircleRoundedIcon color="success" /> : <ContentCopyRoundedIcon />}</IconButton></Tooltip></InputAdornment> }} />
+}
+function DocCodeBlock({ title, value }: { title: string; value: string }) {
+  return <Stack gap={0.75}><Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{title}</Typography><CopyableCode value={value} minRows={value.split('\n').length} /></Stack>
 }
 function StatusChip({ enabled, label }: { enabled: boolean; label?: string }) { return <Chip size="small" label={label || (enabled ? 'Enabled' : 'Disabled')} color={enabled ? 'success' : 'default'} variant={enabled ? 'filled' : 'outlined'} sx={{ fontSize: 10, height: 22 }} /> }
 function PageIntro({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: React.ReactNode }) { return <div style={{ display: 'flex', alignItems: 'end', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}><div><div className="eyebrow">{eyebrow}</div><Typography className="page-title" variant="h4">{title}</Typography><div className="page-subtitle">{subtitle}</div></div>{action}</div> }
