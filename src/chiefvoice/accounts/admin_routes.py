@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 
 from chiefvoice.accounts.models import AccountStore, PLATFORM_OWNER_ID, TenantAccount
 from chiefvoice.agents.configurations import AgentConfiguration
+from chiefvoice.agents.post_call.queue import validate_public_webhook_url
 from chiefvoice.billing import BillingMode
 from chiefvoice.channels.integration_store import SqlProviderIntegrationStore
 from chiefvoice.channels.integrations import ProviderIntegration, ProviderPhoneNumber
@@ -40,7 +41,12 @@ CUSTOMER_API_KEY_SCOPES = frozenset(
         "webhooks:write",
     }
 )
-DEFAULT_CUSTOMER_API_KEY_SCOPES = ["calls:read", "calls:write"]
+DEFAULT_CUSTOMER_API_KEY_SCOPES = [
+    "calls:read",
+    "calls:write",
+    "webhooks:read",
+    "webhooks:write",
+]
 MAX_API_KEY_LIFETIME = timedelta(days=365)
 
 
@@ -108,7 +114,6 @@ class CreatePhoneApiKeyBody(BaseModel):
     billing_mode: BillingMode = BillingMode.PREPAID
     prepaid_balance_minor: int = Field(default=0, ge=0, le=10**15)
     postpaid_credit_limit_minor: int = Field(default=0, ge=0, le=10**15)
-    name: str = Field(default="Phone API", min_length=1, max_length=100)
     tags: list[str] = Field(default_factory=list, max_length=20)
     phone_numbers: list[PhoneNumberAssignment] = Field(min_length=1, max_length=100)
     voice_agent_id: str | None = None
@@ -117,8 +122,9 @@ class CreatePhoneApiKeyBody(BaseModel):
     voice_location: str | None = Field(default=None, max_length=64)
     post_call_location: str | None = Field(default=None, max_length=64)
     recording_allowed: bool = False
+    post_call_webhook_url: str | None = Field(default=None, min_length=8, max_length=2048)
 
-    @field_validator("customer_name", "name")
+    @field_validator("customer_name")
     @classmethod
     def normalize_name(cls, value: str) -> str:
         value = value.strip()
@@ -1013,6 +1019,19 @@ async def issue_phone_api_key(
         raise HTTPException(status_code=409, detail="Selected phone numbers have no configured channels")
     voice_agent = await _assigned_agent(request, body.voice_agent_id, PLATFORM_OWNER_ID, "calling")
     post_call_agent = await _assigned_agent(request, body.post_call_agent_id, PLATFORM_OWNER_ID, "post_call")
+    webhook_directory = getattr(request.app.state, "post_call_webhook_directory", None)
+    if body.post_call_webhook_url:
+        if post_call_agent is None:
+            raise HTTPException(
+                status_code=422,
+                detail="A post-call agent is required when configuring a completion webhook",
+            )
+        if webhook_directory is None:
+            raise HTTPException(status_code=503, detail="Post-call webhook storage is not configured")
+        try:
+            await validate_public_webhook_url(body.post_call_webhook_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     expires_at = datetime.now(UTC) + MAX_API_KEY_LIFETIME
     credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
     if not settings.credentials_encryption_key:
@@ -1034,7 +1053,7 @@ async def issue_phone_api_key(
             display_name=body.customer_name.strip(),
             billing_mode=body.billing_mode,
             created_by=principal.subject,
-            key_name=body.name.strip(),
+            key_name=body.customer_name.strip(),
             scopes=tuple(DEFAULT_CUSTOMER_API_KEY_SCOPES),
             expires_at=expires_at,
             assigned_numbers=tuple(requested),
@@ -1069,6 +1088,27 @@ async def issue_phone_api_key(
             status_code=409, detail="A selected phone number is already assigned to another API"
         ) from exc
     tenant_id = account.tenant_id
+    webhook_result = None
+    webhook_setup_error = None
+    if body.post_call_webhook_url:
+        try:
+            signing_secret, configured_at = await webhook_directory.configure(
+                tenant_id, body.post_call_webhook_url
+            )
+            webhook_result = {
+                "target_url": body.post_call_webhook_url,
+                "signing_secret": signing_secret,
+                "configured_at": configured_at.isoformat(),
+            }
+        except Exception:
+            logger.exception(
+                "api_post_call_webhook_configuration_failed",
+                extra={"tenant_id": tenant_id, "api_key_id": key.key_id},
+            )
+            webhook_setup_error = (
+                "The API was created, but webhook registration failed. Configure it later "
+                "with PUT /v1/webhooks/post-call."
+            )
     vertex_project = await _request_vertex_project(request, account)
     logger.info(
         "phone_api_key_issued",
@@ -1082,6 +1122,8 @@ async def issue_phone_api_key(
     )
     response = {
         "key": token,
+        "post_call_webhook": webhook_result,
+        "webhook_setup_error": webhook_setup_error,
         "api_key_record": {
             **_key_json(key),
             "customer_name": account.display_name,
