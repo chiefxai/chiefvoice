@@ -101,6 +101,47 @@ The post-call schema accepts a bounded JSON Schema subset: objects, strings, int
 
 Post-call requests may select `calculator` and `time` in `post_call.tools`; only selected tools are exposed to the LangChain agent. The calculator evaluates bounded arithmetic locally without code execution. The time tool accepts an ISO 8601 timestamp with an explicit offset, converts it using `post_call.time_zone` (an IANA zone), and returns both `formatted` using `post_call.time_format` and an ISO 8601 value with the zone offset. The format must include `%z`. Defaults are `UTC` and `%Y-%m-%dT%H:%M:%S%z`. Set `include_live_agent_context` to `true` only when post-call extraction needs the live agent's context; otherwise that context is not copied into the post-call job or prompt.
 
+## Reusable prompt templates (API-scoped)
+
+Chiefvoice supports reusable prompt templates scoped to individual API customers (`api_key_id`), keeping prompt libraries isolated and owned directly by each API rather than in a shared platform pool.
+
+Templates come in two varieties:
+1. **`calling` templates**: Configure the live real-time conversational agent instructions, tools (`end_call`), variables, and auto-hangup behavior.
+2. **`post_call` templates**: Configure post-conversation structured information extraction, output schema, tools (`calculator`, `time`), timezone, and time format.
+
+### Template management endpoints
+
+Admin endpoints require platform administrator credentials (`platform:customers:write` / `platform:customers:read`):
+- `POST /v1/admin/customers/api-keys/{key_id}/agent-templates`: Create a template owned by the API key (setting `is_default: true` configures it as default).
+- `GET /v1/admin/customers/api-keys/{key_id}/agent-templates`: List all calling and post-call templates owned by this API key.
+- `GET /v1/admin/customers/api-keys/{key_id}/agent-templates/{template_id}`: Retrieve a specific template.
+- `PUT /v1/admin/customers/api-keys/{key_id}/agent-templates/{template_id}`: Update an existing template (increments revision).
+- `DELETE /v1/admin/customers/api-keys/{key_id}/agent-templates/{template_id}`: Delete an owned template.
+- `POST /v1/admin/customers/api-keys/{key_id}/agent-templates/{template_id}/default`: Set the active default template for this API.
+
+### Placeholders and Variables
+
+Placeholders enclosed in `{{...}}` inside instructions must be declared in the template's `variables` dictionary with their data type and required flag:
+
+```json
+{
+  "kind": "calling",
+  "name": "Appointment Check-In",
+  "instructions": "You are calling {{customer_name}} regarding their appointment on {{appointment_date}}. Confirm attendance and answer questions.",
+  "tools": [{"name": "end_call"}],
+  "variables": {
+    "customer_name": {"type": "string", "required": true},
+    "appointment_date": {"type": "string", "required": true}
+  },
+  "settings": {
+    "auto_hangup_when_complete": true
+  },
+  "is_default": true
+}
+```
+
+When placing an outbound call via `POST /v1/calls/outbound`, if `live_agent.template_id` or `post_call.template_id` is omitted, the API's configured default template is automatically applied. Values supplied in `live_agent.context` and `post_call.context` are substituted into template placeholders at call start.
+
 Billing abstractions live in `src/chiefvoice/billing/`. The PostgreSQL store reserves credit atomically per call, snapshots integer minor-unit rates, records idempotent prepaid debits or postpaid accruals, and caps reservations by the configured maximum call duration. `0004_voice_billing` creates the plan, reservation, and ledger tables. The first-writer answer timestamp is persisted so ring time is excluded from usage. Stale unanswered reservations are released; stale answered reservations close at their reserved cap so they stop holding credit and concurrency.
 
 Billing mode is a tenant account property selected during account creation: `billing_mode` is either `prepaid` or `postpaid`. It is not selected per call. Configure the tenant's voice plan with `PUT /v1/billing/current` and the `billing:admin` scope; read it with `GET /v1/billing/current` and `billing:read`. The `billing:admin` scope must be held only by trusted operators and must never be issued to tenant users or tenant API keys: it can enable calls, set rates and limits, and grant prepaid balance or postpaid credit. Amounts are integers in the configured currency's minor unit, with one rate per minute and a maximum call duration.
