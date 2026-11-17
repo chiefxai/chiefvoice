@@ -23,23 +23,22 @@ class HangupValidationResult:
 
 
 def extract_mandatory_fields(session: AcceptedSession) -> set[str]:
-    """Determine mandatory fields from output schema, session metadata, or live context."""
+    """Return fields explicitly required before ending the live conversation.
+
+    Post-call output schemas describe the extraction result, not information that
+    must be collected before hang-up. They are validated by the post-call worker
+    and must never prevent the live agent from completing a call.
+    """
     mandatory: set[str] = set()
 
-    # 1. Post-call output schema required fields
-    if isinstance(session.post_call_output_schema, dict):
-        required = session.post_call_output_schema.get("required")
-        if isinstance(required, (list, tuple, set)):
-            mandatory.update(str(f) for f in required)
-
-    # 2. Metadata-configured mandatory fields
+    # Only explicit live-call requirements can gate hang-up.
     meta_mandatory = session.metadata.get("mandatory_fields")
     if isinstance(meta_mandatory, (list, tuple, set)):
         mandatory.update(str(f) for f in meta_mandatory)
     elif isinstance(meta_mandatory, str):
         mandatory.add(meta_mandatory)
 
-    # 3. Live context mandatory fields if explicitly declared
+    # Live context may explicitly declare required collected fields.
     if isinstance(session.live_agent_context, dict):
         ctx_mandatory = session.live_agent_context.get("mandatory_fields")
         if isinstance(ctx_mandatory, (list, tuple, set)):
