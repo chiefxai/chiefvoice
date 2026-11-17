@@ -129,6 +129,7 @@ def reliable_vertex_service_class(
             self._chiefvoice_ready_event = asyncio.Event()
             self._chiefvoice_last_ready = False
             self._chiefvoice_fallback_active = False
+            self._chiefvoice_recovery_reconnect_task: asyncio.Task | None = None
             self._chiefvoice_recent_input_transcript = ""
             self._chiefvoice_recent_input_transcript_at = 0.0
             self._chiefvoice_recent_output_transcript = ""
@@ -189,6 +190,10 @@ def reliable_vertex_service_class(
                     extra={"session_id": session_id, "provider": "vertex"},
                 )
                 await super()._reconnect()
+
+        def _clear_recovery_reconnect_task(self, task: asyncio.Task) -> None:
+            if self._chiefvoice_recovery_reconnect_task is task:
+                self._chiefvoice_recovery_reconnect_task = None
 
         async def _disconnect(self) -> None:
             was_ready = bool(self._ready_for_realtime_input)
@@ -448,30 +453,64 @@ def reliable_vertex_service_class(
             await super()._handle_msg_input_transcription(message)
 
         async def recover_unanswered_turn(self) -> bool:
-            """Reconnect once if needed, then ask Gemini to finish the pending turn."""
+            """Restart a silent realtime session and resume its pending turn.
+
+            A websocket can remain marked ready even when Gemini stops producing
+            turns. For a watchdog recovery, readiness alone is not proof that the
+            session is healthy, so perform one serialized reconnect before retrying.
+            """
             if self._disconnecting or self._chiefvoice_fallback_active:
                 return False
             try:
-                if not self._session or not self._ready_for_realtime_input:
-                    self._chiefvoice_ready_event.clear()
-                    await self._reconnect()
-                    await asyncio.wait_for(self._chiefvoice_ready_event.wait(), timeout=8.0)
+                had_resumption_handle = bool(self._session_resumption_handle)
+                reconnect_will_generate_response = bool(
+                    self._context
+                    and not had_resumption_handle
+                    and not getattr(self, "_is_gemini_3", False)
+                )
+                generation_was_active = bool(self._bot_is_responding)
+                if generation_was_active:
+                    await self._handle_interruption()
+
+                # A stale but truthy readiness flag was the gap in the previous
+                # recovery path. Reopen the same Pipecat service/session once;
+                # its context seeding or session resumption preserves history.
+                self._chiefvoice_ready_event.clear()
+                logger.warning(
+                    "gemini_unanswered_turn_reconnect_started",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "ready_before_recovery": bool(self._ready_for_realtime_input),
+                        "generation_interrupted": generation_was_active,
+                        "session_resumption_available": had_resumption_handle,
+                    },
+                )
+                reconnect_task = self.create_task(
+                    self._reconnect(), name=f"gemini-watchdog-reconnect-{session_id}"
+                )
+                self._chiefvoice_recovery_reconnect_task = reconnect_task
+                reconnect_task.add_done_callback(self._clear_recovery_reconnect_task)
+                await asyncio.shield(reconnect_task)
+                await asyncio.wait_for(self._chiefvoice_ready_event.wait(), timeout=8.0)
                 if not self._session or not self._ready_for_realtime_input:
                     return False
-                if self._bot_is_responding:
-                    # A response-start frame without any audio must not block
-                    # the recovery nudge indefinitely.
-                    await self._handle_interruption()
-                await self._session.send_realtime_input(
-                    text="Please respond briefly to the caller's most recent statement."
-                )
+
+                # Re-seeding Gemini 2.5 without a resumption handle triggers an
+                # inference over the retained Pipecat context. Other reconnect
+                # modes need an explicit prompt to continue the pending turn.
+                if not reconnect_will_generate_response:
+                    await self._session.send_realtime_input(
+                        text="Please respond briefly to the caller's most recent statement."
+                    )
                 logger.warning(
                     "gemini_unanswered_turn_recovery_requested",
                     extra={
                         "session_id": session_id,
                         "provider": "vertex",
                         "connection_ready": True,
-                        "generation_active": bool(self._bot_is_responding),
+                        "reconnected": True,
+                        "prompt_sent": not reconnect_will_generate_response,
                     },
                 )
                 diagnostics.record_conversation_event("response_watchdog_recovered")
