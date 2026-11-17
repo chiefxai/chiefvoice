@@ -7,6 +7,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException, Request, Response
+from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.post_call.base import CompletedCall
@@ -42,6 +43,8 @@ class OutboundCallCommand:
     live_agent_template_id: str | None = None
     live_agent_template_revision: int | None = None
     live_agent_context: dict[str, Any] | None = None
+    live_agent_language: str | None = None
+    live_agent_completion_requirements: dict[str, Any] | None = None
     post_call_context: str | None = None
     post_call_template_id: str | None = None
     post_call_template_revision: int | None = None
@@ -84,6 +87,14 @@ class CallCoordinator:
         self.api_key_directory = api_key_directory
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
+        if command.live_agent_language:
+            try:
+                Language(command.live_agent_language)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The selected realtime provider does not support the calling template language",
+                ) from exc
         post_call_agent_enabled = True
         auto_hangup_when_complete = command.auto_hangup_when_complete
         if command.api_key_id is not None:
@@ -98,6 +109,22 @@ class CallCoordinator:
                 raise HTTPException(status_code=503, detail="Configure Google Cloud credentials for this API before placing calls")
             post_call_agent_enabled = api_config.post_call_agent_enabled
             auto_hangup_when_complete = auto_hangup_when_complete or api_config.auto_hangup_when_complete
+        has_legacy_requirements = bool(
+            isinstance(command.live_agent_context, dict)
+            and command.live_agent_context.get("mandatory_fields")
+        )
+        if (
+            auto_hangup_when_complete
+            and not command.live_agent_completion_requirements
+            and not has_legacy_requirements
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Automatic hang-up requires live_agent template completion_requirements "
+                    "or live_agent.context.mandatory_fields"
+                ),
+            )
         if post_call_agent_enabled:
             self._require_post_call_ready()
         await self._require_vertex_project(command.tenant_id)
@@ -112,6 +139,15 @@ class CallCoordinator:
             )
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
+            if (
+                command.live_agent_language
+                and command.live_agent_language.split("-", 1)[0].lower()
+                != profile.language.split("-", 1)[0].lower()
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Calling template language must match the selected voice profile language",
+                )
         session = AcceptedSession(
             channel=command.channel,
             provider=command.provider,
@@ -125,6 +161,8 @@ class CallCoordinator:
             live_agent_template_id=command.live_agent_template_id,
             live_agent_template_revision=command.live_agent_template_revision,
             live_agent_context=command.live_agent_context,
+            live_agent_language=command.live_agent_language,
+            live_agent_completion_requirements=command.live_agent_completion_requirements,
             post_call_context=command.post_call_context,
             post_call_template_id=command.post_call_template_id,
             post_call_template_revision=command.post_call_template_revision,
@@ -148,6 +186,8 @@ class CallCoordinator:
                 "live_agent_template_id": command.live_agent_template_id,
                 "live_agent_template_revision": command.live_agent_template_revision,
                 "live_agent_context": command.live_agent_context,
+                "live_agent_language": command.live_agent_language,
+                "live_agent_completion_requirements": command.live_agent_completion_requirements,
                 "post_call_context": command.post_call_context,
                 "post_call_template_id": command.post_call_template_id,
                 "post_call_template_revision": command.post_call_template_revision,

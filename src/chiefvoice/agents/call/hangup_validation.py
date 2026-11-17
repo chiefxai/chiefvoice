@@ -47,6 +47,24 @@ def extract_mandatory_fields(session: AcceptedSession) -> set[str]:
     return mandatory
 
 
+def _required_completion_fields(
+    session: AcceptedSession, collected: dict[str, Any]
+) -> set[str]:
+    requirements = session.live_agent_completion_requirements
+    if not isinstance(requirements, dict):
+        return set()
+    required = set(requirements.get("always", []))
+    for branch in requirements.get("when", []):
+        field = branch.get("field")
+        expected = branch.get("equals")
+        actual = collected.get(field)
+        # JSON booleans and numbers compare equal in Python (True == 1), but
+        # they are distinct values in a caller's completion contract.
+        if type(actual) is type(expected) and actual == expected:
+            required.update(branch.get("required", []))
+    return required
+
+
 def validate_hangup_request(
     session: AcceptedSession,
     arguments: dict[str, Any] | None = None,
@@ -113,7 +131,8 @@ def validate_hangup_request(
 
     # 3. Check mandatory information if this is a completion exit
     mandatory_fields = extract_mandatory_fields(session)
-    if mandatory_fields and not is_early_exit:
+    completion_requirements = session.live_agent_completion_requirements
+    if (mandatory_fields or completion_requirements) and not is_early_exit:
         collected: dict[str, Any] = {}
         # Merge existing session-collected data
         if isinstance(session.metadata.get("collected_data"), dict):
@@ -127,9 +146,10 @@ def validate_hangup_request(
             if k not in {"reason", "summary", "notes", "collected_data"}:
                 collected[k] = v
 
+        required_fields = mandatory_fields | _required_completion_fields(session, collected)
         missing = [
             field
-            for field in sorted(mandatory_fields)
+            for field in sorted(required_fields)
             if field not in collected or collected[field] is None or collected[field] == ""
         ]
         if missing:
@@ -153,7 +173,8 @@ def validate_hangup_request(
                 message=(
                     f"Cannot end call yet: mandatory information has not been collected. "
                     f"Missing fields: {', '.join(missing)}. "
-                    "Please ask the caller for this information before ending the call."
+                    "Please ask the caller for this information before ending the call. "
+                    "Include the collected values in the collected_data argument when retrying."
                 ),
             )
 

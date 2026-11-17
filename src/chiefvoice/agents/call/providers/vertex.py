@@ -83,7 +83,9 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         voice = self.voice
         system_instruction = self.system_instruction
         params = None
-        language_tag = None
+        language_tag = session.live_agent_language
+        if language_tag:
+            session.metadata["voice_language"] = language_tag
         if session.bot_config_id is not None:
             if self.profile_directory is None or session.tenant_id is None:
                 raise HTTPException(
@@ -92,7 +94,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             profile = await self.profile_directory.get(session.tenant_id, session.bot_config_id)
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
-            language_tag = profile.language
+            if language_tag and language_tag.split("-", 1)[0].lower() != profile.language.split("-", 1)[0].lower():
+                raise HTTPException(
+                    status_code=422,
+                    detail="Calling template language must match the selected voice profile language",
+                )
+            language_tag = language_tag or profile.language
             session.metadata["voice_language"] = language_tag
             try:
                 Language(language_tag)
@@ -121,6 +128,13 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 params = GeminiLiveVertexLLMService.Settings(
                     model=model, voice=voice, language=language_tag
                 )
+
+        elif language_tag:
+            # A template can define language even when no separate profile is selected.
+            system_instruction = (
+                f"{system_instruction.strip()}\n\n"
+                f"Respond consistently in {language_tag}. Do not switch languages unless the caller explicitly asks."
+            )
 
         if session.live_agent_instructions and session.live_agent_instructions.strip():
             system_instruction = (
@@ -172,7 +186,10 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 if service_type == "google_ai"
                 else GeminiLiveVertexLLMService.Settings
             )
-            params = settings_type(model=model, voice=voice)
+            if service_type == "vertex" and language_tag:
+                params = settings_type(model=model, voice=voice, language=language_tag)
+            else:
+                params = settings_type(model=model, voice=voice)
         params.vad = GeminiVADParams(
             start_sensitivity=StartSensitivity.START_SENSITIVITY_LOW,
             end_sensitivity=EndSensitivity.END_SENSITIVITY_LOW,
@@ -194,24 +211,35 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
         tools = None
         if session.auto_hangup_when_complete:
-            completion_phrase = completion_phrase_for_language(
-                session.metadata.get("voice_language")
-            )
-            completion_marker = completion_marker_for_language(
-                session.metadata.get("voice_language")
-            )
-            session.metadata["auto_hangup_completion_phrase"] = completion_phrase
-            session.metadata["auto_hangup_completion_marker"] = completion_marker
+            effective_language = language_tag or session.metadata.get("voice_language")
+            completion_phrase = completion_phrase_for_language(effective_language)
+            completion_marker = completion_marker_for_language(effective_language)
+            if completion_phrase and completion_marker:
+                session.metadata["auto_hangup_completion_phrase"] = completion_phrase
+                session.metadata["auto_hangup_completion_marker"] = completion_marker
             logger.info(
                 "call_agent_hangup_tool_registered",
                 extra={"session_id": session.session_id, "provider": session.provider},
             )
+            completion_guidance = (
+                "make the following sentence your final spoken response, exactly as written: "
+                f"{completion_phrase} "
+                if completion_phrase
+                else "give a brief thank-you and goodbye in the same language used in the conversation. "
+            )
+            requirements_guidance = ""
+            if session.live_agent_completion_requirements:
+                requirements_guidance = (
+                    "The server will reject a completed hangup unless collected_data satisfies "
+                    "this completion contract. Include all collected values in hang_up_call: "
+                    f"{json.dumps(session.live_agent_completion_requirements, ensure_ascii=False)}. "
+                )
             system_instruction = (
                 f"{system_instruction.strip()}\n\n"
                 "Automatic call completion is enabled. Track every field or outcome requested "
                 "by the live-call instructions. Once all requested information is collected, "
-                "make the following sentence your final spoken response, exactly as written: "
-                f"{completion_phrase} Do not say this sentence before the task is complete. "
+                f"{completion_guidance}Do not say this sentence before the task is complete. "
+                f"{requirements_guidance}"
                 "The platform will request hangup after this final audio has drained. Also call "
                 "hang_up_call with reason completed and the collected data when possible. If the "
                 "caller clearly declines, cannot provide a requested item, or asks to end the "
@@ -325,7 +353,11 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     },
                     "collected_data": {
                         "type": "object",
-                        "description": "Key-value dictionary of mandatory fields and data collected during the call.",
+                        "description": (
+                            "Key-value dictionary of all required values collected during the call. "
+                            "Required when the server has a completion contract; include the field "
+                            "names and caller-provided values exactly, without guessing."
+                        ),
                     },
                     "summary": {
                         "type": "string",

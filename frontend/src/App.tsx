@@ -1264,7 +1264,7 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
               multiline
               minRows={3}
               fullWidth
-              helperText={kind === 'post_call' ? 'Optional defaults: time_zone, time_format, output_schema.' : 'Optional: auto_hangup_when_complete.'}
+              helperText={kind === 'post_call' ? 'Optional defaults: time_zone, time_format, output_schema.' : 'Optional: language (for example ta-IN), auto_hangup_when_complete, and completion_requirements. Automatic hang-up requires always/when field rules or live_agent.context.mandatory_fields.'}
             />
             {!editing && (
               <FormControlLabel

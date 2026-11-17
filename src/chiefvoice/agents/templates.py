@@ -17,6 +17,39 @@ _ALLOWED_TOOLS = {
     "calling": {"end_call"},
     "post_call": {"calculator", "time"},
 }
+_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+
+
+def validate_completion_requirements(value: Any) -> dict[str, Any]:
+    """Validate the data contract required before a completed-call hangup."""
+    if not isinstance(value, dict) or set(value) - {"always", "when"}:
+        raise ValueError("completion_requirements must contain only always and when")
+    always = value.get("always", [])
+    branches = value.get("when", [])
+    if not isinstance(always, list) or any(not isinstance(item, str) or not item for item in always):
+        raise ValueError("completion_requirements.always must be an array of field names")
+    if len(set(always)) != len(always):
+        raise ValueError("completion_requirements.always must not contain duplicates")
+    if not isinstance(branches, list) or len(branches) > 10:
+        raise ValueError("completion_requirements.when must be an array with at most 10 branches")
+    normalized = []
+    for branch in branches:
+        if not isinstance(branch, dict) or set(branch) != {"field", "equals", "required"}:
+            raise ValueError("Each completion requirement branch needs field, equals, and required")
+        field = branch["field"]
+        required = branch["required"]
+        if not isinstance(field, str) or not field:
+            raise ValueError("Completion requirement branch field must be a non-empty string")
+        if not isinstance(required, list) or any(not isinstance(item, str) or not item for item in required):
+            raise ValueError("Completion requirement branch required must be an array of field names")
+        if len(set(required)) != len(required):
+            raise ValueError("Completion requirement branch fields must not contain duplicates")
+        if not isinstance(branch["equals"], (str, int, float, bool, type(None))):
+            raise ValueError("Completion requirement branch equals must be a JSON scalar")
+        normalized.append({"field": field, "equals": branch["equals"], "required": required})
+    if not always and not normalized:
+        raise ValueError("completion_requirements must require at least one field")
+    return {"always": always, "when": normalized}
 
 
 class BuiltinTool(BaseModel):
@@ -75,12 +108,27 @@ class AgentTemplateBody(BaseModel):
             allowed_settings = {"time_zone", "time_format", "output_schema"}
             if unknown := self.settings.keys() - allowed_settings:
                 raise ValueError("Unsupported post-call template settings: " + ", ".join(sorted(unknown)))
-        elif self.settings.keys() - {"auto_hangup_when_complete"}:
-            raise ValueError("Unsupported calling template settings")
-        elif "auto_hangup_when_complete" in self.settings and not isinstance(
-            self.settings["auto_hangup_when_complete"], bool
-        ):
-            raise ValueError("auto_hangup_when_complete must be a boolean")
+        else:
+            allowed_settings = {
+                "auto_hangup_when_complete",
+                "language",
+                "completion_requirements",
+            }
+            if unknown := self.settings.keys() - allowed_settings:
+                raise ValueError("Unsupported calling template settings: " + ", ".join(sorted(unknown)))
+            if "auto_hangup_when_complete" in self.settings and not isinstance(
+                self.settings["auto_hangup_when_complete"], bool
+            ):
+                raise ValueError("auto_hangup_when_complete must be a boolean")
+            language = self.settings.get("language")
+            if language is not None and (
+                not isinstance(language, str) or not _LANGUAGE_TAG.fullmatch(language)
+            ):
+                raise ValueError("Calling template language must be a valid BCP 47 language tag")
+            if "completion_requirements" in self.settings:
+                self.settings["completion_requirements"] = validate_completion_requirements(
+                    self.settings["completion_requirements"]
+                )
         return self
 
 
