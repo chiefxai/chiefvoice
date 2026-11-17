@@ -17,12 +17,13 @@ from chiefvoice.agents.call.completion import (
     completion_phrase_for_language,
 )
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
+from chiefvoice.agents.call.prepared_session import PreparedRealtimeSessionDirectory
 from chiefvoice.agents.call.providers.base import RealtimeAgentProvider
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.identity.api_keys import ApiKeyDirectory
 from chiefvoice.sessions import AcceptedSession
 
-logger = logging.getLogger(__name__)
+
 
 
 class VertexGeminiLiveProvider(RealtimeAgentProvider):
@@ -46,6 +47,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         google_ai_api_key: str | None = None,
         google_ai_model: str = "gemini-3.1-flash-live-preview",
         api_key_directory: ApiKeyDirectory | None = None,
+        prepared_sessions: PreparedRealtimeSessionDirectory | None = None,
     ):
         if not location:
             raise ValueError("A Vertex AI location is required")
@@ -66,14 +68,10 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         self.google_ai_api_key = google_ai_api_key
         self.google_ai_model = google_ai_model
         self.api_key_directory = api_key_directory
+        self.prepared_sessions = prepared_sessions or PreparedRealtimeSessionDirectory()
 
     async def preflight(self, session: AcceptedSession) -> None:
-        """Open a short-lived Live API session before starting a phone call.
-
-        This validates the effective per-API project, credentials, model,
-        location, voice, and language against Gemini itself. No call is dialed
-        until the provider confirms the websocket session is open.
-        """
+        """Connect Gemini before dialing and retain that connection for the call."""
         from pipecat.clocks.system_clock import SystemClock
         from pipecat.processors.frame_processor import FrameProcessorSetup
         from pipecat.utils.asyncio.task_manager import TaskManager
@@ -101,6 +99,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             pipeline_worker=SimpleNamespace(),
         )
         setup_started = False
+        retained = False
         open_waiter: asyncio.Task | None = None
         error_waiter: asyncio.Task | None = None
         try:
@@ -120,13 +119,16 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 raise TimeoutError(error_type or "Gemini Live connection timed out")
             elapsed_ms = round((time.monotonic() - started_at) * 1000)
             logger.info(
-                "gemini_live_preflight_succeeded",
+                "gemini_prepared_session_ready",
                 extra={
                     "session_id": session.session_id,
                     "provider": "vertex",
                     "elapsed_ms": elapsed_ms,
                 },
             )
+            service._chiefvoice_preconnected = True
+            await self.prepared_sessions.put(session.session_id, processors, task_manager)
+            retained = True
         except Exception as exc:
             error_type = getattr(service, "_chiefvoice_connection_error_type", None)
             logger.warning(
@@ -155,8 +157,21 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     *(waiter for waiter in (open_waiter, error_waiter) if waiter is not None),
                     return_exceptions=True,
                 )
-            if setup_started:
-                await service.cleanup()
+            if setup_started and not retained:
+                for processor in reversed(processors):
+                    try:
+                        await processor.cleanup()
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "gemini_live_preflight_cleanup_failed",
+                            extra={
+                                "session_id": session.session_id,
+                                "error_type": type(cleanup_exc).__name__,
+                            },
+                        )
+
+    async def cleanup_prepared_session(self, session_id: str, reason: str) -> None:
+        await self.prepared_sessions.discard(session_id, reason)
 
     async def create_processors(self, session: AcceptedSession) -> Sequence[FrameProcessor]:
         # Import lazily so deployments using another backend do not require Google packages.

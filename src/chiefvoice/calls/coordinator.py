@@ -17,6 +17,7 @@ from chiefvoice.billing import SubscriptionAuthorizer
 from chiefvoice.calls.store import IdempotencyConflict, SqlCallSessionStore
 from chiefvoice.channels.base import AmbiguousCallStart, ChannelAdapter, OutboundCall
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
+from chiefvoice.identity.api_keys import ApiKeyDirectory
 from chiefvoice.observability.setup import (
     call_duration_limit_event,
     post_call_enqueue_fallback_event,
@@ -25,7 +26,6 @@ from chiefvoice.observability.setup import (
     session_started,
 )
 from chiefvoice.sessions import AcceptedSession, Direction
-from chiefvoice.identity.api_keys import ApiKeyDirectory
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ class CallCoordinator:
         call_session_store: SqlCallSessionStore | None = None,
         api_key_directory: ApiKeyDirectory | None = None,
         realtime_preflight: Callable[[AcceptedSession], Awaitable[None]] | None = None,
+        realtime_preflight_cleanup: Callable[[str, str], Awaitable[None]] | None = None,
     ):
         self.adapters = adapters
         self.subscriptions = subscriptions
@@ -87,6 +88,7 @@ class CallCoordinator:
         self.call_session_store = call_session_store
         self.api_key_directory = api_key_directory
         self.realtime_preflight = realtime_preflight
+        self.realtime_preflight_cleanup = realtime_preflight_cleanup
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
         if command.live_agent_language:
@@ -292,6 +294,10 @@ class CallCoordinator:
             try:
                 await self.call_session_store.update_state(session, status="starting")
             except BaseException:
+                if self.realtime_preflight_cleanup is not None:
+                    await self.realtime_preflight_cleanup(
+                        session.session_id, "call_state_persist_failed"
+                    )
                 await self.subscriptions.release_voice(command.tenant_id, session.session_id)
                 await self.call_session_store.update_state(
                     session, status="failed", end_reason="call_state_persist_failed"
@@ -321,6 +327,8 @@ class CallCoordinator:
             session.metadata["call_status"] = "reconciliation_required"
             return session
         except BaseException:
+            if self.realtime_preflight_cleanup is not None:
+                await self.realtime_preflight_cleanup(session.session_id, "provider_start_failed")
             await self.subscriptions.release_voice(command.tenant_id, session.session_id)
             if self.call_session_store is not None:
                 await self.call_session_store.update_state(

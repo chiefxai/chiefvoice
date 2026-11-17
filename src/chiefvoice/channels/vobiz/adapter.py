@@ -37,7 +37,7 @@ from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
 from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession, Direction
 
-logger = logging.getLogger(__name__)
+
 VOBIZ_API = "https://api.vobiz.ai"
 PIPELINE_SAMPLE_RATE = 8000
 MAX_CALL_STATE_TOKEN_LENGTH = 16_384
@@ -194,6 +194,7 @@ class VobizAdapter:
                     "session_id": session.session_id,
                     "provider": self.provider,
                     "error_type": type(exc).__name__,
+                    "reason": "live_ai_or_media_pipeline_failed",
                 },
             )
             raise AmbiguousCallStart(
@@ -689,6 +690,7 @@ class VobizAdapter:
 
             task = PipelineTask(
                 pipeline,
+                task_manager=session.metadata.get("prepared_realtime_task_manager"),
                 params=PipelineParams(
                     audio_in_sample_rate=PIPELINE_SAMPLE_RATE,
                     audio_out_sample_rate=PIPELINE_SAMPLE_RATE,
@@ -787,6 +789,17 @@ class VobizAdapter:
                     "error_type": type(exc).__name__,
                 },
             )
+            try:
+                await self.hangup(session, "live AI session or media pipeline failed")
+            except Exception as hangup_exc:
+                logger.error(
+                    "vobiz_media_failure_hangup_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "error_type": type(hangup_exc).__name__,
+                    },
+                )
             if websocket.client_state.name != "DISCONNECTED":
                 try:
                     await websocket.close(code=1011)

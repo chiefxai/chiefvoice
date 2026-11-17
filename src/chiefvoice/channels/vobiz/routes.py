@@ -42,6 +42,9 @@ async def outbound_answer(request: Request):
     try:
         await coordinator.mark_answered(session)
     except LookupError:
+        prepared_sessions = getattr(request.app.state, "prepared_realtime_sessions", None)
+        if prepared_sessions is not None:
+            await prepared_sessions.discard(session.session_id, "answer_rejected")
         return adapter.reject_outbound_answer()
     return adapter.outbound_answer_response(session)
 
@@ -53,6 +56,9 @@ async def hangup_callback(request: Request):
     if coordinator is None:
         raise HTTPException(status_code=503, detail="Call services are not configured")
     session = await adapter.hangup_callback(request)
+    prepared_sessions = getattr(request.app.state, "prepared_realtime_sessions", None)
+    if prepared_sessions is not None:
+        await prepared_sessions.discard(session.session_id, "provider_hangup_before_media")
     # If media is still active, let its WebSocket finalizer flush the Pipecat
     # audio buffer and persist recording/transcript state before ending the call.
     # Only calls without an active media session are finalized directly here.

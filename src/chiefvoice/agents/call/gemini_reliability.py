@@ -139,7 +139,22 @@ def reliable_vertex_service_class(
             self._chiefvoice_recent_output_transcript_at = 0.0
             self._chiefvoice_pending_interruption = False
             self._chiefvoice_pending_interruption_task: asyncio.Task | None = None
+            self._chiefvoice_preconnected = False
             super().__init__(*args, **kwargs)
+
+        async def setup(self, setup: Any) -> None:
+            """Attach a pre-dial connection to Pipecat without reconnecting it."""
+            if self._chiefvoice_preconnected:
+                # The preflight already ran full setup with the same TaskManager.
+                # Re-running the base setup would create a second Gemini websocket
+                # and duplicate metrics/tasks. Rebind the pipeline setup metadata only.
+                self._setup = setup
+                logger.info(
+                    "gemini_preconnected_service_attached",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
+                return
+            await super().setup(setup)
 
         async def _handle_connection_error(self, error: Exception) -> bool:
             should_retry = await super()._handle_connection_error(error)
