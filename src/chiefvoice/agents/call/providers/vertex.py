@@ -23,6 +23,7 @@ from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.identity.api_keys import ApiKeyDirectory
 from chiefvoice.sessions import AcceptedSession
 
+logger = logging.getLogger(__name__)
 
 
 

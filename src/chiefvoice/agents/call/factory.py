@@ -17,7 +17,7 @@ from chiefvoice.recordings.storage import (
 )
 from chiefvoice.sessions import AcceptedSession
 
- Callable[
+ProcessorFactory = Callable[
     [AcceptedSession], Sequence[FrameProcessor] | Awaitable[Sequence[FrameProcessor]]
 ]
 

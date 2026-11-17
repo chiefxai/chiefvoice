@@ -37,6 +37,7 @@ from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
 from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession, Direction
 
+logger = logging.getLogger(__name__)
 
 VOBIZ_API = "https://api.vobiz.ai"
 PIPELINE_SAMPLE_RATE = 8000

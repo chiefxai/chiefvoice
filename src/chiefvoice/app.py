@@ -75,6 +75,7 @@ from chiefvoice.storage.s3 import create_s3_compatible_client
 from chiefvoice.sessions import AcceptedSession
 from chiefvoice.calls.routes import router as calls_router
 
+configure_logging()
 
 logger = logging.getLogger(__name__)
 
