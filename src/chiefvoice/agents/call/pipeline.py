@@ -85,10 +85,13 @@ def build_pipeline(
     local_vad = SileroVADAnalyzer(
         sample_rate=16000,
         params=VADParams(
-            confidence=0.75,
-            start_secs=0.30,
+            # Telephone audio is often much quieter than the desktop audio
+            # these defaults are tuned for. Keep the local VAD sensitive
+            # enough to agree with Gemini's server-side speech detector.
+            confidence=0.65,
+            start_secs=0.20,
             stop_secs=0.60,
-            min_volume=0.60,
+            min_volume=0.15,
         ),
     )
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(

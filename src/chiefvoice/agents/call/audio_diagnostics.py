@@ -46,6 +46,7 @@ class CallAudioDiagnostics:
         self._vad_events = {
             "caller_speech_started": 0,
             "caller_speech_stopped": 0,
+            "caller_speech_detected_by_gemini_transcription": 0,
             "gemini_interruption_accepted": 0,
             "gemini_interruption_suppressed": 0,
             "gemini_echo_interruption_suppressed": 0,
@@ -171,7 +172,10 @@ class GeminiInputResampler(FrameProcessor):
 
     async def process_frame(self, frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if not isinstance(frame, InputAudioRawFrame) or frame.sample_rate == self._target_sample_rate:
+        if (
+            not isinstance(frame, InputAudioRawFrame)
+            or frame.sample_rate == self._target_sample_rate
+        ):
             await self.push_frame(frame, direction)
             return
         if frame.num_channels != 1:

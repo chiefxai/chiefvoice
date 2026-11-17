@@ -16,6 +16,7 @@ from pipecat.frames.frames import (
     LLMFullResponseStartFrame,
     LLMRunFrame,
     OutputAudioRawFrame,
+    TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
@@ -172,6 +173,24 @@ class GeminiConversationWatchdog(FrameProcessor):
             self._diagnostics.record_conversation_event("caller_speech_stopped")
             logger.info("caller_turn_completed", extra=self._log_context())
             self._arm_response_watchdog("caller_turn_completed")
+
+        elif direction is FrameDirection.UPSTREAM and isinstance(frame, TranscriptionFrame):
+            # Gemini's server VAD can recognize telephone speech that the
+            # local VAD misses. Use its finalized input transcription as an
+            # activity signal so silence prompts cannot be sent over caller
+            # speech, and retain a response watchdog for the missed local turn.
+            if not is_call_terminating and frame.text.strip():
+                self._inactivity_stage = 0
+                self._diagnostics.record_conversation_event(
+                    "caller_speech_detected_by_gemini_transcription"
+                )
+                self._cancel_caller_inactivity_timer("gemini_input_transcription")
+                logger.info(
+                    "caller_speech_detected_by_gemini_transcription",
+                    extra={**self._log_context(), "text_characters": len(frame.text)},
+                )
+                if not self._caller_is_speaking:
+                    self._arm_response_watchdog("gemini_input_transcription")
 
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._bot_audio_playing = True
