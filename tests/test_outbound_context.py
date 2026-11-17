@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from chiefvoice.agents.post_call.output_schema import build_output_model, validate_output_schema
-from chiefvoice.calls.routes import OutboundCallBody
+from chiefvoice.calls.routes import OutboundCallBody, _merge_template_tools
 
 
 def _schema():
@@ -109,3 +109,10 @@ def test_outbound_body_rejects_conflicting_agent_ids():
                 "live_agent": {"agent_id": "agent-b"},
             }
         )
+
+
+def test_merge_template_tools_handles_dicts_and_objects():
+    defaults = [{"name": "end_call", "type": "builtin"}]
+    assert _merge_template_tools(defaults, None, []) == ["end_call"]
+    assert _merge_template_tools(tuple(defaults), None, []) == ["end_call"]
+

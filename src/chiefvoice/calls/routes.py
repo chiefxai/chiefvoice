@@ -37,14 +37,24 @@ def resolve_assigned_sender(
     return candidates[0]
 
 
+def _tool_name(item: Any) -> str:
+    if isinstance(item, dict):
+        return item.get("name", "")
+    if isinstance(item, str):
+        return item
+    return getattr(item, "name", str(item))
+
+
 def _merge_template_tools(
-    defaults: list[dict[str, str]], replacement: list | None, additions: list
+    defaults: list[dict[str, str]] | tuple[dict[str, str], ...], replacement: list | None, additions: list
 ) -> list[str]:
-    chosen = defaults if replacement is None else [
-        item if isinstance(item, str) else item.name for item in replacement
+    chosen = [
+        _tool_name(item) for item in defaults
+    ] if replacement is None else [
+        _tool_name(item) for item in replacement
     ]
-    names = list(chosen) + [item.name for item in additions]
-    return list(dict.fromkeys(names))
+    names = chosen + [_tool_name(item) for item in additions]
+    return [name for name in dict.fromkeys(names) if name]
 
 
 def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None) -> tuple[str | None, dict[str, Any] | None, list[str], bool]:
