@@ -70,7 +70,7 @@ class Settings:
         os.getenv("GEMINI_GENERATION_WATCHDOG_SECONDS", "8")
     )
     gemini_recovery_grace_seconds: float = float(
-        os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "2")
+        os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "6")
     )
     # Independent caller silence and inactivity management configuration.
     caller_inactivity_timeout_seconds: float = float(

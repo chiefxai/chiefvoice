@@ -84,6 +84,16 @@ class GeminiConversationWatchdog(FrameProcessor):
             if recovery_grace_seconds is None
             else recovery_grace_seconds
         )
+        logger.info(
+            "gemini_watchdog_configuration",
+            extra={
+                "session_id": session.session_id,
+                "provider": session.provider,
+                "response_timeout_seconds": self._response_timeout,
+                "generation_timeout_seconds": self._generation_response_timeout,
+                "recovery_grace_seconds": self._recovery_grace,
+            },
+        )
         # Inactivity timer configuration with per-session overrides
         self._first_inactivity_timeout = (
             caller_inactivity_first_seconds
