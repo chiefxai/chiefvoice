@@ -55,6 +55,7 @@ def create_voice_pipeline_factory(
         ):
             raise RuntimeError("Prepared realtime session is missing or expired")
         if prepared is not None:
+            prepared.bind_runtime_metadata(session)
             conversation_processors = prepared.processors
             session.metadata["prepared_realtime_task_manager"] = prepared.task_manager
         else:

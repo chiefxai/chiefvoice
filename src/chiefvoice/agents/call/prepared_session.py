@@ -7,8 +7,11 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from pipecat.processors.frame_processor import FrameProcessor
+
+from chiefvoice.sessions import AcceptedSession
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +20,22 @@ logger = logging.getLogger(__name__)
 class PreparedRealtimeSession:
     processors: Sequence[FrameProcessor]
     task_manager: object
+    runtime_metadata: dict[str, Any]
     created_at: float
     cleanup_lock: asyncio.Lock
     consumed: bool = False
     expiry_task: asyncio.Task | None = None
+
+    def bind_runtime_metadata(self, live_session: AcceptedSession) -> None:
+        """Share call-time state with processors created during preflight.
+
+        Vobiz reloads an AcceptedSession from encrypted storage when media
+        connects. The preflight Gemini tool callbacks still close over the
+        original object, so merge the live callback state and then make both
+        session objects use the same mutable metadata dictionary.
+        """
+        self.runtime_metadata.update(live_session.metadata)
+        live_session.metadata = self.runtime_metadata
 
 
 class PreparedRealtimeSessionDirectory:
@@ -36,10 +51,12 @@ class PreparedRealtimeSessionDirectory:
         session_id: str,
         processors: Sequence[FrameProcessor],
         task_manager: object,
+        runtime_metadata: dict[str, Any],
     ) -> None:
         entry = PreparedRealtimeSession(
             processors=processors,
             task_manager=task_manager,
+            runtime_metadata=runtime_metadata,
             created_at=time.monotonic(),
             cleanup_lock=asyncio.Lock(),
         )

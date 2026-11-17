@@ -128,7 +128,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 },
             )
             service._chiefvoice_preconnected = True
-            await self.prepared_sessions.put(session.session_id, processors, task_manager)
+            await self.prepared_sessions.put(
+                session.session_id,
+                processors,
+                task_manager,
+                session.metadata,
+            )
             retained = True
         except Exception as exc:
             error_type = getattr(service, "_chiefvoice_connection_error_type", None)
