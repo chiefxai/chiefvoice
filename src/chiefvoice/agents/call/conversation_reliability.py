@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from enum import StrEnum
 from typing import Any
 
@@ -17,12 +18,14 @@ from pipecat.frames.frames import (
     LLMRunFrame,
     OutputAudioRawFrame,
     TranscriptionFrame,
+    TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from chiefvoice.agents.call.audio_diagnostics import CallAudioDiagnostics
+from chiefvoice.agents.call.hangup_validation import validate_hangup_request
 from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession
 
@@ -128,6 +131,7 @@ class GeminiConversationWatchdog(FrameProcessor):
         self._gemini_is_generating = False
         self._bot_audio_playing = False
         self._response_audio_seen = False
+        self._assistant_text_buffer = ""
         self._closed = False
         self._watch_task: asyncio.Task | None = None
         self._caller_inactivity_task: asyncio.Task | None = None
@@ -207,11 +211,29 @@ class GeminiConversationWatchdog(FrameProcessor):
         elif direction is FrameDirection.DOWNSTREAM and isinstance(
             frame, LLMFullResponseStartFrame
         ):
+            self._assistant_text_buffer = ""
             self._gemini_is_generating = True
             self._metadata["gemini_is_generating"] = True
             self._turn_state = ConversationTurnState.BOT_GENERATING
-            self._cancel_response_watchdog("gemini_response_started")
+            # Keep the response watchdog armed until actual audio is emitted.
+            # Gemini can start a response turn and then stall before producing
+            # any speech; treating the start frame as a response used to cancel
+            # the only recovery timer and leave the caller hearing silence.
             self._cancel_caller_inactivity_timer("gemini_response_started")
+
+        elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, TTSTextFrame):
+            if self._session.auto_hangup_when_complete and frame.text.strip():
+                self._assistant_text_buffer = (
+                    f"{self._assistant_text_buffer} {frame.text.strip()}"
+                )[-2000:]
+                marker = self._metadata.get("auto_hangup_completion_marker")
+                normalized_text = re.sub(r"\s+", " ", self._assistant_text_buffer).casefold()
+                if (
+                    isinstance(marker, str)
+                    and marker.casefold() in normalized_text
+                    and not self._metadata.get("auto_hangup_completion_phrase_detected")
+                ):
+                    await self._request_hangup_after_completion_phrase()
 
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
             self._gemini_is_generating = False
@@ -248,6 +270,62 @@ class GeminiConversationWatchdog(FrameProcessor):
                 self._arm_response_watchdog("initial_greeting")
 
         await self.push_frame(frame, direction)
+
+    async def _request_hangup_after_completion_phrase(self) -> None:
+        """Request provider hangup after Gemini's configured final phrase.
+
+        Vobiz's hangup monitor waits for the downstream audio drain before it
+        disconnects the provider call, so recognizing this text here cannot
+        truncate the spoken goodbye.
+        """
+        if self._metadata.get("call_terminating") or self._metadata.get("call_terminated"):
+            return
+        self._metadata["auto_hangup_completion_phrase_detected"] = True
+        self._diagnostics.record_conversation_event("auto_hangup_completion_phrase_detected")
+        validation = validate_hangup_request(
+            self._session,
+            {
+                "reason": "completed",
+                "collected_data": self._metadata.get("collected_data", {}),
+            },
+            diagnostics=self._diagnostics,
+        )
+        if not validation.allowed:
+            self._diagnostics.record_conversation_event(
+                "auto_hangup_completion_phrase_rejected"
+            )
+            logger.warning(
+                "call_auto_hangup_completion_phrase_rejected",
+                extra={
+                    **self._log_context(),
+                    "reason": validation.reason,
+                    "missing_fields": validation.missing_fields,
+                },
+            )
+            self._metadata.pop("auto_hangup_completion_phrase_detected", None)
+            return
+
+        callback = self._metadata.get("hang_up_call")
+        if not callable(callback):
+            self._metadata.pop("call_terminating", None)
+            logger.error(
+                "call_auto_hangup_completion_callback_unavailable",
+                extra=self._log_context(),
+            )
+            return
+        try:
+            await callback()
+            logger.info(
+                "call_auto_hangup_completion_phrase_requested",
+                extra=self._log_context(),
+            )
+        except Exception as error:
+            self._metadata.pop("call_terminating", None)
+            self._metadata.pop("auto_hangup_completion_phrase_detected", None)
+            logger.exception(
+                "call_auto_hangup_completion_phrase_failed",
+                extra={**self._log_context(), "error_type": type(error).__name__},
+            )
 
     def _log_context(self) -> dict[str, Any]:
         return {
@@ -440,7 +518,6 @@ class GeminiConversationWatchdog(FrameProcessor):
                 or self._call_state != CallLifecycleState.ACTIVE
                 or turn_id != self._turn_id
                 or self._caller_is_speaking
-                or self._gemini_is_generating
                 or self._bot_audio_playing
                 or self._response_audio_seen
             ):
@@ -469,7 +546,6 @@ class GeminiConversationWatchdog(FrameProcessor):
                     or self._call_state != CallLifecycleState.ACTIVE
                     or turn_id != self._turn_id
                     or self._caller_is_speaking
-                    or self._gemini_is_generating
                     or self._bot_audio_playing
                     or self._recovery_attempted_turn == turn_id
                 ):
@@ -493,7 +569,6 @@ class GeminiConversationWatchdog(FrameProcessor):
                 self._closed
                 or turn_id != self._turn_id
                 or self._caller_is_speaking
-                or self._gemini_is_generating
                 or self._bot_audio_playing
                 or self._metadata.get("call_terminating")
                 or self._metadata.get("call_terminated")

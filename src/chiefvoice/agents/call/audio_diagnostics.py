@@ -47,6 +47,8 @@ class CallAudioDiagnostics:
             "caller_speech_started": 0,
             "caller_speech_stopped": 0,
             "caller_speech_detected_by_gemini_transcription": 0,
+            "auto_hangup_completion_phrase_detected": 0,
+            "auto_hangup_completion_phrase_rejected": 0,
             "gemini_interruption_accepted": 0,
             "gemini_interruption_suppressed": 0,
             "gemini_echo_interruption_suppressed": 0,

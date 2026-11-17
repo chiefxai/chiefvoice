@@ -64,10 +64,10 @@ class Settings:
         "VERTEX_SYSTEM_INSTRUCTION", "You are a helpful, concise voice assistant."
     )
     gemini_response_watchdog_seconds: float = float(
-        os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "10")
+        os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "3")
     )
     gemini_recovery_grace_seconds: float = float(
-        os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "8")
+        os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "2")
     )
     # Independent caller silence and inactivity management configuration.
     caller_inactivity_timeout_seconds: float = float(

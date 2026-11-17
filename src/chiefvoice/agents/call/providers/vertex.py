@@ -9,6 +9,10 @@ from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transcriptions.language import Language
 
+from chiefvoice.agents.call.completion import (
+    completion_marker_for_language,
+    completion_phrase_for_language,
+)
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.call.providers.base import RealtimeAgentProvider
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
@@ -89,6 +93,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
             language_tag = profile.language
+            session.metadata["voice_language"] = language_tag
             try:
                 Language(language_tag)
             except ValueError as exc:
@@ -189,6 +194,14 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
         tools = None
         if session.auto_hangup_when_complete:
+            completion_phrase = completion_phrase_for_language(
+                session.metadata.get("voice_language")
+            )
+            completion_marker = completion_marker_for_language(
+                session.metadata.get("voice_language")
+            )
+            session.metadata["auto_hangup_completion_phrase"] = completion_phrase
+            session.metadata["auto_hangup_completion_marker"] = completion_marker
             logger.info(
                 "call_agent_hangup_tool_registered",
                 extra={"session_id": session.session_id, "provider": session.provider},
@@ -196,12 +209,15 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             system_instruction = (
                 f"{system_instruction.strip()}\n\n"
                 "Automatic call completion is enabled. Track every field or outcome requested "
-                "by the live-call instructions. As soon as all requested information is collected, "
-                "or the caller clearly declines or cannot provide a requested item, say a brief "
-                "thank-you and immediately call hang_up_call. Do not merely say that you will "
-                "hang up, do not wait for the caller to end the call, and do not continue with "
-                "unrelated conversation after the task is complete. Never claim the call ended "
-                "unless the tool succeeds."
+                "by the live-call instructions. Once all requested information is collected, "
+                "make the following sentence your final spoken response, exactly as written: "
+                f"{completion_phrase} Do not say this sentence before the task is complete. "
+                "The platform will request hangup after this final audio has drained. Also call "
+                "hang_up_call with reason completed and the collected data when possible. If the "
+                "caller clearly declines, cannot provide a requested item, or asks to end the "
+                "call, use hang_up_call with the appropriate early-exit reason. Do not merely "
+                "say that you will hang up, and never claim the call ended unless the platform "
+                "disconnects it."
             )
 
             async def hang_up_call(params: FunctionCallParams) -> None:
