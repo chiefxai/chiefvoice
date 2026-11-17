@@ -226,19 +226,13 @@ class GeminiConversationWatchdog(FrameProcessor):
                 self._assistant_text_buffer = (
                     f"{self._assistant_text_buffer} {frame.text.strip()}"
                 )[-2000:]
-                marker = self._metadata.get("auto_hangup_completion_marker")
-                normalized_text = re.sub(r"\s+", " ", self._assistant_text_buffer).casefold()
-                if (
-                    isinstance(marker, str)
-                    and marker.casefold() in normalized_text
-                    and not self._metadata.get("auto_hangup_completion_phrase_detected")
-                ):
-                    await self._request_hangup_after_completion_phrase()
 
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
             self._gemini_is_generating = False
             self._metadata["gemini_is_generating"] = False
             logger.info("gemini_generation_completed", extra=self._log_context())
+            if self._session.auto_hangup_when_complete:
+                await self._maybe_hangup_after_completed_response()
             self._maybe_arm_caller_inactivity_timer()
 
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, OutputAudioRawFrame):
@@ -270,6 +264,38 @@ class GeminiConversationWatchdog(FrameProcessor):
                 self._arm_response_watchdog("initial_greeting")
 
         await self.push_frame(frame, direction)
+
+    async def _maybe_hangup_after_completed_response(self) -> None:
+        """Hang up only when the whole assistant turn ends with the goodbye.
+
+        Matching a phrase while text is still streaming can truncate a response
+        that continues with a follow-up question. Wait for the model's end frame,
+        then require the configured goodbye to be the final sentence.
+        """
+        if self._metadata.get("auto_hangup_completion_phrase_detected"):
+            return
+        phrase = self._metadata.get("auto_hangup_completion_phrase")
+        marker = self._metadata.get("auto_hangup_completion_marker")
+        if not isinstance(phrase, str) or not isinstance(marker, str):
+            return
+
+        def canonicalize(text: str) -> str:
+            return re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).casefold().strip()
+
+        response_text = canonicalize(self._assistant_text_buffer)
+        canonical_phrase = canonicalize(phrase)
+        if canonical_phrase and response_text.endswith(canonical_phrase):
+            await self._request_hangup_after_completion_phrase()
+            return
+
+        if canonicalize(marker) in response_text:
+            self._diagnostics.record_conversation_event(
+                "auto_hangup_completion_phrase_rejected"
+            )
+            logger.info(
+                "call_auto_hangup_completion_phrase_ignored",
+                extra={**self._log_context(), "reason": "goodbye_not_final_text"},
+            )
 
     async def _request_hangup_after_completion_phrase(self) -> None:
         """Request provider hangup after Gemini's configured final phrase.
