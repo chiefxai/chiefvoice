@@ -343,7 +343,6 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const numbersQuery = useQuery({ queryKey: ['platform-phone-numbers'], queryFn: api.phoneNumbers, enabled: connected, retry: false })
   const keysQuery = useQuery({ queryKey: ['platform-api-keys'], queryFn: api.apiKeys, enabled: connected && (page === 'API' || page === 'Agents' || page === 'Simulation'), retry: false })
   const agentsQuery = useQuery({ queryKey: ['platform-agent-configs'], queryFn: api.agentConfigs, enabled: connected && (page === 'API' || page === 'Agents'), retry: false })
-  const agentTemplatesQuery = useQuery({ queryKey: ['platform-agent-templates'], queryFn: api.agentTemplates, enabled: connected && (page === 'API' || page === 'Agents' || page === 'Simulation'), retry: false })
   const apiAgentTemplatesQuery = useQuery({ queryKey: ['api-agent-templates', managementKey?.id], queryFn: () => api.apiAgentTemplates(managementKey!.id), enabled: connected && Boolean(managementKey), retry: false })
   const simulationAgentTemplatesQuery = useQuery({ queryKey: ['api-agent-templates', 'simulation', simulationApiId], queryFn: () => api.apiAgentTemplates(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
   const simulationProfilesQuery = useQuery({ queryKey: ['simulation-voice-profiles', simulationApiId], queryFn: () => api.voiceProfiles(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
@@ -362,17 +361,6 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const issueMutation = useMutation({
     mutationFn: ({ customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl }: { customerName: string; billingMode: 'prepaid' | 'postpaid'; billingAmountMinor: number; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean; webhookUrl: string }) => api.createApiKey(customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl),
     onSuccess: async result => {
-      let assignmentFailed = false
-      try {
-        await api.setApiAgentTemplates(result.api_key_record.id, {
-          calling_template_ids: apiCallingTemplateIds, post_call_template_ids: apiPostCallTemplateIds,
-          default_calling_template_id: apiDefaultCallingTemplateId || null,
-          default_post_call_template_id: apiDefaultPostCallTemplateId || null,
-        })
-      } catch (error) {
-        assignmentFailed = true
-        setToast(`API created, but template assignment failed: ${errorText(error)}`)
-      }
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-agent-configs'] })
@@ -381,7 +369,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       setSelectedNumbers([])
       setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setApiRecordingAllowed(false)
       setApiCallingTemplateIds([]); setApiPostCallTemplateIds([]); setApiDefaultCallingTemplateId(''); setApiDefaultPostCallTemplateId('')
-      if (!assignmentFailed) setToast('API key created for the selected phone numbers and agent templates.')
+      setToast('API key created successfully. You can now add and manage prompt templates inside the API page.')
     },
     onError: error => setToast(errorText(error)),
   })
@@ -498,8 +486,6 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (!selected.length) { setToast('Required: select at least one unassigned outbound phone number.'); return }
     if (!apiCustomerName.trim()) { setToast('Enter the customer name for this API.'); return }
     if (!voiceAgentId && !postCallAgentId) { setToast('Select at least one agent for this API.'); return }
-    if (voiceAgentId && !apiCallingTemplateIds.length) { setToast('Assign at least one calling template to this API.'); return }
-    if (postCallAgentId && !apiPostCallTemplateIds.length) { setToast('Assign at least one post-call template to this API.'); return }
     if (apiWebhookUrl.trim() && !postCallAgentId) { setToast('Select a post-call agent to use a completion webhook.'); return }
     if (!apiCredentials.trim()) { setToast('Add a Google Cloud service account JSON for this API.'); return }
     const configuredRate = (agentsQuery.data || []).filter(agent => agent.id === voiceAgentId || agent.id === postCallAgentId).reduce((sum, agent) => sum + agent.cost_per_minute_minor, 0)
@@ -733,21 +719,13 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           {voiceAgentId && <TextField label="Calling Vertex location for this API" value={voiceLocation} onChange={event => setVoiceLocation(event.target.value)} fullWidth />}
           {postCallAgentId && <TextField label="Post-call Vertex location for this API" value={postCallLocation} onChange={event => setPostCallLocation(event.target.value)} fullWidth />}
         </> })()}
-        <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Reusable prompts and tools</Typography>
-        {(() => { const choices = agentTemplatesQuery.data || []; const calling = choices.filter(item => item.kind === 'calling'); const post = choices.filter(item => item.kind === 'post_call'); return <>
-          <FormControl fullWidth><InputLabel id="api-calling-templates">Allowed calling templates</InputLabel><Select multiple labelId="api-calling-templates" label="Allowed calling templates" value={apiCallingTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiCallingTemplateIds(ids); if (!ids.includes(apiDefaultCallingTemplateId)) setApiDefaultCallingTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} calling template${ids.length === 1 ? '' : 's'} assigned`}>{calling.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiCallingTemplateIds.includes(item.id)} /><ListItemText primary={item.name} secondary={`${item.tools.map(tool => tool.name).join(', ') || 'No tools'} · v${item.revision}`} /></MenuItem>)}</Select></FormControl>
-          {!!apiCallingTemplateIds.length && <FormControl fullWidth><InputLabel id="api-default-calling-template">Default calling template</InputLabel><Select labelId="api-default-calling-template" label="Default calling template" value={apiDefaultCallingTemplateId} onChange={event => setApiDefaultCallingTemplateId(event.target.value)}>{calling.filter(item => apiCallingTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
-          <FormControl fullWidth><InputLabel id="api-post-templates">Allowed post-call templates</InputLabel><Select multiple labelId="api-post-templates" label="Allowed post-call templates" value={apiPostCallTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiPostCallTemplateIds(ids); if (!ids.includes(apiDefaultPostCallTemplateId)) setApiDefaultPostCallTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} post-call template${ids.length === 1 ? '' : 's'} assigned`}>{post.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiPostCallTemplateIds.includes(item.id)} /><ListItemText primary={item.name} secondary={`${item.tools.map(tool => tool.name).join(', ') || 'No tools'} · v${item.revision}`} /></MenuItem>)}</Select></FormControl>
-          {!!apiPostCallTemplateIds.length && <FormControl fullWidth><InputLabel id="api-default-post-template">Default post-call template</InputLabel><Select labelId="api-default-post-template" label="Default post-call template" value={apiDefaultPostCallTemplateId} onChange={event => setApiDefaultPostCallTemplateId(event.target.value)}>{post.filter(item => apiPostCallTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
-        </> })()}
-        {voiceAgentId && !apiCallingTemplateIds.length && <Alert severity="warning">Assign at least one calling template. The first template is selected as this API’s default.</Alert>}
-        {postCallAgentId && !apiPostCallTemplateIds.length && <Alert severity="warning">Assign at least one post-call template for post-call requests.</Alert>}
+        <Alert severity="info" sx={{ fontSize: 12 }}>Reusable prompt templates are scoped to this API and can be created and managed under the Templates section on the API page after creation.</Alert>
         {(() => { const rate = (agentsQuery.data || []).filter(agent => agent.id === voiceAgentId || agent.id === postCallAgentId).reduce((sum, agent) => sum + agent.cost_per_minute_minor, 0); return <Alert severity={rate > 0 ? 'info' : 'warning'}>API billing rate: <b>{formatMoney(rate, 'INR')}/minute</b>. It is calculated from the selected calling and post-call agent template costs.</Alert> })()}
         <TextField label="Post-call webhook URL (optional)" type="url" value={apiWebhookUrl} onChange={event => setApiWebhookUrl(event.target.value)} fullWidth placeholder="https://your-service.example.com/webhooks/chiefvoice" helperText="After post-call processing finishes, Chiefvoice sends the result to this HTTPS endpoint. A signing secret is shown once after creation." />
         <TextField label="Google Cloud service account JSON" value={apiCredentials} onChange={event => setApiCredentials(event.target.value)} multiline minRows={5} required fullWidth placeholder="Paste the service account JSON for this API's Vertex project" />
         {!voiceAgentId && postCallAgentId && <Alert severity="warning">This API has only a post-call agent assigned. Outbound phone calls require a calling agent.</Alert>}
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiCustomerName.trim() || (!voiceAgentId && !postCallAgentId) || (voiceAgentId && !apiCallingTemplateIds.length) || (postCallAgentId && !apiPostCallTemplateIds.length) || !apiCredentials.trim() || Number(apiBillingAmount) <= 0} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setAssignmentOpen(false)}>Cancel</Button><Button variant="contained" disabled={issueMutation.isPending || !selected.length || !apiCustomerName.trim() || (!voiceAgentId && !postCallAgentId) || !apiCredentials.trim() || Number(apiBillingAmount) <= 0} onClick={submitCreateApi}>{issueMutation.isPending ? 'Creating…' : 'Create API'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={!!oneTimeKey} onClose={() => setOneTimeKey(null)} maxWidth="sm" fullWidth>
@@ -776,13 +754,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           {voiceAgentId && <TextField label="Calling Vertex location for this API" value={voiceLocation} onChange={event => setVoiceLocation(event.target.value)} fullWidth />}
           {postCallAgentId && <TextField label="Post-call Vertex location for this API" value={postCallLocation} onChange={event => setPostCallLocation(event.target.value)} fullWidth />}
         </> })()}
-        <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Allowed reusable templates</Typography>
-        {(() => { const choices = agentTemplatesQuery.data || []; const calling = choices.filter(item => item.kind === 'calling'); const post = choices.filter(item => item.kind === 'post_call'); return <>
-          <FormControl fullWidth><InputLabel id="edit-calling-templates">Calling templates</InputLabel><Select multiple labelId="edit-calling-templates" label="Calling templates" value={apiCallingTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiCallingTemplateIds(ids); if (!ids.includes(apiDefaultCallingTemplateId)) setApiDefaultCallingTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} calling templates assigned`}>{calling.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiCallingTemplateIds.includes(item.id)} /><ListItemText primary={item.name} /></MenuItem>)}</Select></FormControl>
-          {!!apiCallingTemplateIds.length && <FormControl fullWidth><InputLabel id="edit-default-calling">Default calling template</InputLabel><Select labelId="edit-default-calling" label="Default calling template" value={apiDefaultCallingTemplateId} onChange={event => setApiDefaultCallingTemplateId(event.target.value)}>{calling.filter(item => apiCallingTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
-          <FormControl fullWidth><InputLabel id="edit-post-templates">Post-call templates</InputLabel><Select multiple labelId="edit-post-templates" label="Post-call templates" value={apiPostCallTemplateIds} onChange={event => { const ids = typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value; setApiPostCallTemplateIds(ids); if (!ids.includes(apiDefaultPostCallTemplateId)) setApiDefaultPostCallTemplateId(ids[0] || '') }} renderValue={ids => `${ids.length} post-call templates assigned`}>{post.map(item => <MenuItem key={item.id} value={item.id}><Checkbox size="small" checked={apiPostCallTemplateIds.includes(item.id)} /><ListItemText primary={item.name} /></MenuItem>)}</Select></FormControl>
-          {!!apiPostCallTemplateIds.length && <FormControl fullWidth><InputLabel id="edit-default-post">Default post-call template</InputLabel><Select labelId="edit-default-post" label="Default post-call template" value={apiDefaultPostCallTemplateId} onChange={event => setApiDefaultPostCallTemplateId(event.target.value)}>{post.filter(item => apiPostCallTemplateIds.includes(item.id)).map(item => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</Select></FormControl>}
-        </> })()}
+        <Alert severity="info" sx={{ fontSize: 12 }}>Reusable prompt templates are scoped to this API and can be created and managed under the Templates section on the API details page.</Alert>
         <TextField label="Replace Google Cloud service account JSON (optional)" value={apiCredentials} onChange={event => setApiCredentials(event.target.value)} multiline minRows={5} fullWidth placeholder="Saved API credentials are encrypted. Leave blank to keep them." />
         {!voiceAgentId && postCallAgentId && <Alert severity="warning">This API has only a post-call agent assigned. Outbound phone calls require a calling agent.</Alert>}
         <FormControl fullWidth disabled={!managementKey}>
@@ -795,7 +767,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           </Select>
         </FormControl>
       </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || (voiceAgentId && !apiCallingTemplateIds.length) || (postCallAgentId && !apiPostCallTemplateIds.length) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, name: apiName.trim(), tags: parseTags(apiTags), numbers, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim(), recordingAllowed: apiRecordingAllowed, templates: { calling_template_ids: apiCallingTemplateIds, post_call_template_ids: apiPostCallTemplateIds, default_calling_template_id: apiDefaultCallingTemplateId || null, default_post_call_template_id: apiDefaultPostCallTemplateId || null } }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setManagementKey(null)}>Cancel</Button><Button variant="contained" disabled={!managementKey || !selectedNumbers.length || !apiName.trim() || (!voiceAgentId && !postCallAgentId) || manageNumbersMutation.isPending} onClick={() => { if (!managementKey) return; const numbers = currentNumbers.filter(number => selectedNumbers.includes(`${number.provider}|${number.phone_number}`)); manageNumbersMutation.mutate({ key: managementKey, name: apiName.trim(), tags: parseTags(apiTags), numbers, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim(), recordingAllowed: apiRecordingAllowed, templates: { calling_template_ids: apiCallingTemplateIds, post_call_template_ids: apiPostCallTemplateIds, default_calling_template_id: apiDefaultCallingTemplateId || null, default_post_call_template_id: apiDefaultPostCallTemplateId || null } }) }}>{manageNumbersMutation.isPending ? 'Saving…' : 'Save API configuration'}</Button></DialogActions>
     </Dialog>
 
     <Dialog open={agentConfigOpen} onClose={() => setAgentConfigOpen(false)} maxWidth="sm" fullWidth>
