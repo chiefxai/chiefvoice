@@ -889,7 +889,14 @@ async def simulate_api_call(
         raise HTTPException(status_code=422, detail="Simulation currently supports phone calls")
     provider, caller_id = resolve_assigned_sender(key.assigned_numbers, body.caller_id)
     live_template, post_call_template = await _resolve_call_templates(body, key.key_id, request)
-    live_instructions, live_context, _live_tools, template_hangup = _render_live(live_template, body.live_agent)
+    (
+        live_instructions,
+        live_context,
+        _live_tools,
+        template_hangup,
+        live_language,
+        completion_requirements,
+    ) = _render_live(live_template, body.live_agent)
     post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
     coordinator = get_call_coordinator(request)
     try:
@@ -901,6 +908,8 @@ async def simulate_api_call(
             live_agent_template_id=live_template.template_id if live_template else None,
             live_agent_template_revision=live_template.revision if live_template else None,
             live_agent_context=live_context,
+            live_agent_language=live_language,
+            live_agent_completion_requirements=completion_requirements,
             post_call_context=post_context,
             post_call_template_id=post_call_template.template_id if post_call_template else None,
             post_call_template_revision=post_call_template.revision if post_call_template else None,
