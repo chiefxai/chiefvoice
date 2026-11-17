@@ -636,11 +636,19 @@ class GeminiConversationWatchdog(FrameProcessor):
                         "gemini_watchdog_recovery_requires_reconnect",
                         extra=self._log_context(),
                     )
-                recovered = await self._service.recover_unanswered_turn()
-
-            if recovered:
-                logger.info("gemini_watchdog_recovery_requested", extra=self._log_context())
-                await asyncio.sleep(self._recovery_grace)
+                # A recovered Gemini session may emit a stale tool call from
+                # the interrupted turn before it has produced a fresh reply.
+                # Keep completion tool calls gated through the recovery window.
+                self._metadata["gemini_watchdog_recovery_active"] = True
+                try:
+                    recovered = await self._service.recover_unanswered_turn()
+                    if recovered:
+                        logger.info(
+                            "gemini_watchdog_recovery_requested", extra=self._log_context()
+                        )
+                        await asyncio.sleep(self._recovery_grace)
+                finally:
+                    self._metadata.pop("gemini_watchdog_recovery_active", None)
             if (
                 self._closed
                 or turn_id != self._turn_id

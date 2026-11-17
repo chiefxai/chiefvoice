@@ -64,7 +64,7 @@ class Settings:
         "VERTEX_SYSTEM_INSTRUCTION", "You are a helpful, concise voice assistant."
     )
     gemini_response_watchdog_seconds: float = float(
-        os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "3")
+        os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "8")
     )
     gemini_generation_watchdog_seconds: float = float(
         os.getenv("GEMINI_GENERATION_WATCHDOG_SECONDS", "8")

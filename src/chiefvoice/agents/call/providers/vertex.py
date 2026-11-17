@@ -230,6 +230,34 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                         "arguments": arguments,
                     },
                 )
+                reason = str(arguments.get("reason", "completed")).strip().lower()
+                early_exit_reasons = {
+                    "caller_declined",
+                    "caller_requested",
+                    "caller_hung_up",
+                    "cannot_provide",
+                    "inactivity",
+                    "emergency",
+                    "wrong_number",
+                }
+                if (
+                    session.metadata.get("gemini_watchdog_recovery_active")
+                    and not any(value in reason for value in early_exit_reasons)
+                ):
+                    logger.warning(
+                        "call_agent_hangup_rejected_during_gemini_recovery",
+                        extra={"session_id": session.session_id, "provider": session.provider},
+                    )
+                    await params.result_callback({
+                        "success": False,
+                        "reason": "gemini_recovery_in_progress",
+                        "message": (
+                            "Do not end the call while the voice session is recovering. "
+                            "Continue the conversation after recovery and only end it when "
+                            "the requested task is complete."
+                        ),
+                    })
+                    return
                 validation = validate_hangup_request(
                     session, arguments, diagnostics=diagnostics_for_session(session)
                 )
