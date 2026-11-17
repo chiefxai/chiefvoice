@@ -172,6 +172,11 @@ class GeminiConversationWatchdog(FrameProcessor):
         if direction is FrameDirection.DOWNSTREAM and isinstance(frame, UserStartedSpeakingFrame):
             if is_call_terminating:
                 return
+            # A start frame is reliable evidence that the caller interacted even
+            # when the realtime pipeline never emits UserStoppedSpeakingFrame.
+            # Hangup validation must not depend solely on the latter to avoid
+            # rejecting a legitimate completion forever.
+            self._metadata["caller_interaction_seen"] = True
             self._cancel_pending_agent_hangup_on_caller_activity()
             self._caller_is_speaking = True
             self._inactivity_stage = 0  # Reset silence timer & prompt sequence on caller speech
@@ -196,6 +201,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             # activity signal so silence prompts cannot be sent over caller
             # speech, and retain a response watchdog for the missed local turn.
             if not is_call_terminating and frame.text.strip():
+                self._metadata["caller_interaction_seen"] = True
                 self._cancel_pending_agent_hangup_on_caller_activity()
                 self._inactivity_stage = 0
                 self._diagnostics.record_conversation_event(

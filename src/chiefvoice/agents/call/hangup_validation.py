@@ -110,13 +110,19 @@ def validate_hangup_request(
 
     # 2. Check premature interaction (did caller speak at least once?)
     caller_turns = session.metadata.get("caller_turn_count", 0)
-    if caller_turns == 0 and not is_early_exit:
+    caller_interaction_seen = bool(session.metadata.get("caller_interaction_seen"))
+    if caller_turns == 0 and not caller_interaction_seen and not is_early_exit:
         if diagnostics is not None:
             diagnostics.record_conversation_event("hangup_premature_rejected")
             diagnostics.record_conversation_event("hangup_validation_rejected")
         logger.warning(
             "call_agent_hangup_rejected_no_interaction",
-            extra={"session_id": session.session_id, "provider": session.provider},
+            extra={
+                "session_id": session.session_id,
+                "provider": session.provider,
+                "caller_turn_count": caller_turns,
+                "caller_interaction_seen": caller_interaction_seen,
+            },
         )
         return HangupValidationResult(
             allowed=False,
