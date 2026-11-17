@@ -355,6 +355,9 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 "by the live-call instructions. Once all requested information is collected, "
                 f"{completion_guidance}Do not say this sentence before the task is complete. "
                 f"{requirements_guidance}"
+                "If a conditional completion outcome does not match one of the configured "
+                "branches, ask a clarifying question or use an appropriate early-exit reason; "
+                "do not treat it as completed. "
                 "The platform will request hangup after this final audio has drained. Also call "
                 "hang_up_call with reason completed and the collected data when possible. If the "
                 "caller clearly declines, cannot provide a requested item, or asks to end the "
@@ -365,14 +368,6 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             async def hang_up_call(params: FunctionCallParams) -> None:
                 arguments = params.arguments if isinstance(params.arguments, dict) else {}
-                logger.info(
-                    "call_agent_hangup_tool_invoked",
-                    extra={
-                        "session_id": session.session_id,
-                        "provider": session.provider,
-                        "arguments": arguments,
-                    },
-                )
                 reason = str(arguments.get("reason", "completed")).strip().lower()
                 early_exit_reasons = {
                     "caller_declined",
@@ -383,21 +378,58 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     "emergency",
                     "wrong_number",
                 }
-                if (
+                recovery_active = bool(
                     session.metadata.get("gemini_watchdog_recovery_active")
-                    and not any(value in reason for value in early_exit_reasons)
+                )
+                caller_turn_count_value = session.metadata.get("caller_turn_count", 0)
+                recovery_turn_count_value = session.metadata.get(
+                    "gemini_watchdog_recovery_caller_turn_count", 0
+                )
+                caller_turn_count = (
+                    caller_turn_count_value
+                    if type(caller_turn_count_value) is int and caller_turn_count_value >= 0
+                    else 0
+                )
+                recovery_turn_count = (
+                    recovery_turn_count_value
+                    if type(recovery_turn_count_value) is int
+                    and recovery_turn_count_value >= 0
+                    else 0
+                )
+                caller_spoke_during_recovery = caller_turn_count > recovery_turn_count
+                logger.info(
+                    "call_agent_hangup_tool_invoked",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": session.provider,
+                        "reason": reason,
+                        "recovery_active": recovery_active,
+                        "caller_spoke_during_recovery": caller_spoke_during_recovery,
+                    },
+                )
+                if (
+                    recovery_active
+                    and (
+                        not any(value in reason for value in early_exit_reasons)
+                        or not caller_spoke_during_recovery
+                    )
                 ):
                     logger.warning(
                         "call_agent_hangup_rejected_during_gemini_recovery",
-                        extra={"session_id": session.session_id, "provider": session.provider},
+                        extra={
+                            "session_id": session.session_id,
+                            "provider": session.provider,
+                            "reason": reason,
+                            "caller_spoke_during_recovery": caller_spoke_during_recovery,
+                        },
                     )
                     await params.result_callback({
                         "success": False,
                         "reason": "gemini_recovery_in_progress",
                         "message": (
-                            "Do not end the call while the voice session is recovering. "
-                            "Continue the conversation after recovery and only end it when "
-                            "the requested task is complete."
+                            "Do not end the call based on a stale turn while the voice session "
+                            "is recovering. Continue the conversation after recovery. An early "
+                            "exit is allowed only after the caller speaks again during recovery."
                         ),
                     })
                     return
@@ -430,6 +462,20 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                         "message": validation.message,
                     })
                     return
+
+                logger.info(
+                    "call_agent_hangup_validation_passed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": session.provider,
+                        "reason": reason,
+                        "collected_fields": sorted(
+                            session.metadata.get("collected_data", {}).keys()
+                        )
+                        if isinstance(session.metadata.get("collected_data"), dict)
+                        else [],
+                    },
+                )
 
                 callback = session.metadata.get("hang_up_call")
                 if not callable(callback):

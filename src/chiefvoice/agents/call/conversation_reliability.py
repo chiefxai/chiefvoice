@@ -659,6 +659,12 @@ class GeminiConversationWatchdog(FrameProcessor):
                 # the interrupted turn before it has produced a fresh reply.
                 # Keep completion tool calls gated through the recovery window.
                 self._metadata["gemini_watchdog_recovery_active"] = True
+                caller_turn_count = self._metadata.get("caller_turn_count", 0)
+                self._metadata["gemini_watchdog_recovery_caller_turn_count"] = (
+                    caller_turn_count
+                    if type(caller_turn_count) is int and caller_turn_count >= 0
+                    else 0
+                )
                 try:
                     recovered = await self._service.recover_unanswered_turn()
                     if recovered:
@@ -668,6 +674,7 @@ class GeminiConversationWatchdog(FrameProcessor):
                         await asyncio.sleep(self._recovery_grace)
                 finally:
                     self._metadata.pop("gemini_watchdog_recovery_active", None)
+                    self._metadata.pop("gemini_watchdog_recovery_caller_turn_count", None)
             if (
                 self._closed
                 or turn_id != self._turn_id
