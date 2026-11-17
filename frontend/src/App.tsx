@@ -468,12 +468,18 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         ? `${deleteConfirmation.api.customer_name} / ${deleteConfirmation.api.name}`
         : ''
   const deleteConfirmationPhrase = deleteConfirmationLabel ? `DELETE ${deleteConfirmationLabel}` : ''
+  const isDeleteConfirmed = (input: string, phrase: string) => {
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ').replace(/\s*\/\s*/g, '/')
+    const a = norm(input)
+    const b = norm(phrase)
+    return Boolean(a && (a === b || a === 'delete'))
+  }
   const openDeleteConfirmation = (target: DeleteConfirmation) => {
     setDeleteConfirmation(target)
     setDeleteConfirmationText('')
   }
   const confirmDeleteResource = () => {
-    if (!deleteConfirmation || deleteConfirmationText !== deleteConfirmationPhrase) return
+    if (!deleteConfirmation || !isDeleteConfirmed(deleteConfirmationText, deleteConfirmationPhrase)) return
     if (deleteConfirmation.kind === 'number') deleteNumberMutation.mutate(deleteConfirmation.number)
     if (deleteConfirmation.kind === 'agent') deleteAgentConfigMutation.mutate(deleteConfirmation.agent.id)
     if (deleteConfirmation.kind === 'api') deleteApiKeyMutation.mutate(deleteConfirmation.api.id)
@@ -830,12 +836,15 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
               ? 'This removes the phone number from platform inventory and releases it from its API assignment.'
               : 'This removes the agent from active configuration. An agent assigned to an active API cannot be deleted.'}
         </Alert>
-        <Typography variant="body2">Type <code>{deleteConfirmationPhrase}</code> to confirm.</Typography>
-        <TextField autoFocus fullWidth label="Confirmation" value={deleteConfirmationText} onChange={event => setDeleteConfirmationText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && deleteConfirmationText === deleteConfirmationPhrase) confirmDeleteResource() }} />
+        <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
+          <Typography variant="body2">Type <code>{deleteConfirmationPhrase}</code> or <code>DELETE</code> to confirm.</Typography>
+          <Button size="small" variant="text" sx={{ textTransform: 'none', py: 0, minWidth: 0 }} onClick={() => setDeleteConfirmationText(deleteConfirmationPhrase)}>Autofill</Button>
+        </Stack>
+        <TextField autoFocus fullWidth label="Confirmation" value={deleteConfirmationText} onChange={event => setDeleteConfirmationText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && isDeleteConfirmed(deleteConfirmationText, deleteConfirmationPhrase)) confirmDeleteResource() }} />
       </Stack></DialogContent>
       <DialogActions sx={{ p: 2.5 }}>
         <Button disabled={deleteConfirmationPending} onClick={() => { setDeleteConfirmation(null); setDeleteConfirmationText('') }}>Cancel</Button>
-        <Button color="error" variant="contained" disabled={deleteConfirmationText !== deleteConfirmationPhrase || deleteConfirmationPending} onClick={confirmDeleteResource}>{deleteConfirmationPending ? 'Deleting…' : 'Delete'}</Button>
+        <Button color="error" variant="contained" disabled={!isDeleteConfirmed(deleteConfirmationText, deleteConfirmationPhrase) || deleteConfirmationPending} onClick={confirmDeleteResource}>{deleteConfirmationPending ? 'Deleting…' : 'Delete'}</Button>
       </DialogActions>
     </Dialog>
 
