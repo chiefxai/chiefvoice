@@ -797,7 +797,10 @@ class SqlPostCallQueue:
                     pinned_url,
                     content=body_bytes,
                     headers={**headers, "Host": parsed_target.hostname},
-                    extensions={"sni_hostname": parsed_target.hostname.encode("ascii")},
+                    # httpcore passes this hostname to AnyIO's TLS connector,
+                    # whose IDNA resolver expects str and encodes it itself.
+                    # Supplying bytes raises AttributeError in idna2008_resolve.
+                    extensions={"sni_hostname": parsed_target.hostname},
                 )
                 response = await client.send(request, stream=True)
                 status_code = response.status_code
