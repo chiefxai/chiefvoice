@@ -84,11 +84,12 @@ type AgentConfiguration = {
   tags: string[]
 }
 type AgentPromptTemplate = {
-  id: string; kind: 'calling' | 'post_call'; name: string; instructions: string
+  id: string; api_key_id?: string | null; kind: 'calling' | 'post_call'; name: string; instructions: string
   tools: { type: 'builtin'; name: string }[]; variables: Record<string, unknown>
-  settings: Record<string, unknown>; revision: number; enabled: boolean
+  settings: Record<string, unknown>; revision: number; enabled: boolean; is_default?: boolean
 }
 type ApiAgentTemplates = {
+  items?: AgentPromptTemplate[]
   calling: AgentPromptTemplate[]; post_call: AgentPromptTemplate[]
   default_calling_id: string | null; default_post_call_id: string | null
 }
@@ -153,6 +154,10 @@ const api = {
   updateAgentTemplate: (id: string, data: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'>) => http.put<AgentPromptTemplate>(`/v1/admin/customers/agent-templates/${id}`, data).then(r => r.data),
   deleteAgentTemplate: (id: string) => http.delete(`/v1/admin/customers/agent-templates/${id}`),
   apiAgentTemplates: (id: string) => http.get<ApiAgentTemplates>(`/v1/admin/customers/api-keys/${id}/agent-templates`).then(r => r.data),
+  createApiAgentTemplate: (id: string, data: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'>) => http.post<AgentPromptTemplate>(`/v1/admin/customers/api-keys/${id}/agent-templates`, data).then(r => r.data),
+  updateApiAgentTemplate: (id: string, templateId: string, data: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'>) => http.put<AgentPromptTemplate>(`/v1/admin/customers/api-keys/${id}/agent-templates/${templateId}`, data).then(r => r.data),
+  deleteApiAgentTemplate: (id: string, templateId: string) => http.delete(`/v1/admin/customers/api-keys/${id}/agent-templates/${templateId}`),
+  setDefaultApiAgentTemplate: (id: string, templateId: string) => http.post<ApiAgentTemplates>(`/v1/admin/customers/api-keys/${id}/agent-templates/${templateId}/default`).then(r => r.data),
   setApiAgentTemplates: (id: string, data: { calling_template_ids: string[]; post_call_template_ids: string[]; default_calling_template_id: string | null; default_post_call_template_id: string | null }) => http.put<ApiAgentTemplates>(`/v1/admin/customers/api-keys/${id}/agent-templates`, data).then(r => r.data),
   apiCalls: (id: string, limit = 50, offset = 0) => http.get<{ items: ApiCallLog[]; total: number }>(`/v1/admin/customers/api-keys/${id}/calls`, { params: { limit, offset } }).then(r => r.data),
   apiCallDetail: (id: string, sessionId: string) => http.get<ApiCallDetail>(`/v1/admin/customers/api-keys/${id}/calls/${sessionId}`).then(r => r.data),
@@ -647,7 +652,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         {page === 'API' && (apiDetailId
           ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsTotal={apiCallsQuery.data?.total || 0} callsPage={apiCallsPage} callsPageSize={apiCallsPageSize} onCallsPageChange={setApiCallsPage} onCallsPageSizeChange={size => { setApiCallsPageSize(size); setApiCallsPage(0) }} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onBack={() => navigate(pagePaths.API)} onEdit={key => openEditApi(key)} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} />
           : <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
-        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} templates={agentTemplatesQuery.data || []} templatesLoading={agentTemplatesQuery.isLoading} templatesError={agentTemplatesQuery.error} />}
+        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
         {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={setSimulationProfileId} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} templates={simulationAgentTemplatesQuery.data} templatesLoading={simulationAgentTemplatesQuery.isLoading} callingTemplateId={simulationCallingTemplateId} onCallingTemplateChange={setSimulationCallingTemplateId} postCallTemplateId={simulationPostCallTemplateId} onPostCallTemplateChange={setSimulationPostCallTemplateId} />}
         {page === 'Docs' && <DocsPage />}
       </div>
@@ -890,6 +895,8 @@ function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal
         </Stack>
       </Card>
 
+      <ApiTemplatesSection apiId={apiKey.id} />
+
       <Card className="surface-card" sx={{ overflow: 'hidden' }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'center' }} justifyContent="space-between" gap={1} sx={{ px: { xs: 2, md: 3 }, pt: { xs: 2, md: 2.5 }, pb: 2 }}>
           <Stack gap={0.35}><Stack direction="row" alignItems="center" gap={1}><Typography variant="h6" sx={{ fontWeight: 800 }}>Call history</Typography><Chip size="small" label={callsTotal} /></Stack><Typography variant="body2" color="text.secondary">Review call outcomes and open a call to see its recording, transcript, and extracted result.</Typography></Stack>
@@ -988,18 +995,23 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
   </Card>
 }
 
-function AgentsPage({ agents, loading, error, onEdit, onCreate, onDelete, templates, templatesLoading, templatesError }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onCreate: () => void; onDelete: (agent: AgentConfiguration) => void; templates: AgentPromptTemplate[]; templatesLoading: boolean; templatesError: unknown }) {
-  return <><PageIntro eyebrow="AGENT CONFIGURATION" title="Agents" subtitle="Create platform-owned calling and post-call templates with provider, model, default location, and cost." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate}>Create agent</Button>} />
+function AgentsPage({ agents, loading, error, onEdit, onCreate, onDelete }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onCreate: () => void; onDelete: (agent: AgentConfiguration) => void }) {
+  return <><PageIntro eyebrow="AGENT CONFIGURATION" title="Agents" subtitle="Create platform-owned calling and post-call configurations with provider, model, default location, and cost." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate}>Create agent</Button>} />
     <Alert severity="info" sx={{ mt: 2 }}>Google Vertex AI is currently available for calling and post-call agents. API credentials and location overrides are configured on each API.</Alert>
     <Card className="surface-card" sx={{ mt: 2 }}>
       {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : agents.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 980 }}><TableHead><TableRow>{['Agent', 'Type', 'Provider / model', 'Default location', 'Cost / minute', 'Auto hang-up', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{agents.map(agent => <TableRow key={agent.id} hover><TableCell className="table-cell"><b>{agent.name}</b><TagChips tags={agent.tags || []} /></TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{agent.provider} · {agent.model}</TableCell><TableCell className="table-cell">{agent.location}</TableCell><TableCell className="table-cell">{formatMoney(agent.cost_per_minute_minor, agent.currency)}/min</TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? <StatusChip enabled={agent.auto_hangup_when_complete} label={agent.auto_hangup_when_complete ? 'enabled' : 'disabled'} /> : '—'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(agent)}>Edit</Button><Button size="small" color="error" onClick={() => onDelete(agent)}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create calling or post-call agents first, then assign them to an API.</div><Button variant="contained" sx={{ mt: 2 }} onClick={onCreate}>Create agent</Button></div>}
     </Card>
-    <PromptTemplatesPanel templates={templates} loading={templatesLoading} error={templatesError} />
   </>
 }
 
-function PromptTemplatesPanel({ templates, loading, error }: { templates: AgentPromptTemplate[]; loading: boolean; error: unknown }) {
+function ApiTemplatesSection({ apiId }: { apiId: string }) {
   const queryClient = useQueryClient()
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['api-agent-templates', apiId],
+    queryFn: () => api.apiAgentTemplates(apiId),
+    enabled: Boolean(apiId),
+  })
+
   const [editing, setEditing] = useState<AgentPromptTemplate | null>(null)
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
@@ -1008,59 +1020,288 @@ function PromptTemplatesPanel({ templates, loading, error }: { templates: AgentP
   const [tools, setTools] = useState<string[]>([])
   const [variablesJson, setVariablesJson] = useState('{}')
   const [settingsJson, setSettingsJson] = useState('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
+  const [isDefault, setIsDefault] = useState(false)
   const [formError, setFormError] = useState('')
+
   const saveMutation = useMutation({
-    mutationFn: (value: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'>) => editing ? api.updateAgentTemplate(editing.id, value) : api.createAgentTemplate(value),
-    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-agent-templates'] }); setOpen(false); setFormError('') },
+    mutationFn: (value: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'> & { is_default?: boolean }) =>
+      editing
+        ? api.updateApiAgentTemplate(apiId, editing.id, value)
+        : api.createApiAgentTemplate(apiId, value),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['api-agent-templates', apiId] })
+      setOpen(false)
+      setFormError('')
+    },
     onError: err => setFormError(errorText(err)),
   })
+
   const deleteMutation = useMutation({
-    mutationFn: api.deleteAgentTemplate,
-    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['platform-agent-templates'] }) },
-    onError: err => setFormError(errorText(err)),
+    mutationFn: (templateId: string) => api.deleteApiAgentTemplate(apiId, templateId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['api-agent-templates', apiId] })
+    },
+    onError: err => alert(errorText(err)),
   })
+
+  const setDefaultMutation = useMutation({
+    mutationFn: (templateId: string) => api.setDefaultApiAgentTemplate(apiId, templateId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['api-agent-templates', apiId] })
+    },
+    onError: err => alert(errorText(err)),
+  })
+
   const openNew = () => {
-    setEditing(null); setName(''); setKind('calling'); setInstructions(''); setTools([])
-    setVariablesJson('{}'); setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
-    setFormError(''); setOpen(true)
+    setEditing(null)
+    setName('')
+    setKind('calling')
+    setInstructions('')
+    setTools([])
+    setVariablesJson('{}')
+    setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
+    setIsDefault(false)
+    setFormError('')
+    setOpen(true)
   }
+
   const openEdit = (item: AgentPromptTemplate) => {
-    setEditing(item); setName(item.name); setKind(item.kind); setInstructions(item.instructions)
-    setTools(item.tools.map(tool => tool.name)); setVariablesJson(JSON.stringify(item.variables, null, 2))
-    setSettingsJson(JSON.stringify(item.settings, null, 2)); setFormError(''); setOpen(true)
+    setEditing(item)
+    setName(item.name)
+    setKind(item.kind)
+    setInstructions(item.instructions)
+    setTools(item.tools.map(tool => tool.name))
+    setVariablesJson(JSON.stringify(item.variables, null, 2))
+    setSettingsJson(JSON.stringify(item.settings, null, 2))
+    setIsDefault(Boolean(item.is_default))
+    setFormError('')
+    setOpen(true)
   }
+
   const save = () => {
     try {
       const variables = JSON.parse(variablesJson)
       const settings = JSON.parse(settingsJson)
-      if (!variables || Array.isArray(variables) || typeof variables !== 'object') throw new Error('Variables must be a JSON object.')
-      if (!settings || Array.isArray(settings) || typeof settings !== 'object') throw new Error('Settings must be a JSON object.')
-      saveMutation.mutate({ name: name.trim(), kind, instructions: instructions.trim(), tools: tools.map(tool => ({ type: 'builtin', name: tool })), variables, settings })
-    } catch (err) { setFormError(err instanceof Error ? err.message : 'Check the JSON fields.') }
+      if (!variables || Array.isArray(variables) || typeof variables !== 'object') {
+        throw new Error('Variables must be a JSON object.')
+      }
+      if (!settings || Array.isArray(settings) || typeof settings !== 'object') {
+        throw new Error('Settings must be a JSON object.')
+      }
+      saveMutation.mutate({
+        name: name.trim(),
+        kind,
+        instructions: instructions.trim(),
+        tools: tools.map(tool => ({ type: 'builtin', name: tool })),
+        variables,
+        settings,
+        is_default: isDefault,
+      })
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Check the JSON fields.')
+    }
   }
+
+  const allTemplates = [
+    ...(data?.calling || []),
+    ...(data?.post_call || []),
+  ]
   const allowedTools = kind === 'calling' ? ['end_call'] : ['calculator', 'time']
-  return <>
-    <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
-      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1.5}>
-        <div><Typography variant="h6" sx={{ fontWeight: 800 }}>Reusable prompt templates</Typography><Typography variant="body2" color="text.secondary">Instructions, tools, and placeholders reused by API customers. Select templates in API configuration.</Typography></div>
-        <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openNew}>Create template</Button>
-      </Stack>
-      {loading ? <CircularProgress size={22} sx={{ mt: 2 }} /> : error ? <Alert severity="error" sx={{ mt: 2 }}>{errorText(error)}</Alert> : templates.length ? <TableContainer sx={{ mt: 2, overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 760 }}><TableHead><TableRow>{['Template', 'Kind', 'Tools', 'Revision', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{templates.map(item => <TableRow key={item.id}><TableCell className="table-cell"><b>{item.name}</b><br /><Typography variant="caption"><code>{item.id}</code></Typography></TableCell><TableCell className="table-cell">{item.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{item.tools.map(tool => tool.name).join(', ') || 'None'}</TableCell><TableCell className="table-cell">v{item.revision}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => openEdit(item)}>Edit</Button><Button size="small" color="error" onClick={() => { if (window.confirm(`Disable template “${item.name}”?`)) deleteMutation.mutate(item.id) }}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state" style={{ marginTop: 18 }}>No reusable prompt templates yet. Create a calling or post-call template to use it across API customers.</div>}
-    </Card>
-    <Dialog open={open} onClose={() => setOpen(false)} maxWidth="md" fullWidth>
-      <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>{editing ? 'Edit reusable template' : 'Create reusable template'}</DialogTitle>
-      <DialogContent><Stack gap={2} sx={{ mt: 1 }}>
-        {formError && <Alert severity="error">{formError}</Alert>}
-        <TextField label="Template name" value={name} onChange={event => setName(event.target.value)} required fullWidth />
-        <FormControl fullWidth disabled={Boolean(editing)}><InputLabel id="prompt-template-kind">Agent kind</InputLabel><Select labelId="prompt-template-kind" label="Agent kind" value={kind} onChange={event => { const next = event.target.value as 'calling' | 'post_call'; setKind(next); setTools([]); if (next === 'post_call') setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}'); else setSettingsJson('{}') }}><MenuItem value="calling">Calling agent</MenuItem><MenuItem value="post_call">Post-call agent</MenuItem></Select></FormControl>
-        <TextField label="Instructions" value={instructions} onChange={event => setInstructions(event.target.value)} multiline minRows={5} required fullWidth helperText="Use placeholders like {{patient_name}} and declare them in Variables below." />
-        <Stack direction="row" gap={1} flexWrap="wrap">{allowedTools.map(tool => <Chip key={tool} clickable color={tools.includes(tool) ? 'primary' : 'default'} variant={tools.includes(tool) ? 'filled' : 'outlined'} label={tool} onClick={() => setTools(current => current.includes(tool) ? current.filter(item => item !== tool) : [...current, tool])} />)}</Stack>
-        <TextField label="Variables (JSON object)" value={variablesJson} onChange={event => setVariablesJson(event.target.value)} multiline minRows={4} fullWidth helperText={'Example: { "patient_name": { "type": "string", "required": true } }'} />
-        <TextField label="Template settings (JSON object)" value={settingsJson} onChange={event => setSettingsJson(event.target.value)} multiline minRows={3} fullWidth helperText={kind === 'post_call' ? 'Optional defaults: time_zone, time_format, output_schema.' : 'Optional: auto_hangup_when_complete.'} />
-      </Stack></DialogContent>
-      <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="contained" disabled={saveMutation.isPending || !name.trim() || !instructions.trim()} onClick={save}>{saveMutation.isPending ? 'Saving…' : 'Save template'}</Button></DialogActions>
-    </Dialog>
-  </>
+
+  return (
+    <>
+      <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1.5} sx={{ mb: 2 }}>
+          <div>
+            <Stack direction="row" alignItems="center" gap={1}>
+              <Typography variant="h6" sx={{ fontWeight: 800 }}>Reusable prompt templates</Typography>
+              <Chip size="small" label={allTemplates.length} />
+            </Stack>
+            <Typography variant="body2" color="text.secondary">
+              Templates owned by this API. Define prompt instructions, placeholders, tools, and output extraction schemas.
+            </Typography>
+          </div>
+          <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openNew}>
+            Create template
+          </Button>
+        </Stack>
+
+        {isLoading ? (
+          <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={24} /></Stack>
+        ) : error ? (
+          <Alert severity="error">{errorText(error)}</Alert>
+        ) : allTemplates.length ? (
+          <TableContainer sx={{ overflowX: 'auto' }}>
+            <Table size="small" sx={{ minWidth: 780 }}>
+              <TableHead>
+                <TableRow>
+                  {['Template', 'Type', 'Default', 'Tools', 'Revision', ''].map(label => (
+                    <TableCell className="table-head" key={label}>{label}</TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {allTemplates.map(item => {
+                  const isDefaultTemplate =
+                    (item.kind === 'calling' && data?.default_calling_id === item.id) ||
+                    (item.kind === 'post_call' && data?.default_post_call_id === item.id) ||
+                    Boolean(item.is_default)
+
+                  return (
+                    <TableRow key={item.id} hover>
+                      <TableCell className="table-cell">
+                        <b>{item.name}</b>
+                        <br />
+                        <Typography variant="caption" color="text.secondary">
+                          <code>{item.id}</code>
+                        </Typography>
+                      </TableCell>
+                      <TableCell className="table-cell">
+                        <Chip
+                          size="small"
+                          label={item.kind === 'calling' ? 'Calling' : 'Post-call'}
+                          variant="outlined"
+                          color={item.kind === 'calling' ? 'primary' : 'secondary'}
+                        />
+                      </TableCell>
+                      <TableCell className="table-cell">
+                        {isDefaultTemplate ? (
+                          <Chip size="small" color="success" label={`Default ${item.kind === 'calling' ? 'calling' : 'post-call'}`} />
+                        ) : (
+                          <Button
+                            size="small"
+                            variant="text"
+                            disabled={setDefaultMutation.isPending}
+                            onClick={() => setDefaultMutation.mutate(item.id)}
+                          >
+                            Set default
+                          </Button>
+                        )}
+                      </TableCell>
+                      <TableCell className="table-cell">
+                        {item.tools.length ? item.tools.map(tool => tool.name).join(', ') : 'None'}
+                      </TableCell>
+                      <TableCell className="table-cell">v{item.revision}</TableCell>
+                      <TableCell className="table-cell" align="right">
+                        <Button size="small" onClick={() => openEdit(item)}>Edit</Button>
+                        <Button
+                          size="small"
+                          color="error"
+                          disabled={deleteMutation.isPending}
+                          onClick={() => {
+                            if (window.confirm(`Delete template “${item.name}” from this API?`)) {
+                              deleteMutation.mutate(item.id)
+                            }
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        ) : (
+          <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 4 }}>
+            <Typography sx={{ fontWeight: 700 }}>No templates owned by this API</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Create a calling or post-call prompt template for this API to get started.
+            </Typography>
+            <Button variant="outlined" startIcon={<AddRoundedIcon />} onClick={openNew} sx={{ mt: 1 }}>
+              Create template
+            </Button>
+          </Stack>
+        )}
+      </Card>
+
+      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>
+          {editing ? 'Edit template' : 'Create template for this API'}
+        </DialogTitle>
+        <DialogContent>
+          <Stack gap={2} sx={{ mt: 1 }}>
+            {formError && <Alert severity="error">{formError}</Alert>}
+            <TextField label="Template name" value={name} onChange={event => setName(event.target.value)} required fullWidth />
+            <FormControl fullWidth disabled={Boolean(editing)}>
+              <InputLabel id="api-template-kind">Agent type</InputLabel>
+              <Select
+                labelId="api-template-kind"
+                label="Agent type"
+                value={kind}
+                onChange={event => {
+                  const next = event.target.value as 'calling' | 'post_call'
+                  setKind(next)
+                  setTools([])
+                  if (next === 'post_call') {
+                    setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
+                  } else {
+                    setSettingsJson('{}')
+                  }
+                }}
+              >
+                <MenuItem value="calling">Calling agent</MenuItem>
+                <MenuItem value="post_call">Post-call agent</MenuItem>
+              </Select>
+            </FormControl>
+            <TextField
+              label="Instructions"
+              value={instructions}
+              onChange={event => setInstructions(event.target.value)}
+              multiline
+              minRows={5}
+              required
+              fullWidth
+              helperText="Use placeholders like {{patient_name}} and declare them in Variables below."
+            />
+            <Stack direction="row" gap={1} flexWrap="wrap">
+              {allowedTools.map(tool => (
+                <Chip
+                  key={tool}
+                  clickable
+                  color={tools.includes(tool) ? 'primary' : 'default'}
+                  variant={tools.includes(tool) ? 'filled' : 'outlined'}
+                  label={tool}
+                  onClick={() => setTools(curr => curr.includes(tool) ? curr.filter(i => i !== tool) : [...curr, tool])}
+                />
+              ))}
+            </Stack>
+            <TextField
+              label="Variables (JSON object)"
+              value={variablesJson}
+              onChange={event => setVariablesJson(event.target.value)}
+              multiline
+              minRows={4}
+              fullWidth
+              helperText={'Example: { "patient_name": { "type": "string", "required": true } }'}
+            />
+            <TextField
+              label="Template settings (JSON object)"
+              value={settingsJson}
+              onChange={event => setSettingsJson(event.target.value)}
+              multiline
+              minRows={3}
+              fullWidth
+              helperText={kind === 'post_call' ? 'Optional defaults: time_zone, time_format, output_schema.' : 'Optional: auto_hangup_when_complete.'}
+            />
+            {!editing && (
+              <FormControlLabel
+                control={<Switch checked={isDefault} onChange={event => setIsDefault(event.target.checked)} />}
+                label={`Set as default ${kind === 'calling' ? 'calling' : 'post-call'} template for this API`}
+              />
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2.5 }}>
+          <Button onClick={() => setOpen(false)}>Cancel</Button>
+          <Button variant="contained" disabled={saveMutation.isPending || !name.trim() || !instructions.trim()} onClick={save}>
+            {saveMutation.isPending ? 'Saving…' : 'Save template'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  )
 }
 
 function SimulationPage(props: {

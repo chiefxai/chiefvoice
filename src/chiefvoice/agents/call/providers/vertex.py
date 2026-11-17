@@ -72,6 +72,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
         from chiefvoice.agents.call.audio_diagnostics import diagnostics_for_session
         from chiefvoice.agents.call.gemini_reliability import reliable_vertex_service_class
+        from chiefvoice.agents.call.hangup_validation import validate_hangup_request
 
         service_type = "vertex"
         model = self.model
@@ -204,11 +205,46 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             )
 
             async def hang_up_call(params: FunctionCallParams) -> None:
-                callback = session.metadata.get("hang_up_call")
+                arguments = params.arguments if isinstance(params.arguments, dict) else {}
                 logger.info(
                     "call_agent_hangup_tool_invoked",
-                    extra={"session_id": session.session_id, "provider": session.provider},
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": session.provider,
+                        "arguments": arguments,
+                    },
                 )
+                validation = validate_hangup_request(
+                    session, arguments, diagnostics=diagnostics_for_session(session)
+                )
+                if not validation.allowed:
+                    logger.warning(
+                        "call_agent_hangup_rejected",
+                        extra={
+                            "session_id": session.session_id,
+                            "reason": validation.reason,
+                            "error": validation.error,
+                            "missing_fields": validation.missing_fields,
+                        },
+                    )
+                    await params.result_callback({
+                        "success": False,
+                        "error": validation.error or "validation_failed",
+                        "reason": validation.reason or "rejected",
+                        "missing_fields": validation.missing_fields or [],
+                        "message": validation.message or "Hangup request rejected by server validation.",
+                    })
+                    return
+
+                if validation.status == "already_terminating":
+                    await params.result_callback({
+                        "success": True,
+                        "status": "already_terminating",
+                        "message": validation.message,
+                    })
+                    return
+
+                callback = session.metadata.get("hang_up_call")
                 if not callable(callback):
                     logger.warning(
                         "call_agent_hangup_unavailable",
@@ -230,8 +266,28 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             tools = ToolsSchema(standard_tools=[FunctionSchema(
                 name="hang_up_call",
-                description="End the current phone call after the requested information has been collected and the caller has been thanked.",
-                properties={},
+                description=(
+                    "End the current phone call after all requested mandatory information has been "
+                    "collected and the caller has been thanked, or if the caller clearly declines "
+                    "or requests to end the call."
+                ),
+                properties={
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Reason for ending the call: 'completed' (all requested fields collected), "
+                            "'caller_declined', 'caller_requested', 'cannot_provide', or 'inactivity'."
+                        ),
+                    },
+                    "collected_data": {
+                        "type": "object",
+                        "description": "Key-value dictionary of mandatory fields and data collected during the call.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Brief summary of the outcome before ending the call.",
+                    },
+                },
                 required=[],
                 handler=hang_up_call,
             )])

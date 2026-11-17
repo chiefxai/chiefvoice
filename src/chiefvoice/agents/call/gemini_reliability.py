@@ -490,6 +490,38 @@ def reliable_vertex_service_class(
                 )
                 return False
 
+        async def prompt_caller_inactivity(self, text: str) -> bool:
+            """Prompt Gemini to speak an inactivity / follow-up message to the caller."""
+            if self._disconnecting or self._chiefvoice_fallback_active:
+                return False
+            try:
+                if not self._session or not self._ready_for_realtime_input:
+                    return False
+                if self._bot_is_responding:
+                    return False
+                await self._session.send_realtime_input(text=text)
+                logger.info(
+                    "gemini_caller_inactivity_prompt_sent",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "prompt": text,
+                    },
+                )
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "gemini_caller_inactivity_prompt_failed",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "error_type": type(error).__name__,
+                    },
+                )
+                return False
+
         async def play_fallback_and_hangup(self) -> bool:
             """Play the packaged/configured PCM fallback once, then end the call."""
             if self._chiefvoice_fallback_active:

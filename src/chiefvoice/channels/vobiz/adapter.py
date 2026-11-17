@@ -560,6 +560,7 @@ class VobizAdapter:
 
         async def hang_up_after_audio_drain() -> None:
             await agent_hangup_request.wait()
+            session.metadata["call_terminating"] = True
             logger.info(
                 "vobiz_agent_hangup_waiting_for_audio_drain",
                 extra={"session_id": session.session_id, "provider": self.provider},
@@ -571,11 +572,20 @@ class VobizAdapter:
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         raise TimeoutError
+                    # If Gemini is actively generating or bot audio is still playing,
+                    # allow the closing audio turn to finish delivery.
+                    if session.metadata.get("gemini_is_generating") or session.metadata.get("bot_audio_playing"):
+                        await asyncio.sleep(min(0.1, max(0.01, remaining)))
+                        continue
                     await asyncio.wait_for(bot_speech_drained.wait(), timeout=remaining)
                     # Require a short stable-quiet interval to catch a
                     # speech-start frame still travelling through the pipeline.
                     await asyncio.sleep(min(AGENT_HANGUP_AUDIO_QUIET_SECONDS, remaining))
-                    if bot_speech_drained.is_set():
+                    if (
+                        bot_speech_drained.is_set()
+                        and not session.metadata.get("gemini_is_generating")
+                        and not session.metadata.get("bot_audio_playing")
+                    ):
                         break
             except TimeoutError:
                 logger.warning(
@@ -591,6 +601,9 @@ class VobizAdapter:
                     "vobiz_agent_hangup_audio_drained",
                     extra={"session_id": session.session_id, "provider": self.provider},
                 )
+                diagnostics = session.metadata.get("call_audio_diagnostics")
+                if isinstance(diagnostics, CallAudioDiagnostics):
+                    diagnostics.record_conversation_event("closing_audio_drain_completed")
             try:
                 await self.hangup(session, "agent_completed")
             except Exception as exc:
@@ -739,6 +752,14 @@ class VobizAdapter:
                     self._active_media_sessions.pop(session.session_id, None)
 
     async def hangup(self, session: AcceptedSession, reason: str | None = None) -> None:
+        if session.metadata.get("provider_call_terminated"):
+            logger.info(
+                "vobiz_call_hangup_already_completed",
+                extra={"session_id": session.session_id, "provider": self.provider, "reason": reason},
+            )
+            return
+        session.metadata["provider_call_terminated"] = True
+        session.metadata["call_terminating"] = True
         if not session.provider_call_id:
             logger.error(
                 "vobiz_hangup_missing_call_id",
@@ -769,7 +790,10 @@ class VobizAdapter:
             response = await client.delete(
                 endpoint, headers=self._auth_headers(auth_id, auth_token)
             )
-            response.raise_for_status()
+            # Idempotent deletion: 404/410 means call was already hung up on the provider
+            if response.status_code not in (200, 202, 204, 404, 410):
+                response.raise_for_status()
+        session.metadata["call_terminated"] = True
         logger.info(
             "vobiz_call_hangup_completed",
             extra={

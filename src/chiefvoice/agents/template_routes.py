@@ -61,6 +61,7 @@ def _validate_settings(body: AgentTemplateBody) -> dict:
 def _serialize(template: AgentTemplate) -> dict:
     return {
         "id": template.template_id,
+        "api_key_id": template.api_key_id,
         "kind": template.kind,
         "name": template.name,
         "instructions": template.instructions,
@@ -69,12 +70,19 @@ def _serialize(template: AgentTemplate) -> dict:
         "settings": template.settings,
         "revision": template.revision,
         "enabled": template.enabled,
+        "is_default": template.is_default,
         "created_at": template.created_at.isoformat(),
         "updated_at": template.updated_at.isoformat(),
     }
 
 
-def _to_template(template_id: str, body: AgentTemplateBody, revision: int = 1) -> AgentTemplate:
+def _to_template(
+    template_id: str,
+    body: AgentTemplateBody,
+    revision: int = 1,
+    api_key_id: str | None = None,
+    is_default: bool = False,
+) -> AgentTemplate:
     now = datetime.now(UTC)
     return AgentTemplate(
         template_id=template_id,
@@ -88,6 +96,8 @@ def _to_template(template_id: str, body: AgentTemplateBody, revision: int = 1) -
         enabled=True,
         created_at=now,
         updated_at=now,
+        api_key_id=api_key_id,
+        is_default=is_default,
     )
 
 
@@ -194,11 +204,101 @@ async def get_api_template_assignments(
         raise HTTPException(status_code=404, detail="API key not found")
     assignments = await _directory(request).list_api_assignments(key_id)
     return {
+        "items": [_serialize(item) for item in assignments.get("items", [])],
         "calling": [_serialize(item) for item in assignments["calling"]],
         "post_call": [_serialize(item) for item in assignments["post_call"]],
         "default_calling_id": assignments["default_calling_id"],
         "default_post_call_id": assignments["default_post_call_id"],
     }
+
+
+@router.post("/api-keys/{key_id}/agent-templates", status_code=status.HTTP_201_CREATED)
+async def create_api_agent_template(
+    key_id: str,
+    body: AgentTemplateBody,
+    request: Request,
+    principal: Annotated[Principal, Security(_admin("platform:customers:write"))],
+):
+    del principal
+    api_keys = getattr(request.app.state, "api_key_directory", None)
+    key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None) if api_keys else None
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    try:
+        created = await _directory(request).create_for_api(
+            key_id,
+            _to_template(new_template_id(), body, api_key_id=key_id, is_default=body.is_default),
+            is_default=body.is_default,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _serialize(created)
+
+
+@router.get("/api-keys/{key_id}/agent-templates/{template_id}")
+async def get_api_agent_template(
+    key_id: str,
+    template_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(_admin("platform:customers:read"))],
+):
+    del principal
+    template = await _directory(request).get_for_api(key_id, template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail="Template not found for this API")
+    return _serialize(template)
+
+
+@router.put("/api-keys/{key_id}/agent-templates/{template_id}")
+async def update_api_agent_template(
+    key_id: str,
+    template_id: str,
+    body: AgentTemplateBody,
+    request: Request,
+    principal: Annotated[Principal, Security(_admin("platform:customers:write"))],
+):
+    del principal
+    directory = _directory(request)
+    current = await directory.get_for_api(key_id, template_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Template not found for this API")
+    if current.kind != body.kind:
+        raise HTTPException(status_code=422, detail="Template kind cannot be changed")
+    try:
+        updated = await directory.update_for_api(
+            key_id,
+            template_id,
+            _to_template(template_id, body, current.revision + 1, api_key_id=key_id, is_default=current.is_default),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Template not found for this API")
+    return _serialize(updated)
+
+
+@router.delete("/api-keys/{key_id}/agent-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_api_agent_template(
+    key_id: str,
+    template_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(_admin("platform:customers:write"))],
+):
+    del principal
+    if not await _directory(request).delete_for_api(key_id, template_id):
+        raise HTTPException(status_code=404, detail="Template not found for this API")
+
+
+@router.post("/api-keys/{key_id}/agent-templates/{template_id}/default")
+async def set_default_api_agent_template(
+    key_id: str,
+    template_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(_admin("platform:customers:write"))],
+):
+    if not await _directory(request).set_default_for_api(key_id, template_id):
+        raise HTTPException(status_code=404, detail="Template not found for this API")
+    return await get_api_template_assignments(key_id, request, principal)
 
 
 @router.put("/api-keys/{key_id}/agent-templates")

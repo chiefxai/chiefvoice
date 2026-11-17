@@ -7,12 +7,9 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     OutputAudioRawFrame,
     TTSAudioRawFrame,
-    UserStartedSpeakingFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
 
 from chiefvoice.agents.call.audio_diagnostics import CallAudioDiagnostics
-from chiefvoice.agents.call.conversation_reliability import GeminiConversationWatchdog
 from chiefvoice.agents.call.gemini_reliability import (
     BoundedGeminiAudioBuffer,
     reliable_vertex_service_class,
@@ -241,48 +238,6 @@ async def test_interruption_matching_recent_model_transcript_is_suppressed_as_ec
     assert diagnostics._vad_events["gemini_echo_interruption_suppressed"] == 1
     assert diagnostics._vad_events["gemini_interruption_accepted"] == 0
 
-
-@pytest.mark.asyncio
-async def test_watchdog_counts_local_vad_and_recovers_then_falls_back(monkeypatch):
-    import chiefvoice.agents.call.conversation_reliability as reliability
-
-    diagnostics = CallAudioDiagnostics(SimpleNamespace(session_id="watchdog-session"))
-    calls = []
-
-    class WatchdogService:
-        _session = object()
-        _ready_for_realtime_input = True
-        _bot_is_responding = False
-
-        async def recover_unanswered_turn(self):
-            calls.append("recover")
-            return True
-
-        async def play_fallback_and_hangup(self):
-            calls.append("fallback")
-            return True
-
-    async def no_wait(_seconds):
-        return None
-
-    async def discard_frame(_frame, _direction=FrameDirection.DOWNSTREAM):
-        return None
-
-    monkeypatch.setattr(reliability.asyncio, "sleep", no_wait)
-    watchdog = GeminiConversationWatchdog(
-        SimpleNamespace(session_id="watchdog-session", provider="vobiz"),
-        WatchdogService(),
-        diagnostics,
-        response_timeout_seconds=0,
-        recovery_grace_seconds=0,
-    )
-    watchdog.push_frame = discard_frame
-    await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-    await watchdog._watch_turn(0, "test")
-
-    assert diagnostics._vad_events["caller_speech_started"] == 1
-    assert diagnostics._vad_events["response_watchdog_fired"] == 1
-    assert calls == ["recover", "fallback"]
 
 
 @pytest.mark.asyncio

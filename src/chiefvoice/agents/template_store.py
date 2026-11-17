@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, delete, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,9 @@ class AgentTemplateRow(Base):
     __tablename__ = "agent_templates"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    api_key_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
@@ -60,6 +63,7 @@ class SqlAgentTemplateDirectory:
         now = datetime.now(UTC)
         row = AgentTemplateRow(
             id=template.template_id,
+            api_key_id=template.api_key_id,
             kind=template.kind,
             name=template.name,
             instructions=template.instructions,
@@ -175,18 +179,182 @@ class SqlAgentTemplateDirectory:
             )
             return True
 
+    async def create_for_api(
+        self, api_key_id: str, template: AgentTemplate, is_default: bool = False
+    ) -> AgentTemplate:
+        now = datetime.now(UTC)
+        row = AgentTemplateRow(
+            id=template.template_id,
+            api_key_id=api_key_id,
+            kind=template.kind,
+            name=template.name,
+            instructions=template.instructions,
+            tools_json=json.dumps(template.tools, ensure_ascii=False),
+            variables_json=json.dumps(template.variables, ensure_ascii=False),
+            settings_json=json.dumps(template.settings, ensure_ascii=False),
+            revision=1,
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._sessions.begin() as session:
+            api_key = await session.get(ApiKeyRow, api_key_id)
+            if api_key is None or api_key.revoked_at is not None:
+                raise ValueError("Active API key not found")
+            session.add(row)
+            await session.flush()
+
+            existing_default = await session.scalar(
+                select(ApiKeyAgentTemplateRow.template_id).where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    ApiKeyAgentTemplateRow.kind == template.kind,
+                    ApiKeyAgentTemplateRow.is_default.is_(True),
+                )
+            )
+            should_be_default = is_default or (existing_default is None)
+            if should_be_default and existing_default is not None:
+                await session.execute(
+                    update(ApiKeyAgentTemplateRow)
+                    .where(
+                        ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                        ApiKeyAgentTemplateRow.kind == template.kind,
+                    )
+                    .values(is_default=False)
+                )
+
+            session.add(
+                ApiKeyAgentTemplateRow(
+                    api_key_id=api_key_id,
+                    template_id=row.id,
+                    kind=row.kind,
+                    is_default=should_be_default,
+                )
+            )
+        return self._to_template(row, is_default=should_be_default)
+
+    async def get_for_api(self, api_key_id: str, template_id: str) -> AgentTemplate | None:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(AgentTemplateRow)
+                .join(ApiKeyAgentTemplateRow, ApiKeyAgentTemplateRow.template_id == AgentTemplateRow.id)
+                .where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    AgentTemplateRow.id == template_id,
+                    AgentTemplateRow.enabled.is_(True),
+                )
+            )
+            if row is None:
+                return None
+            is_default = await session.scalar(
+                select(ApiKeyAgentTemplateRow.is_default).where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    ApiKeyAgentTemplateRow.template_id == template_id,
+                )
+            )
+            return self._to_template(row, is_default=bool(is_default))
+
+    async def update_for_api(
+        self, api_key_id: str, template_id: str, template: AgentTemplate
+    ) -> AgentTemplate | None:
+        async with self._sessions.begin() as session:
+            assignment = await session.scalar(
+                select(ApiKeyAgentTemplateRow).where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    ApiKeyAgentTemplateRow.template_id == template_id,
+                )
+            )
+            if assignment is None:
+                return None
+            row = await session.scalar(
+                select(AgentTemplateRow).where(
+                    AgentTemplateRow.id == template_id, AgentTemplateRow.enabled.is_(True)
+                ).with_for_update()
+            )
+            if row is None:
+                return None
+            row.kind = template.kind
+            row.name = template.name
+            row.instructions = template.instructions
+            row.tools_json = json.dumps(template.tools, ensure_ascii=False)
+            row.variables_json = json.dumps(template.variables, ensure_ascii=False)
+            row.settings_json = json.dumps(template.settings, ensure_ascii=False)
+            row.revision += 1
+            row.updated_at = datetime.now(UTC)
+            await session.flush()
+            return self._to_template(row, is_default=assignment.is_default)
+
+    async def delete_for_api(self, api_key_id: str, template_id: str) -> bool:
+        async with self._sessions.begin() as session:
+            assignment = await session.scalar(
+                select(ApiKeyAgentTemplateRow).where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    ApiKeyAgentTemplateRow.template_id == template_id,
+                )
+            )
+            if assignment is None:
+                return False
+            was_default = assignment.is_default
+            kind = assignment.kind
+            await session.delete(assignment)
+
+            template_row = await session.scalar(
+                select(AgentTemplateRow).where(
+                    AgentTemplateRow.id == template_id,
+                    AgentTemplateRow.enabled.is_(True),
+                )
+            )
+            if template_row:
+                template_row.enabled = False
+                template_row.updated_at = datetime.now(UTC)
+
+            if was_default:
+                next_template = await session.scalar(
+                    select(ApiKeyAgentTemplateRow).where(
+                        ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                        ApiKeyAgentTemplateRow.kind == kind,
+                    ).order_by(ApiKeyAgentTemplateRow.template_id)
+                )
+                if next_template:
+                    next_template.is_default = True
+            return True
+
+    async def set_default_for_api(self, api_key_id: str, template_id: str) -> bool:
+        async with self._sessions.begin() as session:
+            assignment = await session.scalar(
+                select(ApiKeyAgentTemplateRow).where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    ApiKeyAgentTemplateRow.template_id == template_id,
+                )
+            )
+            if assignment is None:
+                return False
+            await session.execute(
+                update(ApiKeyAgentTemplateRow)
+                .where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    ApiKeyAgentTemplateRow.kind == assignment.kind,
+                )
+                .values(is_default=False)
+            )
+            assignment.is_default = True
+            return True
+
     async def list_api_assignments(self, api_key_id: str) -> dict[str, Any]:
         async with self._sessions() as session:
             rows = await session.execute(
                 select(ApiKeyAgentTemplateRow, AgentTemplateRow)
                 .join(AgentTemplateRow, AgentTemplateRow.id == ApiKeyAgentTemplateRow.template_id)
-                .where(ApiKeyAgentTemplateRow.api_key_id == api_key_id)
+                .where(
+                    ApiKeyAgentTemplateRow.api_key_id == api_key_id,
+                    AgentTemplateRow.enabled.is_(True),
+                )
                 .order_by(AgentTemplateRow.name)
             )
             items = rows.all()
         return {
-            "calling": [self._to_template(template) for assignment, template in items if assignment.kind == "calling"],
-            "post_call": [self._to_template(template) for assignment, template in items if assignment.kind == "post_call"],
+            "items": [self._to_template(template, assignment.is_default) for assignment, template in items],
+            "calling": [self._to_template(template, assignment.is_default) for assignment, template in items if assignment.kind == "calling"],
+            "post_call": [self._to_template(template, assignment.is_default) for assignment, template in items if assignment.kind == "post_call"],
             "default_calling_id": next((assignment.template_id for assignment, _ in items if assignment.kind == "calling" and assignment.is_default), None),
             "default_post_call_id": next((assignment.template_id for assignment, _ in items if assignment.kind == "post_call" and assignment.is_default), None),
         }
@@ -213,9 +381,10 @@ class SqlAgentTemplateDirectory:
             return self._to_template(row) if row else None
 
     @staticmethod
-    def _to_template(row: AgentTemplateRow) -> AgentTemplate:
+    def _to_template(row: AgentTemplateRow, is_default: bool = False) -> AgentTemplate:
         return AgentTemplate(
             template_id=row.id,
+            api_key_id=getattr(row, "api_key_id", None),
             kind=row.kind,  # type: ignore[arg-type]
             name=row.name,
             instructions=row.instructions,
@@ -224,6 +393,7 @@ class SqlAgentTemplateDirectory:
             settings=json.loads(row.settings_json or "{}"),
             revision=row.revision,
             enabled=row.enabled,
+            is_default=is_default,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )

@@ -440,6 +440,9 @@ class CallCoordinator:
         session.metadata["persist_transcript_segment"] = persist_segment
 
     async def end_session(self, session: AcceptedSession, reason: str) -> None:
+        if session.metadata.get("coordinator_session_ended"):
+            return
+        session.metadata["coordinator_session_ended"] = True
         ended_at = datetime.now(UTC)
         elapsed_seconds = max(
             0.0, (ended_at - _aware_utc(session.started_at)).total_seconds()

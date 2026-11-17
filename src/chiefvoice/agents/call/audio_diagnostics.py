@@ -52,6 +52,15 @@ class CallAudioDiagnostics:
             "response_watchdog_fired": 0,
             "response_watchdog_recovered": 0,
             "response_watchdog_fallback": 0,
+            "caller_inactivity_timeout": 0,
+            "caller_inactivity_first_prompt": 0,
+            "caller_inactivity_second_prompt": 0,
+            "caller_inactivity_policy_terminated": 0,
+            "hangup_validation_passed": 0,
+            "hangup_validation_rejected": 0,
+            "hangup_premature_rejected": 0,
+            "hangup_idempotent_duplicate": 0,
+            "closing_audio_drain_completed": 0,
         }
 
     def record_gemini_audio(self, outcome: str, *, frames: int = 1) -> None:

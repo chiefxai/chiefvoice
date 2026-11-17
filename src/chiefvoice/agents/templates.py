@@ -33,6 +33,7 @@ class AgentTemplateBody(BaseModel):
     tools: list[BuiltinTool] = Field(default_factory=list, max_length=10)
     variables: dict[str, Any] = Field(default_factory=dict, max_length=50)
     settings: dict[str, Any] = Field(default_factory=dict, max_length=30)
+    is_default: bool = False
 
     @field_validator("name", "instructions")
     @classmethod
@@ -96,6 +97,8 @@ class AgentTemplate:
     enabled: bool
     created_at: datetime
     updated_at: datetime
+    api_key_id: str | None = None
+    is_default: bool = False
 
 
 def render_template(template: AgentTemplate, context: dict[str, Any]) -> str:

@@ -71,10 +71,17 @@ def build_pipeline(
     # Start the first spoken turn as soon as Gemini is connected. Without an
     # initial prompt, a realtime model waits for caller speech and server VAD,
     # which feels like a several-second dead air on phone calls.
-    context = LLMContext(messages=[{
-        "role": "user",
-        "content": "The phone call has just connected. Greet the caller briefly in the configured language and ask the first question needed for this call's task.",
-    }])
+    context = LLMContext(
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "The phone call has just connected. Greet the caller briefly in the "
+                    "configured language and ask the first question needed for this call's task."
+                ),
+            }
+        ]
+    )
     local_vad = SileroVADAnalyzer(
         sample_rate=16000,
         params=VADParams(
@@ -103,21 +110,18 @@ def build_pipeline(
     if audio_diagnostics is not None:
         # Count at the actual model input boundary, after the context
         # aggregator, so the metric catches frames the model can consume.
-        processors.append(
-            AudioFrameCounter(audio_diagnostics, "gemini_input", InputAudioRawFrame)
-        )
+        processors.append(AudioFrameCounter(audio_diagnostics, "gemini_input", InputAudioRawFrame))
     model_service = next(
         (
             processor
             for processor in conversation_processors
             if callable(getattr(processor, "recover_unanswered_turn", None))
-            and callable(getattr(processor, "play_fallback_and_hangup", None))
         ),
         None,
     )
+    processors.extend(conversation_processors)
     if session is not None and model_service is not None and audio_diagnostics is not None:
         processors.append(GeminiConversationWatchdog(session, model_service, audio_diagnostics))
-    processors.extend(conversation_processors)
     if assistant_transcript_processor is not None:
         processors.append(assistant_transcript_processor)
     if audio_diagnostics is not None:

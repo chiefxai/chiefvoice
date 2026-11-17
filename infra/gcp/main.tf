@@ -327,6 +327,12 @@ resource "google_project_iam_member" "cloud_build_builder" {
   member  = "serviceAccount:${google_service_account.cloud_build.email}"
 }
 
+resource "google_service_account_iam_member" "cloud_build_backend_act_as" {
+  service_account_id = google_service_account.backend.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.cloud_build.email}"
+}
+
 resource "google_compute_instance" "backend" {
   name         = "chiefvoice-backend"
   machine_type = var.vm_machine_type

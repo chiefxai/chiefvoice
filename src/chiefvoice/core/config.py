@@ -69,6 +69,31 @@ class Settings:
     gemini_recovery_grace_seconds: float = float(
         os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "8")
     )
+    # Independent caller silence and inactivity management configuration.
+    caller_inactivity_timeout_seconds: float = float(
+        os.getenv("CALLER_INACTIVITY_TIMEOUT_SECONDS", "30")
+    )
+    caller_inactivity_first_timeout_seconds: float = float(
+        os.getenv("CALLER_INACTIVITY_FIRST_TIMEOUT_SECONDS", "10")
+    )
+    caller_inactivity_second_timeout_seconds: float = float(
+        os.getenv("CALLER_INACTIVITY_SECOND_TIMEOUT_SECONDS", "10")
+    )
+    caller_inactivity_final_timeout_seconds: float = float(
+        os.getenv("CALLER_INACTIVITY_FINAL_TIMEOUT_SECONDS", "8")
+    )
+    caller_inactivity_first_prompt: str = os.getenv(
+        "CALLER_INACTIVITY_FIRST_PROMPT",
+        "The caller has been silent. Ask briefly and politely if they are still there and can hear you.",
+    )
+    caller_inactivity_second_prompt: str = os.getenv(
+        "CALLER_INACTIVITY_SECOND_PROMPT",
+        "The caller is still silent. Inform them politely that you cannot hear them and will have to end the call if there is no response.",
+    )
+    caller_inactivity_goodbye_prompt: str = os.getenv(
+        "CALLER_INACTIVITY_GOODBYE_PROMPT",
+        "The caller has not responded. Politely say goodbye and thank them for calling.",
+    )
     gemini_fallback_audio_path: Path | None = (
         Path(os.environ["GEMINI_FALLBACK_AUDIO_PATH"])
         if os.getenv("GEMINI_FALLBACK_AUDIO_PATH")
