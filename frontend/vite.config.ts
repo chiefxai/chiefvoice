@@ -7,7 +7,7 @@ export default defineConfig(({ mode }) => {
   plugins: [react()],
   server: {
     port: 5173,
-    proxy: { '/v1': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000', '/healthz': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000', '/readyz': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000' },
+    proxy: { '/v1': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000', '/healthz': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000', '/readyz': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000', '/docs': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000', '/openapi.json': env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000' },
   },
   build: {
     rollupOptions: {
