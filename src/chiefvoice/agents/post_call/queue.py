@@ -735,16 +735,19 @@ class SqlPostCallQueue:
             return True
 
         status_code = None
+        failure_stage = "webhook_target_resolution"
         try:
             if delivery.get("invalid_job"):
                 raise RuntimeError("completed_call_result_missing")
             parsed_target, pinned_address = await _resolve_public_webhook_target(delivery["target_url"])
+            failure_stage = "webhook_payload_decryption"
             result = json.loads(
                 self._fernet.decrypt(delivery["encrypted_result"].encode("ascii"))
             )
             call_payload = json.loads(
                 self._fernet.decrypt(delivery["encrypted_payload"].encode("ascii"))
             )
+            failure_stage = "webhook_payload_serialization"
             body = {
                 "event": "call.analysis.completed",
                 "event_id": delivery["event_id"],
@@ -783,6 +786,7 @@ class SqlPostCallQueue:
             pinned_url = urllib.parse.urlunsplit(
                 (parsed_target.scheme, ip_literal, parsed_target.path or "/", parsed_target.query, "")
             )
+            failure_stage = "webhook_http_delivery"
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(10.0, connect=3.0),
                 follow_redirects=False,
@@ -804,6 +808,8 @@ class SqlPostCallQueue:
             error_type = type(exc).__name__
             if isinstance(exc, RuntimeError) and str(exc).startswith("webhook_http_"):
                 error_type = str(exc)
+            trace = traceback.extract_tb(exc.__traceback__)
+            origin = trace[-1] if trace else None
             retry_at = datetime.now(UTC) + timedelta(
                 seconds=min(2 ** delivery["attempts"], 3600)
             )
@@ -837,6 +843,12 @@ class SqlPostCallQueue:
                     "tenant_id": delivery["tenant_id"],
                     "attempt": delivery["attempts"],
                     "error_type": error_type,
+                    "failure_stage": failure_stage,
+                    # Keep callback URLs and exception text out of logs; source
+                    # location is sufficient to diagnose a local failure.
+                    "error_origin_file": origin.filename.rsplit("/", 1)[-1] if origin else None,
+                    "error_origin_function": origin.name if origin else None,
+                    "error_origin_line": origin.lineno if origin else None,
                 },
             )
             post_call_webhook_event("retrying" if new_status == "queued" else "failed")

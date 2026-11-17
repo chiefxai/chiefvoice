@@ -476,12 +476,40 @@ class GeminiConversationWatchdog(FrameProcessor):
                 or self._caller_is_speaking
                 or self._gemini_is_generating
                 or self._bot_audio_playing
+                or self._metadata.get("call_terminating")
+                or self._metadata.get("call_terminated")
             ):
                 return
             logger.warning(
                 "gemini_watchdog_recovery_finished_without_response",
                 extra={**self._log_context(), "recovery_succeeded": recovered},
             )
+            # A recovery nudge that produces no audio must not leave the caller
+            # connected to a silent agent. The service fallback plays a short
+            # prerecorded notice and requests hang-up through the provider's
+            # normal audio-drain path, so the notice is heard before disconnect.
+            fallback = getattr(self._service, "play_fallback_and_hangup", None)
+            if callable(fallback):
+                # The fallback emits response frames through this processor.
+                # Detach the current task first so those frames do not cancel
+                # the watchdog while it is performing the fallback itself.
+                if self._watch_task is asyncio.current_task():
+                    self._watch_task = None
+                logger.warning(
+                    "gemini_watchdog_fallback_started", extra=self._log_context()
+                )
+                fallback_completed = await fallback()
+                logger.info(
+                    "gemini_watchdog_fallback_finished",
+                    extra={
+                        **self._log_context(),
+                        "fallback_completed": bool(fallback_completed),
+                    },
+                )
+            else:
+                logger.error(
+                    "gemini_watchdog_fallback_unavailable", extra=self._log_context()
+                )
         except asyncio.CancelledError:
             logger.info("gemini_response_watchdog_task_cancelled", extra=self._log_context())
             raise
