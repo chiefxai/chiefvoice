@@ -66,6 +66,9 @@ class Settings:
     gemini_response_watchdog_seconds: float = float(
         os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "3")
     )
+    gemini_generation_watchdog_seconds: float = float(
+        os.getenv("GEMINI_GENERATION_WATCHDOG_SECONDS", "8")
+    )
     gemini_recovery_grace_seconds: float = float(
         os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "2")
     )

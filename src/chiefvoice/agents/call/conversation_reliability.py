@@ -78,6 +78,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             if response_timeout_seconds is None
             else response_timeout_seconds
         )
+        self._generation_response_timeout = settings.gemini_generation_watchdog_seconds
         self._recovery_grace = (
             settings.gemini_recovery_grace_seconds
             if recovery_grace_seconds is None
@@ -215,10 +216,11 @@ class GeminiConversationWatchdog(FrameProcessor):
             self._gemini_is_generating = True
             self._metadata["gemini_is_generating"] = True
             self._turn_state = ConversationTurnState.BOT_GENERATING
-            # Keep the response watchdog armed until actual audio is emitted.
-            # Gemini can start a response turn and then stall before producing
-            # any speech; treating the start frame as a response used to cancel
-            # the only recovery timer and leave the caller hearing silence.
+            # Generation can start before the first audio frame. Give an active
+            # generation its own longer no-audio window instead of either
+            # cancelling the watchdog or applying the short unanswered-turn
+            # timeout to a response that is still being produced.
+            self._arm_generation_watchdog()
             self._cancel_caller_inactivity_timer("gemini_response_started")
 
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, TTSTextFrame):
@@ -386,7 +388,34 @@ class GeminiConversationWatchdog(FrameProcessor):
             "gemini_response_watchdog_armed", extra={**self._log_context(), "trigger": trigger}
         )
         self._watch_task = self.create_task(
-            self._watch_response(turn_id, trigger), name=f"gemini_response_watchdog_{turn_id}"
+            self._watch_response(turn_id, trigger, self._response_timeout),
+            name=f"gemini_response_watchdog_{turn_id}",
+        )
+
+    def _arm_generation_watchdog(self) -> None:
+        if (
+            self._closed
+            or self._call_state != CallLifecycleState.ACTIVE
+            or self._metadata.get("call_terminating")
+            or self._caller_is_speaking
+            or self._bot_audio_playing
+            or self._response_audio_seen
+        ):
+            return
+        turn_id = self._turn_id
+        self._cancel_response_watchdog("generation_started_waiting_for_audio")
+        logger.info(
+            "gemini_generation_watchdog_armed",
+            extra={
+                **self._log_context(),
+                "timeout_seconds": self._generation_response_timeout,
+            },
+        )
+        self._watch_task = self.create_task(
+            self._watch_response(
+                turn_id, "generation_started_without_audio", self._generation_response_timeout
+            ),
+            name=f"gemini_generation_watchdog_{turn_id}",
         )
 
     def _cancel_response_watchdog(self, reason: str) -> None:
@@ -536,9 +565,9 @@ class GeminiConversationWatchdog(FrameProcessor):
         except Exception as exc:
             logger.exception("caller_inactivity_watch_failed", extra={"error": str(exc)})
 
-    async def _watch_response(self, turn_id: int, trigger: str) -> None:
+    async def _watch_response(self, turn_id: int, trigger: str, timeout: float) -> None:
         try:
-            await asyncio.sleep(self._response_timeout)
+            await asyncio.sleep(timeout)
             if (
                 self._closed
                 or self._call_state != CallLifecycleState.ACTIVE
@@ -546,6 +575,10 @@ class GeminiConversationWatchdog(FrameProcessor):
                 or self._caller_is_speaking
                 or self._bot_audio_playing
                 or self._response_audio_seen
+                or (
+                    self._gemini_is_generating
+                    and trigger != "generation_started_without_audio"
+                )
             ):
                 return
 
@@ -559,8 +592,11 @@ class GeminiConversationWatchdog(FrameProcessor):
                 extra={
                     **self._log_context(),
                     "trigger": trigger,
+                    "watchdog_phase": (
+                        "generation" if trigger == "generation_started_without_audio" else "turn"
+                    ),
                     "connection_ready": service_ready,
-                    "timeout_seconds": self._response_timeout,
+                    "timeout_seconds": timeout,
                 },
             )
 
@@ -574,6 +610,10 @@ class GeminiConversationWatchdog(FrameProcessor):
                     or self._caller_is_speaking
                     or self._bot_audio_playing
                     or self._recovery_attempted_turn == turn_id
+                    or (
+                        self._gemini_is_generating
+                        and trigger != "generation_started_without_audio"
+                    )
                 ):
                     return
                 self._recovery_attempted_turn = turn_id
