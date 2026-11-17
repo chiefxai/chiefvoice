@@ -1,6 +1,6 @@
 from xml.etree.ElementTree import Element, tostring
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from chiefvoice.calls.coordinator import CallCoordinator
@@ -73,10 +73,13 @@ async def media_websocket(websocket: WebSocket, state: str = ""):
         await websocket.close(code=1011)
         return
     pipeline_factory = getattr(websocket.app.state, "voice_pipeline_factory", None)
-    await adapter.run_media_session(
-        websocket,
-        state,
-        pipeline_factory,
-        coordinator.end_session,
-        coordinator.attach_session_persistence,
-    )
+    try:
+        await adapter.run_media_session(
+            websocket,
+            state,
+            pipeline_factory,
+            coordinator.end_session,
+            coordinator.attach_session_persistence,
+        )
+    except WebSocketDisconnect:
+        pass
