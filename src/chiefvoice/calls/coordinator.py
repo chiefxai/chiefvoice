@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
@@ -73,6 +73,7 @@ class CallCoordinator:
         require_tenant_vertex_project: bool = False,
         call_session_store: SqlCallSessionStore | None = None,
         api_key_directory: ApiKeyDirectory | None = None,
+        realtime_preflight: Callable[[AcceptedSession], Awaitable[None]] | None = None,
     ):
         self.adapters = adapters
         self.subscriptions = subscriptions
@@ -85,6 +86,7 @@ class CallCoordinator:
         self.require_tenant_vertex_project = require_tenant_vertex_project
         self.call_session_store = call_session_store
         self.api_key_directory = api_key_directory
+        self.realtime_preflight = realtime_preflight
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
         if command.live_agent_language:
@@ -242,6 +244,29 @@ class CallCoordinator:
                     session, status="failed", end_reason="billing_authorization_failed"
                 )
             raise
+        if self.realtime_preflight is not None:
+            try:
+                await self.realtime_preflight(session)
+            except BaseException as exc:
+                await self.subscriptions.release_voice(command.tenant_id, session.session_id)
+                if self.call_session_store is not None:
+                    await self.call_session_store.update_state(
+                        session, status="failed", end_reason="realtime_preflight_failed"
+                    )
+                if isinstance(exc, HTTPException):
+                    raise
+                logger.warning(
+                    "realtime_preflight_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": command.provider,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="The live AI provider is unavailable; no call was placed.",
+                ) from exc
         call: OutboundCall = _OutboundCallData(
             provider=command.provider,
             channel=command.channel,

@@ -246,6 +246,7 @@ def create_app(
         [AcceptedSession, BaseTransport], Pipeline | Awaitable[Pipeline]
     ]
     | None = None,
+    realtime_preflight: Callable[[AcceptedSession], Awaitable[None]] | None = None,
 ) -> FastAPI:
     application = FastAPI(title="Chiefvoice", version="0.1.0", lifespan=lifespan)
     post_call_agent = None
@@ -440,6 +441,8 @@ def create_app(
                 "vertex",
                 recording_store=recording_store,
             )
+            if realtime_preflight is None:
+                realtime_preflight = vertex_provider.preflight
     adapters = dict(channel_adapters or {})
     if account_store is None and settings.database_url:
         account_store = SqlAccountStore(settings.database_url)
@@ -583,6 +586,7 @@ def create_app(
             require_tenant_vertex_project=settings.vertex_project_isolation_enabled,
             call_session_store=call_session_store,
             api_key_directory=api_key_directory,
+            realtime_preflight=realtime_preflight,
         )
         if subscription_authorizer is not None
         else None

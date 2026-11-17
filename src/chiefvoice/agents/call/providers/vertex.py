@@ -1,6 +1,9 @@
 import json
 import logging
+import asyncio
+import time
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 from fastapi import HTTPException
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -63,6 +66,97 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         self.google_ai_api_key = google_ai_api_key
         self.google_ai_model = google_ai_model
         self.api_key_directory = api_key_directory
+
+    async def preflight(self, session: AcceptedSession) -> None:
+        """Open a short-lived Live API session before starting a phone call.
+
+        This validates the effective per-API project, credentials, model,
+        location, voice, and language against Gemini itself. No call is dialed
+        until the provider confirms the websocket session is open.
+        """
+        from pipecat.clocks.system_clock import SystemClock
+        from pipecat.processors.frame_processor import FrameProcessorSetup
+        from pipecat.utils.asyncio.task_manager import TaskManager
+
+        processors = await self.create_processors(session)
+        service = next(
+            (
+                processor
+                for processor in processors
+                if hasattr(processor, "_chiefvoice_connection_open_event")
+            ),
+            None,
+        )
+        if service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Gemini Live preflight is unavailable; no call was placed.",
+            )
+
+        started_at = time.monotonic()
+        task_manager = TaskManager()
+        setup = FrameProcessorSetup(
+            clock=SystemClock(),
+            task_manager=task_manager,
+            pipeline_worker=SimpleNamespace(),
+        )
+        setup_started = False
+        open_waiter: asyncio.Task | None = None
+        error_waiter: asyncio.Task | None = None
+        try:
+            setup_started = True
+            await service.setup(setup)
+            open_event = service._chiefvoice_connection_open_event
+            error_event = service._chiefvoice_connection_error_event
+            open_waiter = asyncio.create_task(open_event.wait())
+            error_waiter = asyncio.create_task(error_event.wait())
+            done, _ = await asyncio.wait(
+                {open_waiter, error_waiter},
+                timeout=15.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if open_waiter not in done:
+                error_type = getattr(service, "_chiefvoice_connection_error_type", None)
+                raise TimeoutError(error_type or "Gemini Live connection timed out")
+            elapsed_ms = round((time.monotonic() - started_at) * 1000)
+            logger.info(
+                "gemini_live_preflight_succeeded",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": "vertex",
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+        except Exception as exc:
+            error_type = getattr(service, "_chiefvoice_connection_error_type", None)
+            logger.warning(
+                "gemini_live_preflight_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": "vertex",
+                    "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+                    "error_type": error_type or type(exc).__name__,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Gemini Live could not be reached for this API and model; "
+                    "no call was placed. Check the API's Vertex project, model access, "
+                    "credentials, location, and quota."
+                ),
+            ) from exc
+        finally:
+            for waiter in (open_waiter, error_waiter):
+                if waiter is not None and not waiter.done():
+                    waiter.cancel()
+            if open_waiter is not None or error_waiter is not None:
+                await asyncio.gather(
+                    *(waiter for waiter in (open_waiter, error_waiter) if waiter is not None),
+                    return_exceptions=True,
+                )
+            if setup_started:
+                await service.cleanup()
 
     async def create_processors(self, session: AcceptedSession) -> Sequence[FrameProcessor]:
         # Import lazily so deployments using another backend do not require Google packages.
