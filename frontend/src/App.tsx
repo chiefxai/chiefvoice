@@ -21,10 +21,11 @@ import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded'
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
 import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
+import DescriptionRoundedIcon from '@mui/icons-material/DescriptionRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded'
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import LoginPage from './LoginPage'
 import { clearLoginCallbackFromUrl, currentUser, finishLogin, login, logout } from './auth'
 
@@ -360,7 +361,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const simulationAgentTemplatesQuery = useQuery({ queryKey: ['api-agent-templates', 'simulation', simulationApiId], queryFn: () => api.apiAgentTemplates(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
   const simulationProfilesQuery = useQuery({ queryKey: ['simulation-voice-profiles', simulationApiId], queryFn: () => api.voiceProfiles(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false })
   const simulationCallsQuery = useQuery({ queryKey: ['simulation-call-logs', simulationApiId], queryFn: () => api.apiCalls(simulationApiId), enabled: connected && page === 'Simulation' && Boolean(simulationApiId), retry: false, refetchInterval: simulationSessionId ? 3000 : false })
-  const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', apiDetailId, apiCallsPage, apiCallsPageSize], queryFn: () => api.apiCalls(apiDetailId!, apiCallsPageSize, apiCallsPage * apiCallsPageSize), enabled: connected && Boolean(apiDetailId) && isApiHistory, retry: false, refetchInterval: isApiHistory ? 5000 : false })
+  const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', apiDetailId, apiCallsPage, apiCallsPageSize], queryFn: () => api.apiCalls(apiDetailId!, apiCallsPageSize, apiCallsPage * apiCallsPageSize), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', apiDetailId], queryFn: () => api.apiBilling(apiDetailId!), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 10000 : false })
   const apiDetailKey = keysQuery.data?.find(key => key.id === apiDetailId) || null
   const headerTitle = apiDetailId ? apiDetailKey?.name || 'API details' : page
@@ -667,7 +668,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         {page === 'API' && (apiDetailId
           ? isApiHistory
             ? <ApiCallHistoryPage api={apiDetailKey} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsTotal={apiCallsQuery.data?.total || 0} callsPage={apiCallsPage} callsPageSize={apiCallsPageSize} onCallsPageChange={setApiCallsPage} onCallsPageSizeChange={size => { setApiCallsPageSize(size); setApiCallsPage(0) }} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} />
-            : <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} configurationOpen={apiConfigurationOpen} onCloseConfiguration={() => setApiConfigurationOpen(false)} />
+            : <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsTotal={apiCallsQuery.data?.total || 0} callsPage={apiCallsPage} callsPageSize={apiCallsPageSize} onCallsPageChange={setApiCallsPage} onCallsPageSizeChange={size => { setApiCallsPageSize(size); setApiCallsPage(0) }} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} configurationOpen={apiConfigurationOpen} onCloseConfiguration={() => setApiConfigurationOpen(false)} />
           : <ApiPage numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
         {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
         {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={setSimulationProfileId} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} templates={simulationAgentTemplatesQuery.data} templatesLoading={simulationAgentTemplatesQuery.isLoading} callingTemplateId={simulationCallingTemplateId} onCallingTemplateChange={setSimulationCallingTemplateId} postCallTemplateId={simulationPostCallTemplateId} onPostCallTemplateChange={setSimulationPostCallTemplateId} />}
@@ -852,21 +853,29 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
 }
 
 function NumbersPage({ connected, onConnect, numbers, loading, error, onManageNumber }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; loading: boolean; error: unknown; onManageNumber: (number: RegisteredNumber) => void }) {
+  const [page, setPage] = useState(0)
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const visibleNumbers = numbers.slice(page * rowsPerPage, (page + 1) * rowsPerPage)
   return <><Card className="table-surface" sx={{ mt: 1 }}>
-      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : numbers.length ? <TableContainer className="table-surface" sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 1220 }}><TableHead><TableRow>{['Phone number', 'Provider', 'Tags', 'Owner', 'Credentials', 'Standard channels', 'Unlimited channels', 'Inbound', 'Outbound', 'API access', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{numbers.map(number => <TableRow key={`${number.provider}|${number.phone_number}|${number.customer_id}`} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{number.phone_number}</TableCell><TableCell className="table-cell"><Chip size="small" label={number.provider} variant="outlined" sx={{ textTransform: 'capitalize' }} /></TableCell><TableCell className="table-cell"><TagChips tags={number.tags || []} /></TableCell><TableCell className="table-cell">Platform</TableCell><TableCell className="table-cell">{number.credential_mode === 'platform' ? 'Platform' : number.credential_mode === 'custom' ? 'Custom account' : '—'}</TableCell><TableCell className="table-cell">{number.standard_channels}</TableCell><TableCell className="table-cell">{number.unlimited_channels}</TableCell><TableCell className="table-cell"><StatusChip enabled={number.inbound_enabled} /></TableCell><TableCell className="table-cell"><StatusChip enabled={number.outbound_enabled} /></TableCell><TableCell className="table-cell">{number.api_key_name || 'Unassigned'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onManageNumber(number)}>Manage</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><HubRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No phone numbers registered</b><div style={{ fontSize: 12, marginTop: 6 }}>Add a number to get started. You can use the platform Vobiz account or add a custom provider account owned by the platform.</div></div>}
+      {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : numbers.length ? <><TableContainer className="table-surface" sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 1220 }}><TableHead><TableRow>{['Phone number', 'Provider', 'Tags', 'Owner', 'Credentials', 'Standard channels', 'Unlimited channels', 'Inbound', 'Outbound', 'API access', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{visibleNumbers.map(number => <TableRow key={`${number.provider}|${number.phone_number}|${number.customer_id}`} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{number.phone_number}</TableCell><TableCell className="table-cell"><Chip size="small" label={number.provider} variant="outlined" sx={{ textTransform: 'capitalize' }} /></TableCell><TableCell className="table-cell"><TagChips tags={number.tags || []} /></TableCell><TableCell className="table-cell">Platform</TableCell><TableCell className="table-cell">{number.credential_mode === 'platform' ? 'Platform' : number.credential_mode === 'custom' ? 'Custom account' : '—'}</TableCell><TableCell className="table-cell">{number.standard_channels}</TableCell><TableCell className="table-cell">{number.unlimited_channels}</TableCell><TableCell className="table-cell"><StatusChip enabled={number.inbound_enabled} /></TableCell><TableCell className="table-cell"><StatusChip enabled={number.outbound_enabled} /></TableCell><TableCell className="table-cell">{number.api_key_name || 'Unassigned'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onManageNumber(number)}>Manage</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer><TablePagination component="div" count={numbers.length} page={page} onPageChange={(_, value) => setPage(value)} rowsPerPage={rowsPerPage} onRowsPerPageChange={event => { setRowsPerPage(Number(event.target.value)); setPage(0) }} rowsPerPageOptions={[10, 25, 50]} /></> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><HubRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No phone numbers registered</b><div style={{ fontSize: 12, marginTop: 6 }}>Add a number to get started. You can use the platform Vobiz account or add a custom provider account owned by the platform.</div></div>}
     </Card>
   </>
 }
 
 function ApiPage({ numbers, keys, agents, loading, error, onView, onManage, onDelete }: { numbers: RegisteredNumber[]; keys: PlatformApiKey[]; agents: AgentConfiguration[]; loading: boolean; error: unknown; onView: (key: PlatformApiKey) => void; onManage: (key: PlatformApiKey) => void; onDelete: (id: string) => void }) {
+  const [page, setPage] = useState(0)
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const visibleKeys = keys.slice(page * rowsPerPage, (page + 1) * rowsPerPage)
   return <><Card className="table-surface" sx={{ mt: 1 }}>
-      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <TableContainer className="table-surface" sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 900 }}><TableHead><TableRow>{['API name', 'Phone numbers', 'Customer', 'Calling agent', 'Post-call agent', 'Created', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><b>{key.name}</b><br /><Typography variant="caption"><code>{key.key_prefix}</code></Typography><TagChips tags={key.tags || []} /></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.voice_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.post_call_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onView(key)}>View</Button>{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Edit</Button><Button color="error" size="small" onClick={() => onDelete(key.id)}>Delete</Button></>}</TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No APIs created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API by naming it, choosing phone numbers, and assigning configured agents.' : 'Register an outbound-enabled phone number first.'}</div></div>}
+      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <><TableContainer className="table-surface" sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 900 }}><TableHead><TableRow>{['API name', 'Phone numbers', 'Customer', 'Calling agent', 'Post-call agent', 'Created', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{visibleKeys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><b>{key.name}</b><br /><Typography variant="caption"><code>{key.key_prefix}</code></Typography><TagChips tags={key.tags || []} /></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.voice_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.post_call_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onView(key)}>View</Button>{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Edit</Button><Button color="error" size="small" onClick={() => onDelete(key.id)}>Delete</Button></>}</TableCell></TableRow>)}</TableBody></Table></TableContainer><TablePagination component="div" count={keys.length} page={page} onPageChange={(_, value) => setPage(value)} rowsPerPage={rowsPerPage} onRowsPerPageChange={event => { setRowsPerPage(Number(event.target.value)); setPage(0) }} rowsPerPageOptions={[10, 25, 50]} /></> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No APIs created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API by naming it, choosing phone numbers, and assigning configured agents.' : 'Register an outbound-enabled phone number first.'}</div></div>}
     </Card>
   </>
 }
 
-function ApiDetailsPage({ api: apiKey, agents, loading, error, billing, billingLoading, billingError, onAdjustBilling, configurationOpen, onCloseConfiguration }: {
+function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal, callsPage, callsPageSize, onCallsPageChange, onCallsPageSizeChange, callsLoading, callsError, billing, billingLoading, billingError, onAdjustBilling, configurationOpen, onCloseConfiguration }: {
   api: PlatformApiKey | null; agents: AgentConfiguration[]; loading: boolean; error: unknown
+  calls: ApiCallLog[]; callsTotal: number; callsPage: number; callsPageSize: number
+  onCallsPageChange: (page: number) => void; onCallsPageSizeChange: (size: number) => void; callsLoading: boolean; callsError: unknown
   billing?: ApiBillingUsage; billingLoading: boolean; billingError: unknown
   onAdjustBilling: (amount: string) => void; configurationOpen: boolean; onCloseConfiguration: () => void
 }) {
@@ -880,6 +889,16 @@ function ApiDetailsPage({ api: apiKey, agents, loading, error, billing, billingL
           <div className="api-kpi-grid"><UsageCard label="Charges" value={formatMoney(billing.charges_minor || 0, billing.currency || 'INR')} /><UsageCard label="Billed time" value={`${Math.floor((billing.billable_seconds || 0) / 60)}m ${(billing.billable_seconds || 0) % 60}s`} /><UsageCard label="Total calls" value={String(billing.calls ?? 0)} /><UsageCard label={billing.billing_mode === 'prepaid' ? 'Available balance' : 'Available credit'} value={billing.billing_mode === 'prepaid' ? formatMoney(billing.customer_prepaid_balance_minor || 0, billing.currency || 'INR') : formatMoney(Math.max(0, (billing.customer_postpaid_credit_limit_minor || 0) - (billing.customer_postpaid_used_minor || 0)), billing.currency || 'INR')} /></div>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1} sx={{ mt: 1.5 }}><Typography variant="body2" color="text.secondary">Rate: {formatMoney(billing.rate_per_minute_minor || 0, billing.currency || 'INR')} per minute</Typography><Button variant="outlined" size="small" onClick={() => { const minor = billing.billing_mode === 'prepaid' ? billing.customer_prepaid_balance_minor : billing.customer_postpaid_credit_limit_minor; onAdjustBilling(((minor || 0) / 100).toFixed(2)) }}>Adjust balance / limit</Button></Stack>
         </> : <Alert severity="warning">{billing?.message || 'No billing plan is configured for this API customer.'}</Alert>}
+      </Card>
+      <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+        <Stack><Typography variant="h6" sx={{ fontWeight: 800 }}>Call history</Typography><Typography variant="body2" color="text.secondary">Recent calls placed with this API</Typography></Stack>
+        <Button component={Link} to={`/api/${encodeURIComponent(apiKey.id)}/calls`} size="small" variant="outlined">View all · {callsTotal}</Button>
+      </Stack>
+      <Card className="surface-card" sx={{ p: 0, overflow: 'hidden' }}>
+        {callsLoading && !calls.length ? <Stack alignItems="center" sx={{ py: 5 }}><CircularProgress size={24} /></Stack> : callsError ? <Alert severity="error" sx={{ m: 2 }}>{errorText(callsError)}</Alert> : calls.length ? <>
+          <TableContainer className="table-surface" sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 850 }}><TableHead><TableRow>{['Started', 'Direction', 'Caller → recipient', 'Duration', 'Call status', 'Post-call', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{calls.map(call => <ApiCallRecord key={call.session_id} apiId={apiKey.id} call={call} />)}</TableBody></Table></TableContainer>
+          <TablePagination component="div" count={callsTotal} page={callsPage} onPageChange={(_, page) => onCallsPageChange(page)} rowsPerPage={callsPageSize} onRowsPerPageChange={event => onCallsPageSizeChange(Number(event.target.value))} rowsPerPageOptions={[10, 25, 50]} labelRowsPerPage="Calls per page" showFirstButton showLastButton />
+        </> : <Stack alignItems="center" sx={{ py: 4 }}><Typography variant="body2" color="text.secondary">No calls yet</Typography></Stack>}
       </Card>
       <ApiTemplatesSection apiId={apiKey.id} />
     </Stack>}
@@ -943,10 +962,13 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
 }
 
 function AgentsPage({ agents, loading, error, onEdit, onDelete }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onDelete: (agent: AgentConfiguration) => void }) {
+  const [page, setPage] = useState(0)
+  const [rowsPerPage, setRowsPerPage] = useState(10)
+  const visibleAgents = agents.slice(page * rowsPerPage, (page + 1) * rowsPerPage)
   return <>
     <Alert severity="info" sx={{ mt: 2 }}>Google Vertex AI is currently available for calling and post-call agents. API credentials and location overrides are configured on each API.</Alert>
     <Card className="table-surface" sx={{ mt: 1 }}>
-      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : agents.length ? <TableContainer className="table-surface" sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 980 }}><TableHead><TableRow>{['Agent', 'Type', 'Provider / model', 'Default location', 'Cost / minute', 'Auto hang-up', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{agents.map(agent => <TableRow key={agent.id} hover><TableCell className="table-cell"><b>{agent.name}</b><TagChips tags={agent.tags || []} /></TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{agent.provider} · {agent.model}</TableCell><TableCell className="table-cell">{agent.location}</TableCell><TableCell className="table-cell">{formatMoney(agent.cost_per_minute_minor, agent.currency)}/min</TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? <StatusChip enabled={agent.auto_hangup_when_complete} label={agent.auto_hangup_when_complete ? 'enabled' : 'disabled'} /> : '—'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(agent)}>Edit</Button><Button size="small" color="error" onClick={() => onDelete(agent)}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create calling or post-call agents first, then assign them to an API.</div></div>}
+      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : agents.length ? <><TableContainer className="table-surface" sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 980 }}><TableHead><TableRow>{['Agent', 'Type', 'Provider / model', 'Default location', 'Cost / minute', 'Auto hang-up', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{visibleAgents.map(agent => <TableRow key={agent.id} hover><TableCell className="table-cell"><b>{agent.name}</b><TagChips tags={agent.tags || []} /></TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{agent.provider} · {agent.model}</TableCell><TableCell className="table-cell">{agent.location}</TableCell><TableCell className="table-cell">{formatMoney(agent.cost_per_minute_minor, agent.currency)}/min</TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? <StatusChip enabled={agent.auto_hangup_when_complete} label={agent.auto_hangup_when_complete ? 'enabled' : 'disabled'} /> : '—'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(agent)}>Edit</Button><Button size="small" color="error" onClick={() => onDelete(agent)}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer><TablePagination component="div" count={agents.length} page={page} onPageChange={(_, value) => setPage(value)} rowsPerPage={rowsPerPage} onRowsPerPageChange={event => { setRowsPerPage(Number(event.target.value)); setPage(0) }} rowsPerPageOptions={[10, 25, 50]} /></> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create calling or post-call agents first, then assign them to an API.</div></div>}
     </Card>
   </>
 }
@@ -971,6 +993,10 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
   const [failureWebhookPayloadJson, setFailureWebhookPayloadJson] = useState('{}')
   const [isDefault, setIsDefault] = useState(false)
   const [formError, setFormError] = useState('')
+  const [templateDetails, setTemplateDetails] = useState<AgentPromptTemplate | null>(null)
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [templatePage, setTemplatePage] = useState(0)
+  const [templatesPerPage, setTemplatesPerPage] = useState(6)
 
   const saveMutation = useMutation({
     mutationFn: (value: Omit<AgentPromptTemplate, 'id' | 'revision' | 'enabled'> & { is_default?: boolean }) =>
@@ -1080,111 +1106,38 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1.5} sx={{ mb: 2 }}>
           <div>
             <Stack direction="row" alignItems="center" gap={1}>
-              <Typography variant="h6" sx={{ fontWeight: 800 }}>Reusable prompt templates</Typography>
+              <Typography variant="h6" sx={{ fontWeight: 800 }}>Prompt templates</Typography>
               <Chip size="small" label={allTemplates.length} />
+              <Tooltip title="Template notes"><IconButton size="small" aria-label="Prompt template notes" onClick={() => setHelpOpen(true)}><InfoOutlinedIcon fontSize="small" /></IconButton></Tooltip>
             </Stack>
-            <Typography variant="body2" color="text.secondary">
-              Templates owned by this API. Define prompt instructions, placeholders, tools, and output extraction schemas.
-            </Typography>
+            <Typography variant="body2" color="text.secondary">Open a template icon to review its prompt and settings.</Typography>
           </div>
           <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openNew}>
             Create template
           </Button>
         </Stack>
 
-        <Alert severity="info" sx={{ mb: 2 }}>
-          When a call has no transcript, post-call AI is skipped and a signed <code>call.post_call.failed</code> event is sent. A post-call template can override the API’s fallback URL and add a custom payload for its own integration; otherwise the API-level fallback settings are used.
-        </Alert>
-
-        {isLoading ? (
-          <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={24} /></Stack>
-        ) : error ? (
-          <Alert severity="error">{errorText(error)}</Alert>
-        ) : allTemplates.length ? (
-          <TableContainer className="table-surface" sx={{ overflowX: 'auto' }}>
-            <Table size="small" sx={{ minWidth: 780 }}>
-              <TableHead>
-                <TableRow>
-                  {['Template', 'Type', 'Default', 'Tools', 'Revision', ''].map(label => (
-                    <TableCell className="table-head" key={label}>{label}</TableCell>
-                  ))}
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {allTemplates.map(item => {
-                  const isDefaultTemplate =
-                    (item.kind === 'calling' && data?.default_calling_id === item.id) ||
-                    (item.kind === 'post_call' && data?.default_post_call_id === item.id) ||
-                    Boolean(item.is_default)
-
-                  return (
-                    <TableRow key={item.id} hover>
-                      <TableCell className="table-cell">
-                        <b>{item.name}</b>
-                        <br />
-                        <Typography variant="caption" color="text.secondary">
-                          <code>{item.id}</code>
-                        </Typography>
-                      </TableCell>
-                      <TableCell className="table-cell">
-                        <Chip
-                          size="small"
-                          label={item.kind === 'calling' ? 'Calling' : 'Post-call'}
-                          variant="outlined"
-                          color={item.kind === 'calling' ? 'primary' : 'secondary'}
-                        />
-                      </TableCell>
-                      <TableCell className="table-cell">
-                        {isDefaultTemplate ? (
-                          <Chip size="small" color="success" label={`Default ${item.kind === 'calling' ? 'calling' : 'post-call'}`} />
-                        ) : (
-                          <Button
-                            size="small"
-                            variant="text"
-                            disabled={setDefaultMutation.isPending}
-                            onClick={() => setDefaultMutation.mutate(item.id)}
-                          >
-                            Set default
-                          </Button>
-                        )}
-                      </TableCell>
-                      <TableCell className="table-cell">
-                        {item.tools.length ? item.tools.map(tool => tool.name).join(', ') : 'None'}
-                      </TableCell>
-                      <TableCell className="table-cell">v{item.revision}</TableCell>
-                      <TableCell className="table-cell" align="right">
-                        <Button size="small" onClick={() => openEdit(item)}>Edit</Button>
-                        <Button
-                          size="small"
-                          color="error"
-                          disabled={deleteMutation.isPending}
-                          onClick={() => {
-                            if (window.confirm(`Delete template “${item.name}” from this API?`)) {
-                              deleteMutation.mutate(item.id)
-                            }
-                          }}
-                        >
-                          Delete
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        ) : (
-          <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 4 }}>
-            <Typography sx={{ fontWeight: 700 }}>No templates owned by this API</Typography>
-            <Typography variant="body2" color="text.secondary">
-              Create a calling or post-call prompt template for this API to get started.
-            </Typography>
-            <Button variant="outlined" startIcon={<AddRoundedIcon />} onClick={openNew} sx={{ mt: 1 }}>
-              Create template
-            </Button>
+        {isLoading ? <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={24} /></Stack> : error ? <Alert severity="error">{errorText(error)}</Alert> : allTemplates.length ? <>
+          <Stack gap={1.25}>
+            {allTemplates.slice(templatePage * templatesPerPage, (templatePage + 1) * templatesPerPage).map(item => {
+              const isDefaultTemplate = (item.kind === 'calling' && data?.default_calling_id === item.id) || (item.kind === 'post_call' && data?.default_post_call_id === item.id) || Boolean(item.is_default)
+              return <Card key={item.id} variant="outlined" sx={{ display: 'flex', alignItems: 'center', gap: 1.5, p: 1.25, borderRadius: 2 }}>
+                <Tooltip title={`View ${item.name} details`}><IconButton aria-label={`View ${item.name} details`} onClick={() => setTemplateDetails(item)} sx={{ bgcolor: item.kind === 'calling' ? 'primary.50' : 'secondary.50', color: item.kind === 'calling' ? 'primary.main' : 'secondary.main' }}><DescriptionRoundedIcon /></IconButton></Tooltip>
+                <Stack sx={{ minWidth: 0, flex: 1 }}><Typography variant="subtitle2" noWrap sx={{ fontWeight: 750 }}>{item.name}</Typography><Stack direction="row" gap={0.75} alignItems="center"><Chip size="small" label={item.kind === 'calling' ? 'Calling' : 'Post-call'} variant="outlined" color={item.kind === 'calling' ? 'primary' : 'secondary'} /><Typography variant="caption" color="text.secondary">v{item.revision} · {item.tools.length ? item.tools.map(tool => tool.name).join(', ') : 'No tools'}</Typography></Stack></Stack>
+                {isDefaultTemplate ? <Chip size="small" color="success" label="Default" /> : <Button size="small" onClick={() => setDefaultMutation.mutate(item.id)} disabled={setDefaultMutation.isPending}>Set default</Button>}
+                <Button size="small" onClick={() => openEdit(item)}>Edit</Button><IconButton aria-label={`Delete ${item.name}`} color="error" size="small" disabled={deleteMutation.isPending} onClick={() => { if (window.confirm(`Delete template “${item.name}” from this API?`)) deleteMutation.mutate(item.id) }}><CloseRoundedIcon fontSize="small" /></IconButton>
+              </Card>
+            })}
           </Stack>
-        )}
+          <TablePagination component="div" count={allTemplates.length} page={templatePage} onPageChange={(_, page) => setTemplatePage(page)} rowsPerPage={templatesPerPage} onRowsPerPageChange={event => { setTemplatesPerPage(Number(event.target.value)); setTemplatePage(0) }} rowsPerPageOptions={[6, 12, 24]} labelRowsPerPage="Templates per page" />
+        </> : <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 4 }}><Typography sx={{ fontWeight: 700 }}>No templates owned by this API</Typography><Typography variant="body2" color="text.secondary">Create a calling or post-call prompt template for this API to get started.</Typography><Button variant="outlined" startIcon={<AddRoundedIcon />} onClick={openNew} sx={{ mt: 1 }}>Create template</Button></Stack>}
       </Card>
+
+      <Dialog open={Boolean(templateDetails)} onClose={() => setTemplateDetails(null)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1 }}><Stack><span>{templateDetails?.name}</span><Typography variant="body2" color="text.secondary">{templateDetails?.kind === 'calling' ? 'Calling' : 'Post-call'} template · revision {templateDetails?.revision}</Typography></Stack><IconButton aria-label="Close template details" onClick={() => setTemplateDetails(null)}><CloseRoundedIcon /></IconButton></DialogTitle>
+        <DialogContent dividers><Stack gap={1.5}><Typography variant="subtitle2">Instructions</Typography><Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{templateDetails?.instructions}</Typography><Typography variant="subtitle2">Tools</Typography><Typography variant="body2">{templateDetails?.tools.map(tool => tool.name).join(', ') || 'None'}</Typography><Typography variant="subtitle2">Variables</Typography><pre style={{ margin: 0, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{JSON.stringify(templateDetails?.variables || {}, null, 2)}</pre><Typography variant="subtitle2">Settings</Typography><pre style={{ margin: 0, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{JSON.stringify(templateDetails?.settings || {}, null, 2)}</pre></Stack></DialogContent>
+      </Dialog>
+      <Dialog open={helpOpen} onClose={() => setHelpOpen(false)} maxWidth="sm" fullWidth><DialogTitle>Prompt template notes</DialogTitle><DialogContent dividers><Typography variant="body2">When a call has no transcript, post-call AI is skipped and a signed <code>call.post_call.failed</code> event is sent. A post-call template can override the API fallback URL and add a custom payload. Otherwise, API-level fallback settings are used.</Typography></DialogContent><DialogActions><Button onClick={() => setHelpOpen(false)}>Close</Button></DialogActions></Dialog>
 
       <Dialog open={open} onClose={() => setOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ fontFamily: 'Manrope', fontWeight: 800 }}>
@@ -1307,6 +1260,8 @@ function SimulationPage(props: {
       return Array.isArray(parsed) ? parsed as SimulationTemplate[] : []
     } catch { return [] }
   })
+  const [templatePage, setTemplatePage] = useState(0)
+  const [templatesPerPage, setTemplatesPerPage] = useState(10)
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false)
   const [templateName, setTemplateName] = useState('')
   const [editingTemplateId, setEditingTemplateId] = useState('')
@@ -1395,12 +1350,12 @@ function SimulationPage(props: {
         <Button variant="outlined" onClick={openTemplateDialog} disabled={!canSaveTemplate}>Save current setup as template</Button>
       </Stack>
       {templateNotice && <Alert severity="info" sx={{ mt: 1.5 }} onClose={() => setTemplateNotice('')}>{templateNotice}</Alert>}
-      {templates.length ? <TableContainer className="table-surface" sx={{ mt: 1.5, overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 800 }}><TableHead><TableRow>{['Template', 'API', 'Destination', 'Caller ID', 'Actions'].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{templates.map(template => {
+      {templates.length ? <><TableContainer className="table-surface" sx={{ mt: 1.5, overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 800 }}><TableHead><TableRow>{['Template', 'API', 'Destination', 'Caller ID', 'Actions'].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{templates.slice(templatePage * templatesPerPage, (templatePage + 1) * templatesPerPage).map(template => {
         const templateApi = props.keys.find(key => key.id === template.apiId)
         const isUsable = Boolean(templateApi && !templateApi.revoked_at && templateApi.voice_agent_enabled && templateApi.assigned_numbers.some(number => `${number.provider}|${number.phone_number}` === template.callerId))
         const caller = templateApi?.assigned_numbers.find(number => `${number.provider}|${number.phone_number}` === template.callerId)?.phone_number
         return <TableRow key={template.id} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{template.name}</TableCell><TableCell className="table-cell">{templateApi ? `${templateApi.customer_name} · ${templateApi.name}` : 'API unavailable'}</TableCell><TableCell className="table-cell">{template.destination}</TableCell><TableCell className="table-cell">{caller || 'Unavailable'}</TableCell><TableCell className="table-cell"><Stack direction="row" gap={0.5} flexWrap="wrap"><Button size="small" onClick={() => { loadTemplateForEdit(template); setSetupOpen(true) }}>Edit</Button><Button size="small" color="error" onClick={() => deleteTemplate(template)}>Delete</Button><Button size="small" variant="contained" startIcon={<ScienceRoundedIcon />} disabled={!isUsable || props.submitting} onClick={() => props.onStart(template)}>{props.submitting ? 'Sending…' : 'Send'}</Button></Stack></TableCell></TableRow>
-      })}</TableBody></Table></TableContainer> : <div className="empty-state" style={{ padding: '32px 16px' }}>No saved templates yet.</div>}
+      })}</TableBody></Table></TableContainer><TablePagination component="div" count={templates.length} page={templatePage} onPageChange={(_, page) => setTemplatePage(page)} rowsPerPage={templatesPerPage} onRowsPerPageChange={event => { setTemplatesPerPage(Number(event.target.value)); setTemplatePage(0) }} rowsPerPageOptions={[10, 25, 50]} labelRowsPerPage="Templates per page" /></> : <div className="empty-state" style={{ padding: '32px 16px' }}>No saved templates yet.</div>}
     </Card>
     <Dialog open={setupOpen} onClose={() => setSetupOpen(false)} maxWidth="md" fullWidth scroll="paper">
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}>
@@ -1488,6 +1443,7 @@ function DocsPage() {
     { id: 'start-call', label: 'Place an outbound call', group: 'Guides' },
     { id: 'call-response', label: 'Call response', group: 'Guides' },
     { id: 'call-status', label: 'Status and results', group: 'Guides' },
+    { id: 'transcripts', label: 'Fetch a transcript', group: 'Calls' },
     { id: 'webhooks', label: 'Call outcome webhooks', group: 'Events' },
     { id: 'recordings', label: 'Recordings', group: 'Calls' },
   ]
@@ -1496,6 +1452,25 @@ function DocsPage() {
     setActiveDoc(id)
     document.getElementById(`docs-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
+  useEffect(() => {
+    const article = document.querySelector<HTMLElement>('.docs-article')
+    if (!article) return
+    const syncActiveSection = () => {
+      const readingLine = article.getBoundingClientRect().top + 110
+      let current = docsNavigation[0]?.id || 'getting-started'
+      for (const item of docsNavigation) {
+        const section = document.getElementById(`docs-${item.id}`)
+        if (section && section.getBoundingClientRect().top <= readingLine) current = item.id
+      }
+      if (article.scrollTop + article.clientHeight >= article.scrollHeight - 2) {
+        current = docsNavigation[docsNavigation.length - 1]?.id || current
+      }
+      setActiveDoc(value => value === current ? value : current)
+    }
+    article.addEventListener('scroll', syncActiveSection, { passive: true })
+    syncActiveSection()
+    return () => article.removeEventListener('scroll', syncActiveSection)
+  }, [])
   const callExample = `curl -X POST "$CHIEFVOICE_URL/v1/calls/outbound" \\
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
   -H "Content-Type: application/json" \\
@@ -1530,6 +1505,9 @@ function DocsPage() {
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
   const resultExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/post-call" \\
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY"`
+  const transcriptExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/transcript" \\
+  -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
+  -H "Accept: application/json"`
   const recordingExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/recording" \\
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
   --output call-recording.wav`
@@ -1550,6 +1528,14 @@ function DocsPage() {
       <section className="docs-section" id="docs-start-call"><div className="docs-section-title"><div><Typography variant="h5">Place an outbound call</Typography><Typography color="text.secondary">Example: confirm an appointment and extract the outcome.</Typography></div><Chip className="docs-method" label="POST  /v1/calls/outbound" /></div><CopyableCode value={callExample} minRows={26} /><Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>Replace the example phone numbers and template IDs with values assigned to your API. Use a unique <code>Idempotency-Key</code> for each call.</Typography></section>
       <section className="docs-section" id="docs-call-response"><Typography variant="h5">Read the response</Typography><Typography color="text.secondary" sx={{ mb: 1.5 }}>The API returns <code>202 Accepted</code> with a session ID while the call runs.</Typography><pre className="docs-response">{`{\n  "session_id": "<returned-session-id>",\n  "provider": "vobiz",\n  "channel": "phone",\n  "direction": "outbound",\n  "status": "starting"\n}`}</pre></section>
       <section className="docs-section" id="docs-call-status"><Typography variant="h5">Check status and results</Typography><Typography color="text.secondary" sx={{ mb: 2 }}>Use the returned session ID to check progress and retrieve structured analysis.</Typography><div className="docs-endpoint"><Typography variant="subtitle2">Call status</Typography><Chip size="small" label="GET" color="success" /><CopyableCode value={statusExample} minRows={2} /></div><div className="docs-endpoint"><Typography variant="subtitle2">Post-call result</Typography><Chip size="small" label="GET" color="success" /><CopyableCode value={resultExample} minRows={2} /></div></section>
+      <section className="docs-section" id="docs-transcripts"><div className="docs-section-title"><div><Typography variant="h5">Fetch a transcript</Typography><Typography color="text.secondary">Retrieve the transcript for a call you own.</Typography></div><Chip className="docs-method" label="GET  /v1/calls/{session_id}/transcript" /></div><Typography color="text.secondary" sx={{ mb: 1.5 }}>Use an API key with the <code>calls:read</code> scope. The transcript may be unavailable while a call is still running or if it could not be saved.</Typography><CopyableCode value={transcriptExample} minRows={3} /><Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Example response</Typography><pre className="docs-response">{`{
+  "session_id": "SESSION_ID",
+  "status": "completed",
+  "transcript_available": true,
+  "transcript_characters": 112,
+  "transcript_persistence_failed": false,
+  "transcript": "Agent: Hello, Avery.\\nCustomer: Yes, I confirm the appointment."
+}`}</pre></section>
       <section className="docs-section" id="docs-webhooks"><Typography variant="h5">Call outcome webhooks</Typography><Typography color="text.secondary" sx={{ mb: 1.5 }}>Configure a callback URL in the API settings. Post-call templates can override the failure URL and include a fixed <code>custom_payload</code>. Return a 2xx response and deduplicate events using <code>X-Chiefvoice-Event-Id</code> or <code>event_id</code>.</Typography><DocCodeBlock title="Example failure event" value={`{
   "event": "call.post_call.failed",
   "event_id": "call.post_call.failed:SESSION_ID",
