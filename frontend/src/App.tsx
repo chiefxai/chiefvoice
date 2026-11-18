@@ -1098,6 +1098,10 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
           </Button>
         </Stack>
 
+        <Alert severity="info" sx={{ mb: 2 }}>
+          No-transcript fallback applies to every template in this API. When a call has no transcript, post-call AI is skipped and the configured Call outcome webhook receives a signed <code>call.post_call.failed</code> event with code <code>transcript_unavailable</code>. Configure the webhook URL in this API's settings.
+        </Alert>
+
         {isLoading ? (
           <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={24} /></Stack>
         ) : error ? (
