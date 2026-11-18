@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
@@ -7,6 +7,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException, Request, Response
+from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.post_call.base import CompletedCall
@@ -16,6 +17,7 @@ from chiefvoice.billing import SubscriptionAuthorizer
 from chiefvoice.calls.store import IdempotencyConflict, SqlCallSessionStore
 from chiefvoice.channels.base import AmbiguousCallStart, ChannelAdapter, OutboundCall
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
+from chiefvoice.identity.api_keys import ApiKeyDirectory
 from chiefvoice.observability.setup import (
     call_duration_limit_event,
     post_call_enqueue_fallback_event,
@@ -24,7 +26,6 @@ from chiefvoice.observability.setup import (
     session_started,
 )
 from chiefvoice.sessions import AcceptedSession, Direction
-from chiefvoice.identity.api_keys import ApiKeyDirectory
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,13 @@ class OutboundCallCommand:
     live_agent_template_id: str | None = None
     live_agent_template_revision: int | None = None
     live_agent_context: dict[str, Any] | None = None
+    live_agent_language: str | None = None
+    live_agent_completion_requirements: dict[str, Any] | None = None
     post_call_context: str | None = None
     post_call_template_id: str | None = None
     post_call_template_revision: int | None = None
+    post_call_failure_webhook_url: str | None = None
+    post_call_failure_webhook_payload: dict[str, Any] | None = None
     post_call_output_schema: dict[str, Any] | None = None
     post_call_tools: list[str] | None = None
     post_call_time_zone: str | None = None
@@ -70,6 +75,8 @@ class CallCoordinator:
         require_tenant_vertex_project: bool = False,
         call_session_store: SqlCallSessionStore | None = None,
         api_key_directory: ApiKeyDirectory | None = None,
+        realtime_preflight: Callable[[AcceptedSession], Awaitable[None]] | None = None,
+        realtime_preflight_cleanup: Callable[[str, str], Awaitable[None]] | None = None,
     ):
         self.adapters = adapters
         self.subscriptions = subscriptions
@@ -82,8 +89,18 @@ class CallCoordinator:
         self.require_tenant_vertex_project = require_tenant_vertex_project
         self.call_session_store = call_session_store
         self.api_key_directory = api_key_directory
+        self.realtime_preflight = realtime_preflight
+        self.realtime_preflight_cleanup = realtime_preflight_cleanup
 
     async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
+        if command.live_agent_language:
+            try:
+                Language(command.live_agent_language)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The selected realtime provider does not support the calling template language",
+                ) from exc
         post_call_agent_enabled = True
         auto_hangup_when_complete = command.auto_hangup_when_complete
         if command.api_key_id is not None:
@@ -98,6 +115,22 @@ class CallCoordinator:
                 raise HTTPException(status_code=503, detail="Configure Google Cloud credentials for this API before placing calls")
             post_call_agent_enabled = api_config.post_call_agent_enabled
             auto_hangup_when_complete = auto_hangup_when_complete or api_config.auto_hangup_when_complete
+        has_legacy_requirements = bool(
+            isinstance(command.live_agent_context, dict)
+            and command.live_agent_context.get("mandatory_fields")
+        )
+        if (
+            auto_hangup_when_complete
+            and not command.live_agent_completion_requirements
+            and not has_legacy_requirements
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Automatic hang-up requires live_agent template completion_requirements "
+                    "or live_agent.context.mandatory_fields"
+                ),
+            )
         if post_call_agent_enabled:
             self._require_post_call_ready()
         await self._require_vertex_project(command.tenant_id)
@@ -112,6 +145,15 @@ class CallCoordinator:
             )
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
+            if (
+                command.live_agent_language
+                and command.live_agent_language.split("-", 1)[0].lower()
+                != profile.language.split("-", 1)[0].lower()
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Calling template language must match the selected voice profile language",
+                )
         session = AcceptedSession(
             channel=command.channel,
             provider=command.provider,
@@ -125,9 +167,13 @@ class CallCoordinator:
             live_agent_template_id=command.live_agent_template_id,
             live_agent_template_revision=command.live_agent_template_revision,
             live_agent_context=command.live_agent_context,
+            live_agent_language=command.live_agent_language,
+            live_agent_completion_requirements=command.live_agent_completion_requirements,
             post_call_context=command.post_call_context,
             post_call_template_id=command.post_call_template_id,
             post_call_template_revision=command.post_call_template_revision,
+            post_call_failure_webhook_url=command.post_call_failure_webhook_url,
+            post_call_failure_webhook_payload=command.post_call_failure_webhook_payload,
             post_call_output_schema=command.post_call_output_schema,
             post_call_tools=command.post_call_tools,
             post_call_time_zone=command.post_call_time_zone,
@@ -148,9 +194,13 @@ class CallCoordinator:
                 "live_agent_template_id": command.live_agent_template_id,
                 "live_agent_template_revision": command.live_agent_template_revision,
                 "live_agent_context": command.live_agent_context,
+                "live_agent_language": command.live_agent_language,
+                "live_agent_completion_requirements": command.live_agent_completion_requirements,
                 "post_call_context": command.post_call_context,
                 "post_call_template_id": command.post_call_template_id,
                 "post_call_template_revision": command.post_call_template_revision,
+                "post_call_failure_webhook_url": command.post_call_failure_webhook_url,
+                "post_call_failure_webhook_payload": command.post_call_failure_webhook_payload,
                 "post_call_output_schema": command.post_call_output_schema,
                 "post_call_tools": command.post_call_tools,
                 "post_call_time_zone": command.post_call_time_zone,
@@ -201,7 +251,36 @@ class CallCoordinator:
                 await self.call_session_store.update_state(
                     session, status="failed", end_reason="billing_authorization_failed"
                 )
+            await self._enqueue_failure_webhook(
+                session, stage="call", code="billing_authorization_failed"
+            )
             raise
+        if self.realtime_preflight is not None:
+            try:
+                await self.realtime_preflight(session)
+            except BaseException as exc:
+                await self.subscriptions.release_voice(command.tenant_id, session.session_id)
+                if self.call_session_store is not None:
+                    await self.call_session_store.update_state(
+                        session, status="failed", end_reason="realtime_preflight_failed"
+                    )
+                await self._enqueue_failure_webhook(
+                    session, stage="call", code="realtime_preflight_failed"
+                )
+                if isinstance(exc, HTTPException):
+                    raise
+                logger.warning(
+                    "realtime_preflight_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": command.provider,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="The live AI provider is unavailable; no call was placed.",
+                ) from exc
         call: OutboundCall = _OutboundCallData(
             provider=command.provider,
             channel=command.channel,
@@ -227,9 +306,16 @@ class CallCoordinator:
             try:
                 await self.call_session_store.update_state(session, status="starting")
             except BaseException:
+                if self.realtime_preflight_cleanup is not None:
+                    await self.realtime_preflight_cleanup(
+                        session.session_id, "call_state_persist_failed"
+                    )
                 await self.subscriptions.release_voice(command.tenant_id, session.session_id)
                 await self.call_session_store.update_state(
                     session, status="failed", end_reason="call_state_persist_failed"
+                )
+                await self._enqueue_failure_webhook(
+                    session, stage="call", code="call_state_persist_failed"
                 )
                 raise
         try:
@@ -256,11 +342,16 @@ class CallCoordinator:
             session.metadata["call_status"] = "reconciliation_required"
             return session
         except BaseException:
+            if self.realtime_preflight_cleanup is not None:
+                await self.realtime_preflight_cleanup(session.session_id, "provider_start_failed")
             await self.subscriptions.release_voice(command.tenant_id, session.session_id)
             if self.call_session_store is not None:
                 await self.call_session_store.update_state(
                     session, status="failed", end_reason="provider_start_failed"
                 )
+            await self._enqueue_failure_webhook(
+                session, stage="call", code="provider_start_failed"
+            )
             raise
         if self.call_session_store is not None:
             await self.call_session_store.update_state(
@@ -439,6 +530,39 @@ class CallCoordinator:
 
         session.metadata["persist_transcript_segment"] = persist_segment
 
+    async def _enqueue_failure_webhook(
+        self, session: AcceptedSession, *, stage: str, code: str, ended_at: datetime | None = None
+    ) -> None:
+        enqueue_failure = getattr(self.post_call_dispatcher, "enqueue_failure", None)
+        if not callable(enqueue_failure) or not session.tenant_id:
+            return
+        try:
+            await enqueue_failure(
+                session_id=session.session_id,
+                tenant_id=session.tenant_id,
+                event_type="call.failed" if stage == "call" else "call.post_call.failed",
+                provider=session.provider,
+                channel=session.channel,
+                direction=session.direction.value,
+                failure_stage=stage,
+                failure_code=code,
+                started_at=session.started_at.isoformat(),
+                ended_at=(ended_at or datetime.now(UTC)).isoformat(),
+                retryable=False,
+                target_url=session.post_call_failure_webhook_url,
+                custom_payload=session.post_call_failure_webhook_payload,
+            )
+        except Exception as exc:
+            logger.error(
+                "failure_webhook_enqueue_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "failure_code": code,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
     async def end_session(self, session: AcceptedSession, reason: str) -> None:
         if session.metadata.get("coordinator_session_ended"):
             return
@@ -514,6 +638,11 @@ class CallCoordinator:
                         extra={"session_id": session.session_id, "error_type": type(exc).__name__},
                     )
             session.metadata["call_status"] = "completed"
+            session.metadata["call_end_reason"] = reason
+            if reason == "provider_error":
+                await self._enqueue_failure_webhook(
+                    session, stage="call", code="provider_media_pipeline_failed", ended_at=ended_at
+                )
             await self._enqueue_post_call(session, ended_at)
 
     async def _enqueue_post_call(self, session: AcceptedSession, ended_at: datetime) -> None:
@@ -541,6 +670,17 @@ class CallCoordinator:
                     "provider": session.provider,
                 },
             )
+            if session.metadata.get("call_end_reason") != "provider_error":
+                await self._enqueue_failure_webhook(
+                    session,
+                    stage="post_call",
+                    code=(
+                        "transcript_persistence_failed"
+                        if session.metadata.get("transcript_persistence_error")
+                        else "transcript_unavailable"
+                    ),
+                    ended_at=ended_at,
+                )
             return
         call = CompletedCall(
             session_id=session.session_id,
@@ -560,6 +700,8 @@ class CallCoordinator:
             live_agent_context=(
                 session.live_agent_context if session.include_live_agent_context else None
             ),
+            failure_webhook_url=session.post_call_failure_webhook_url,
+            failure_webhook_payload=session.post_call_failure_webhook_payload,
             recording_uri=session.metadata.get("recording_uri"),
         )
         try:

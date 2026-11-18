@@ -127,6 +127,9 @@ def reliable_vertex_service_class(
             self._chiefvoice_reconnect_lock = asyncio.Lock()
             self._chiefvoice_replay_lock = asyncio.Lock()
             self._chiefvoice_ready_event = asyncio.Event()
+            self._chiefvoice_connection_open_event = asyncio.Event()
+            self._chiefvoice_connection_error_event = asyncio.Event()
+            self._chiefvoice_connection_error_type: str | None = None
             self._chiefvoice_last_ready = False
             self._chiefvoice_fallback_active = False
             self._chiefvoice_recovery_reconnect_task: asyncio.Task | None = None
@@ -136,7 +139,22 @@ def reliable_vertex_service_class(
             self._chiefvoice_recent_output_transcript_at = 0.0
             self._chiefvoice_pending_interruption = False
             self._chiefvoice_pending_interruption_task: asyncio.Task | None = None
+            self._chiefvoice_preconnected = False
             super().__init__(*args, **kwargs)
+
+        async def setup(self, setup: Any) -> None:
+            """Attach a pre-dial connection to Pipecat without reconnecting it."""
+            if self._chiefvoice_preconnected:
+                # The preflight already ran full setup with the same TaskManager.
+                # Re-running the base setup would create a second Gemini websocket
+                # and duplicate metrics/tasks. Rebind the pipeline setup metadata only.
+                self._setup = setup
+                logger.info(
+                    "gemini_preconnected_service_attached",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
+                return
+            await super().setup(setup)
 
         async def _handle_connection_error(self, error: Exception) -> bool:
             should_retry = await super()._handle_connection_error(error)
@@ -313,6 +331,10 @@ def reliable_vertex_service_class(
 
         async def _handle_session_ready(self, session: Any) -> None:
             await super()._handle_session_ready(session)
+            # This event means the provider accepted the Live API connection.
+            # It is deliberately distinct from ready_for_realtime_input, which
+            # also requires a seeded conversation context during normal calls.
+            self._chiefvoice_connection_open_event.set()
             self._chiefvoice_last_ready = bool(self._ready_for_realtime_input)
             if self._chiefvoice_last_ready:
                 self._chiefvoice_ready_event.set()
@@ -327,6 +349,14 @@ def reliable_vertex_service_class(
             )
             if self._ready_for_realtime_input:
                 await self._chiefvoice_flush_audio()
+
+        async def push_error(self, error_msg: str, exception: Exception | None = None, *args: Any, **kwargs: Any):
+            if not self._chiefvoice_connection_open_event.is_set():
+                self._chiefvoice_connection_error_type = (
+                    type(exception).__name__ if exception is not None else "GeminiConnectionError"
+                )
+                self._chiefvoice_connection_error_event.set()
+            await super().push_error(error_msg, exception, *args, **kwargs)
 
         async def broadcast_interruption(self) -> None:
             if self._chiefvoice_fallback_active:

@@ -172,6 +172,12 @@ class GeminiConversationWatchdog(FrameProcessor):
         if direction is FrameDirection.DOWNSTREAM and isinstance(frame, UserStartedSpeakingFrame):
             if is_call_terminating:
                 return
+            # A start frame is reliable evidence that the caller interacted even
+            # when the realtime pipeline never emits UserStoppedSpeakingFrame.
+            # Hangup validation must not depend solely on the latter to avoid
+            # rejecting a legitimate completion forever.
+            self._metadata["caller_interaction_seen"] = True
+            self._cancel_pending_agent_hangup_on_caller_activity()
             self._caller_is_speaking = True
             self._inactivity_stage = 0  # Reset silence timer & prompt sequence on caller speech
             self._turn_state = ConversationTurnState.CALLER_SPEAKING
@@ -195,6 +201,8 @@ class GeminiConversationWatchdog(FrameProcessor):
             # activity signal so silence prompts cannot be sent over caller
             # speech, and retain a response watchdog for the missed local turn.
             if not is_call_terminating and frame.text.strip():
+                self._metadata["caller_interaction_seen"] = True
+                self._cancel_pending_agent_hangup_on_caller_activity()
                 self._inactivity_stage = 0
                 self._diagnostics.record_conversation_event(
                     "caller_speech_detected_by_gemini_transcription"
@@ -377,6 +385,17 @@ class GeminiConversationWatchdog(FrameProcessor):
             "bot_audio_playing": self._bot_audio_playing,
             "inactivity_stage": self._inactivity_stage,
         }
+
+    def _cancel_pending_agent_hangup_on_caller_activity(self) -> None:
+        """Keep the call alive if the caller responds during the goodbye window."""
+        if not self._metadata.get("agent_hangup_pending"):
+            return
+        cancel_event = self._metadata.get("agent_hangup_cancel_event")
+        if isinstance(cancel_event, asyncio.Event):
+            cancel_event.set()
+        self._metadata.pop("auto_hangup_completion_phrase_detected", None)
+        self._diagnostics.record_conversation_event("agent_hangup_cancelled_by_caller")
+        logger.info("call_agent_hangup_cancelled_by_caller", extra=self._log_context())
 
     def _arm_response_watchdog(self, trigger: str) -> None:
         if (
@@ -640,6 +659,12 @@ class GeminiConversationWatchdog(FrameProcessor):
                 # the interrupted turn before it has produced a fresh reply.
                 # Keep completion tool calls gated through the recovery window.
                 self._metadata["gemini_watchdog_recovery_active"] = True
+                caller_turn_count = self._metadata.get("caller_turn_count", 0)
+                self._metadata["gemini_watchdog_recovery_caller_turn_count"] = (
+                    caller_turn_count
+                    if type(caller_turn_count) is int and caller_turn_count >= 0
+                    else 0
+                )
                 try:
                     recovered = await self._service.recover_unanswered_turn()
                     if recovered:
@@ -649,6 +674,7 @@ class GeminiConversationWatchdog(FrameProcessor):
                         await asyncio.sleep(self._recovery_grace)
                 finally:
                     self._metadata.pop("gemini_watchdog_recovery_active", None)
+                    self._metadata.pop("gemini_watchdog_recovery_caller_turn_count", None)
             if (
                 self._closed
                 or turn_id != self._turn_id

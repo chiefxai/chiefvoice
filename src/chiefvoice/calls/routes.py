@@ -57,16 +57,25 @@ def _merge_template_tools(
     return [name for name in dict.fromkeys(names) if name]
 
 
-def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None) -> tuple[str | None, dict[str, Any] | None, list[str], bool]:
-    if body is None:
-        return None, None, [], False
+def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None):
+    if body is None and template is None:
+        return None, None, [], False, None, None
+    body = body or LiveAgentBody()
     try:
         instructions = render_template(template, body.context) if template else ""
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     defaults = list(template.tools) if template else []
     tools = _merge_template_tools(defaults, body.tools, body.add_tools)
-    return instructions or None, body.context, tools, "end_call" in tools or bool(template and template.settings.get("auto_hangup_when_complete"))
+    settings_values = template.settings if template else {}
+    return (
+        instructions or None,
+        body.context,
+        tools,
+        "end_call" in tools or bool(settings_values.get("auto_hangup_when_complete")),
+        settings_values.get("language"),
+        settings_values.get("completion_requirements"),
+    )
 
 
 def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None):
@@ -326,7 +335,14 @@ async def start_outbound_call(
             detail="Voice pipeline is not configured",
         )
     live_template, post_call_template = await _resolve_call_templates(body, principal.api_key_id, request)
-    live_instructions, live_context, live_tools, template_hangup = _render_live(live_template, body.live_agent)
+    (
+        live_instructions,
+        live_context,
+        live_tools,
+        template_hangup,
+        live_language,
+        completion_requirements,
+    ) = _render_live(live_template, body.live_agent)
     post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
     try:
         session = await coordinator.start_outbound(
@@ -346,9 +362,17 @@ async def start_outbound_call(
                 live_agent_template_id=live_template.template_id if live_template else None,
                 live_agent_template_revision=live_template.revision if live_template else None,
                 live_agent_context=live_context,
+                live_agent_language=live_language,
+                live_agent_completion_requirements=completion_requirements,
                 post_call_context=post_context,
                 post_call_template_id=post_call_template.template_id if post_call_template else None,
                 post_call_template_revision=post_call_template.revision if post_call_template else None,
+                post_call_failure_webhook_url=(
+                    post_call_template.settings.get("failure_webhook_url") if post_call_template else None
+                ),
+                post_call_failure_webhook_payload=(
+                    post_call_template.settings.get("failure_webhook_payload") if post_call_template else None
+                ),
                 post_call_output_schema=post_schema,
                 post_call_tools=post_tools,
                 post_call_time_zone=post_time_zone,
@@ -391,6 +415,28 @@ async def get_call_status(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
     await _enforce_number_binding(store, principal, session_id)
+    return result
+
+
+@router.get("/v1/calls/{session_id}/transcript", tags=["calls"])
+async def get_call_transcript(
+    session_id: str,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Security(require_scope("calls:read"))],
+):
+    """Return a tenant-owned call transcript when available."""
+    store = getattr(request.app.state, "call_session_store", None)
+    if store is None or not hasattr(store, "get_transcript"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Call transcript storage is not configured",
+        )
+    result = await store.get_transcript(principal.tenant_id, session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+    await _enforce_number_binding(store, principal, session_id)
+    response.headers["Cache-Control"] = "private, no-store"
     return result
 
 

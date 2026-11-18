@@ -38,11 +38,13 @@ from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession, Direction
 
 logger = logging.getLogger(__name__)
+
 VOBIZ_API = "https://api.vobiz.ai"
 PIPELINE_SAMPLE_RATE = 8000
 MAX_CALL_STATE_TOKEN_LENGTH = 16_384
 AGENT_HANGUP_AUDIO_GRACE_SECONDS = 1.5
 AGENT_HANGUP_AUDIO_QUIET_SECONDS = 0.5
+AGENT_HANGUP_CALLER_RESPONSE_WINDOW_SECONDS = 1.5
 AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS = 12.0
 PROVIDER_HANGUP_PIPELINE_STOP_TIMEOUT_SECONDS = 12.0
 PROVIDER_HANGUP_SOCKET_FALLBACK_TIMEOUT_SECONDS = 3.0
@@ -193,6 +195,7 @@ class VobizAdapter:
                     "session_id": session.session_id,
                     "provider": self.provider,
                     "error_type": type(exc).__name__,
+                    "reason": "live_ai_or_media_pipeline_failed",
                 },
             )
             raise AmbiguousCallStart(
@@ -540,14 +543,18 @@ class VobizAdapter:
         self._active_media_sessions[session.session_id] = active_media
         end_reason = "completed"
         agent_hangup_request = asyncio.Event()
+        agent_hangup_cancel = asyncio.Event()
         agent_hangup_task: asyncio.Task[None] | None = None
         # Starts drained. The live pipeline clears this when bot speech begins
         # and sets it only after transport.output() has drained the turn.
         bot_speech_drained = asyncio.Event()
         bot_speech_drained.set()
         session.metadata["bot_speech_drain_event"] = bot_speech_drained
+        session.metadata["agent_hangup_cancel_event"] = agent_hangup_cancel
 
         async def hang_up_from_agent() -> None:
+            agent_hangup_cancel.clear()
+            session.metadata["agent_hangup_pending"] = True
             logger.info(
                 "vobiz_agent_hangup_drain_requested",
                 extra={"session_id": session.session_id, "provider": self.provider},
@@ -560,33 +567,48 @@ class VobizAdapter:
 
         async def hang_up_after_audio_drain() -> None:
             await agent_hangup_request.wait()
-            session.metadata["call_terminating"] = True
             logger.info(
                 "vobiz_agent_hangup_waiting_for_audio_drain",
                 extra={"session_id": session.session_id, "provider": self.provider},
             )
             await asyncio.sleep(AGENT_HANGUP_AUDIO_GRACE_SECONDS)
             deadline = asyncio.get_running_loop().time() + AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS
+            quiet_since: float | None = None
             try:
                 while True:
+                    if agent_hangup_cancel.is_set():
+                        session.metadata.pop("agent_hangup_pending", None)
+                        session.metadata.pop("auto_hangup_completion_phrase_detected", None)
+                        agent_hangup_request.clear()
+                        logger.info(
+                            "vobiz_agent_hangup_cancelled_by_caller",
+                            extra={"session_id": session.session_id, "provider": self.provider},
+                        )
+                        return
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         raise TimeoutError
                     # If Gemini is actively generating or bot audio is still playing,
                     # allow the closing audio turn to finish delivery.
                     if session.metadata.get("gemini_is_generating") or session.metadata.get("bot_audio_playing"):
+                        quiet_since = None
                         await asyncio.sleep(min(0.1, max(0.01, remaining)))
                         continue
-                    await asyncio.wait_for(bot_speech_drained.wait(), timeout=remaining)
-                    # Require a short stable-quiet interval to catch a
-                    # speech-start frame still travelling through the pipeline.
-                    await asyncio.sleep(min(AGENT_HANGUP_AUDIO_QUIET_SECONDS, remaining))
-                    if (
-                        bot_speech_drained.is_set()
-                        and not session.metadata.get("gemini_is_generating")
-                        and not session.metadata.get("bot_audio_playing")
-                    ):
+                    if not bot_speech_drained.is_set():
+                        quiet_since = None
+                        try:
+                            await asyncio.wait_for(
+                                bot_speech_drained.wait(), timeout=min(0.1, remaining)
+                            )
+                        except TimeoutError:
+                            pass
+                        continue
+                    now = asyncio.get_running_loop().time()
+                    if quiet_since is None:
+                        quiet_since = now
+                    if now - quiet_since >= AGENT_HANGUP_AUDIO_QUIET_SECONDS:
                         break
+                    await asyncio.sleep(min(0.1, max(0.01, remaining)))
             except TimeoutError:
                 logger.warning(
                     "vobiz_agent_hangup_audio_drain_timeout",
@@ -604,6 +626,44 @@ class VobizAdapter:
                 diagnostics = session.metadata.get("call_audio_diagnostics")
                 if isinstance(diagnostics, CallAudioDiagnostics):
                     diagnostics.record_conversation_event("closing_audio_drain_completed")
+            # Keep the media path and Gemini active briefly after the goodbye.
+            # The caller may have one final correction or response; VAD signals
+            # this event and the pending hangup is cancelled without ending the
+            # pipeline.
+            logger.info(
+                "vobiz_agent_hangup_listening_for_caller",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "window_seconds": AGENT_HANGUP_CALLER_RESPONSE_WINDOW_SECONDS,
+                },
+            )
+            listen_deadline = (
+                asyncio.get_running_loop().time()
+                + AGENT_HANGUP_CALLER_RESPONSE_WINDOW_SECONDS
+            )
+            while asyncio.get_running_loop().time() < listen_deadline:
+                if agent_hangup_cancel.is_set():
+                    session.metadata.pop("agent_hangup_pending", None)
+                    session.metadata.pop("auto_hangup_completion_phrase_detected", None)
+                    agent_hangup_request.clear()
+                    logger.info(
+                        "vobiz_agent_hangup_cancelled_by_caller",
+                        extra={"session_id": session.session_id, "provider": self.provider},
+                    )
+                    return
+                await asyncio.sleep(0.1)
+            if agent_hangup_cancel.is_set():
+                session.metadata.pop("agent_hangup_pending", None)
+                session.metadata.pop("auto_hangup_completion_phrase_detected", None)
+                agent_hangup_request.clear()
+                logger.info(
+                    "vobiz_agent_hangup_cancelled_by_caller",
+                    extra={"session_id": session.session_id, "provider": self.provider},
+                )
+                return
+            session.metadata.pop("agent_hangup_pending", None)
+            session.metadata["call_terminating"] = True
             try:
                 await self.hangup(session, "agent_completed")
             except Exception as exc:
@@ -631,6 +691,7 @@ class VobizAdapter:
 
             task = PipelineTask(
                 pipeline,
+                task_manager=session.metadata.get("prepared_realtime_task_manager"),
                 params=PipelineParams(
                     audio_in_sample_rate=PIPELINE_SAMPLE_RATE,
                     audio_out_sample_rate=PIPELINE_SAMPLE_RATE,
@@ -729,6 +790,17 @@ class VobizAdapter:
                     "error_type": type(exc).__name__,
                 },
             )
+            try:
+                await self.hangup(session, "live AI session or media pipeline failed")
+            except Exception as hangup_exc:
+                logger.error(
+                    "vobiz_media_failure_hangup_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "error_type": type(hangup_exc).__name__,
+                    },
+                )
             if websocket.client_state.name != "DISCONNECTED":
                 try:
                     await websocket.close(code=1011)

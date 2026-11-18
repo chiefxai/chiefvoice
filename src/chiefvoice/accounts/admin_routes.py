@@ -130,6 +130,8 @@ class CreatePhoneApiKeyBody(BaseModel):
     post_call_location: str | None = Field(default=None, max_length=64)
     recording_allowed: bool = False
     post_call_webhook_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    failure_webhook_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    failure_webhook_payload: dict | None = None
 
     @field_validator("customer_name")
     @classmethod
@@ -143,6 +145,15 @@ class CreatePhoneApiKeyBody(BaseModel):
     @classmethod
     def normalize_tags_field(cls, value: list[str]) -> list[str]:
         return list(normalize_tags(value))
+
+    @model_validator(mode="after")
+    def validate_failure_webhook(self):
+        if (self.failure_webhook_url or self.failure_webhook_payload is not None) and not self.post_call_webhook_url:
+            raise ValueError("Configure the Call outcome webhook URL before customizing failure delivery")
+        if self.failure_webhook_payload is not None:
+            if len(json.dumps(self.failure_webhook_payload, ensure_ascii=False).encode("utf-8")) > 16 * 1024:
+                raise ValueError("failure_webhook_payload exceeds the 16 KiB limit")
+        return self
 
 class UpdatePhoneApiKeyConfigBody(BaseModel):
     name: str = Field(default="Phone API", min_length=1, max_length=100)
@@ -889,7 +900,14 @@ async def simulate_api_call(
         raise HTTPException(status_code=422, detail="Simulation currently supports phone calls")
     provider, caller_id = resolve_assigned_sender(key.assigned_numbers, body.caller_id)
     live_template, post_call_template = await _resolve_call_templates(body, key.key_id, request)
-    live_instructions, live_context, _live_tools, template_hangup = _render_live(live_template, body.live_agent)
+    (
+        live_instructions,
+        live_context,
+        _live_tools,
+        template_hangup,
+        live_language,
+        completion_requirements,
+    ) = _render_live(live_template, body.live_agent)
     post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
     coordinator = get_call_coordinator(request)
     try:
@@ -901,9 +919,17 @@ async def simulate_api_call(
             live_agent_template_id=live_template.template_id if live_template else None,
             live_agent_template_revision=live_template.revision if live_template else None,
             live_agent_context=live_context,
+            live_agent_language=live_language,
+            live_agent_completion_requirements=completion_requirements,
             post_call_context=post_context,
             post_call_template_id=post_call_template.template_id if post_call_template else None,
             post_call_template_revision=post_call_template.revision if post_call_template else None,
+            post_call_failure_webhook_url=(
+                post_call_template.settings.get("failure_webhook_url") if post_call_template else None
+            ),
+            post_call_failure_webhook_payload=(
+                post_call_template.settings.get("failure_webhook_payload") if post_call_template else None
+            ),
             post_call_output_schema=post_schema,
             post_call_tools=post_tools,
             post_call_time_zone=post_time_zone,
@@ -1029,17 +1055,17 @@ async def issue_phone_api_key(
     post_call_agent = await _assigned_agent(request, body.post_call_agent_id, PLATFORM_OWNER_ID, "post_call")
     webhook_directory = getattr(request.app.state, "post_call_webhook_directory", None)
     if body.post_call_webhook_url:
-        if post_call_agent is None:
-            raise HTTPException(
-                status_code=422,
-                detail="A post-call agent is required when configuring a completion webhook",
-            )
         if webhook_directory is None:
-            raise HTTPException(status_code=503, detail="Post-call webhook storage is not configured")
+            raise HTTPException(status_code=503, detail="Webhook storage is not configured")
         try:
             await validate_public_webhook_url(body.post_call_webhook_url)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if body.failure_webhook_url:
+            try:
+                await validate_public_webhook_url(body.failure_webhook_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
     expires_at = datetime.now(UTC) + MAX_API_KEY_LIFETIME
     credentials, credentials_json = _parse_gcp_service_account(body.gcp_credentials_json)
     if not settings.credentials_encryption_key:
@@ -1101,10 +1127,16 @@ async def issue_phone_api_key(
     if body.post_call_webhook_url:
         try:
             signing_secret, configured_at = await webhook_directory.configure(
-                tenant_id, body.post_call_webhook_url
+                tenant_id,
+                body.post_call_webhook_url,
+                failure_target_url=body.failure_webhook_url,
+                failure_custom_payload=body.failure_webhook_payload,
+                update_failure_settings=True,
             )
             webhook_result = {
                 "target_url": body.post_call_webhook_url,
+                "failure_target_url": body.failure_webhook_url,
+                "failure_custom_payload": body.failure_webhook_payload,
                 "signing_secret": signing_secret,
                 "configured_at": configured_at.isoformat(),
             }

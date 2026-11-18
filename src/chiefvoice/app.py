@@ -25,6 +25,7 @@ from chiefvoice.agents.template_store import SqlAgentTemplateDirectory
 from chiefvoice.agents.template_routes import router as agent_template_router
 from chiefvoice.agents.call.configs.store import SqlAgentProfileDirectory
 from chiefvoice.agents.call.factory import create_realtime_pipeline_factory
+from chiefvoice.agents.call.prepared_session import PreparedRealtimeSessionDirectory
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
@@ -75,6 +76,7 @@ from chiefvoice.sessions import AcceptedSession
 from chiefvoice.calls.routes import router as calls_router
 
 configure_logging()
+
 logger = logging.getLogger(__name__)
 
 
@@ -138,7 +140,7 @@ async def lifespan(_app: FastAPI):
             ))
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.initialize()
-            if call_session_store is not None:
+            if call_session_store is not None and post_call_agent is not None:
                 # The transcript checkpoint is written throughout the call, so a VM
                 # restart after hangup can still enqueue analysis exactly once.
                 while True:
@@ -165,6 +167,8 @@ async def lifespan(_app: FastAPI):
                 )))
             elif post_call_agent is not None:
                 worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent)))
+            else:
+                worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_delivery_worker()))
         if post_call_dispatcher is not None and post_call_recovery_spool is not None:
             worker_tasks.append(asyncio.create_task(
                 run_spool_reconciler(post_call_recovery_spool, post_call_dispatcher)
@@ -186,6 +190,11 @@ async def lifespan(_app: FastAPI):
         logger.info("application_started", extra={"event": "application_started"})
         yield
     finally:
+        prepared_realtime_sessions = getattr(
+            _app.state, "prepared_realtime_sessions", None
+        )
+        if prepared_realtime_sessions is not None:
+            await prepared_realtime_sessions.close_all()
         for worker_task in worker_tasks:
             worker_task.cancel()
         for worker_task in worker_tasks:
@@ -246,9 +255,12 @@ def create_app(
         [AcceptedSession, BaseTransport], Pipeline | Awaitable[Pipeline]
     ]
     | None = None,
+    realtime_preflight: Callable[[AcceptedSession], Awaitable[None]] | None = None,
+    realtime_preflight_cleanup: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> FastAPI:
     application = FastAPI(title="Chiefvoice", version="0.1.0", lifespan=lifespan)
     post_call_agent = None
+    prepared_realtime_sessions = PreparedRealtimeSessionDirectory()
     vertex_project_directory = None
     vertex_project_provisioner = None
     if api_key_directory is None and settings.database_url:
@@ -377,10 +389,6 @@ def create_app(
     post_call_required = settings.post_call_agent_provider != "disabled"
     if (
         post_call_dispatcher is None
-        and (
-            post_call_agent is not None
-            or settings.post_call_execution_backend in {"lambda", "gcp_function", "sqs", "gcp_cloud_tasks"}
-        )
         and settings.database_url
         and settings.post_call_encryption_key
     ):
@@ -434,12 +442,18 @@ def create_app(
                 google_ai_api_key=settings.google_ai_api_key,
                 google_ai_model=settings.google_ai_live_model,
                 api_key_directory=api_key_directory,
+                prepared_sessions=prepared_realtime_sessions,
             )
             voice_pipeline_factory = create_realtime_pipeline_factory(
                 RealtimeAgentRegistry([vertex_provider]),
                 "vertex",
                 recording_store=recording_store,
+                prepared_sessions=prepared_realtime_sessions,
             )
+            if realtime_preflight is None:
+                realtime_preflight = vertex_provider.preflight
+            if realtime_preflight_cleanup is None:
+                realtime_preflight_cleanup = vertex_provider.cleanup_prepared_session
     adapters = dict(channel_adapters or {})
     if account_store is None and settings.database_url:
         account_store = SqlAccountStore(settings.database_url)
@@ -583,11 +597,14 @@ def create_app(
             require_tenant_vertex_project=settings.vertex_project_isolation_enabled,
             call_session_store=call_session_store,
             api_key_directory=api_key_directory,
+            realtime_preflight=realtime_preflight,
+            realtime_preflight_cleanup=realtime_preflight_cleanup,
         )
         if subscription_authorizer is not None
         else None
     )
     application.state.voice_pipeline_factory = voice_pipeline_factory
+    application.state.prepared_realtime_sessions = prepared_realtime_sessions
     if token_verifier is None and settings.oidc_issuer and settings.oidc_audience and settings.oidc_jwks_url:
         token_verifier = OidcTokenVerifier(
             issuer=settings.oidc_issuer,

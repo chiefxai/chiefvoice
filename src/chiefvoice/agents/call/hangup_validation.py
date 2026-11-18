@@ -47,6 +47,45 @@ def extract_mandatory_fields(session: AcceptedSession) -> set[str]:
     return mandatory
 
 
+def _required_completion_fields(
+    session: AcceptedSession, collected: dict[str, Any]
+) -> tuple[set[str], set[str]]:
+    """Resolve required fields and reject undeclared conditional outcomes.
+
+    A conditional contract is also an allow-list for completed outcomes. Without
+    this check, an agent could report an unlisted value (for example ``unclear``)
+    and satisfy only the unconditional fields, ending the call without collecting
+    the branch-specific information.
+    """
+    requirements = session.live_agent_completion_requirements
+    if not isinstance(requirements, dict):
+        return set(), set()
+    required = set(requirements.get("always", []))
+    conditional_values: dict[str, list[Any]] = {}
+    for branch in requirements.get("when", []):
+        field = branch.get("field")
+        expected = branch.get("equals")
+        actual = collected.get(field)
+        if isinstance(field, str) and field:
+            required.add(field)
+            conditional_values.setdefault(field, []).append(expected)
+        # JSON booleans and numbers compare equal in Python (True == 1), but
+        # they are distinct values in a caller's completion contract.
+        if type(actual) is type(expected) and actual == expected:
+            required.update(branch.get("required", []))
+
+    unmatched = {
+        field
+        for field, allowed_values in conditional_values.items()
+        if field not in collected
+        or not any(
+            type(collected[field]) is type(expected) and collected[field] == expected
+            for expected in allowed_values
+        )
+    }
+    return required, unmatched
+
+
 def validate_hangup_request(
     session: AcceptedSession,
     arguments: dict[str, Any] | None = None,
@@ -92,13 +131,19 @@ def validate_hangup_request(
 
     # 2. Check premature interaction (did caller speak at least once?)
     caller_turns = session.metadata.get("caller_turn_count", 0)
-    if caller_turns == 0 and not is_early_exit:
+    caller_interaction_seen = bool(session.metadata.get("caller_interaction_seen"))
+    if caller_turns == 0 and not caller_interaction_seen and not is_early_exit:
         if diagnostics is not None:
             diagnostics.record_conversation_event("hangup_premature_rejected")
             diagnostics.record_conversation_event("hangup_validation_rejected")
         logger.warning(
             "call_agent_hangup_rejected_no_interaction",
-            extra={"session_id": session.session_id, "provider": session.provider},
+            extra={
+                "session_id": session.session_id,
+                "provider": session.provider,
+                "caller_turn_count": caller_turns,
+                "caller_interaction_seen": caller_interaction_seen,
+            },
         )
         return HangupValidationResult(
             allowed=False,
@@ -113,7 +158,8 @@ def validate_hangup_request(
 
     # 3. Check mandatory information if this is a completion exit
     mandatory_fields = extract_mandatory_fields(session)
-    if mandatory_fields and not is_early_exit:
+    completion_requirements = session.live_agent_completion_requirements
+    if (mandatory_fields or completion_requirements) and not is_early_exit:
         collected: dict[str, Any] = {}
         # Merge existing session-collected data
         if isinstance(session.metadata.get("collected_data"), dict):
@@ -127,9 +173,11 @@ def validate_hangup_request(
             if k not in {"reason", "summary", "notes", "collected_data"}:
                 collected[k] = v
 
+        completion_fields, unmatched_outcomes = _required_completion_fields(session, collected)
+        required_fields = mandatory_fields | completion_fields
         missing = [
             field
-            for field in sorted(mandatory_fields)
+            for field in sorted(required_fields)
             if field not in collected or collected[field] is None or collected[field] == ""
         ]
         if missing:
@@ -153,7 +201,32 @@ def validate_hangup_request(
                 message=(
                     f"Cannot end call yet: mandatory information has not been collected. "
                     f"Missing fields: {', '.join(missing)}. "
-                    "Please ask the caller for this information before ending the call."
+                    "Please ask the caller for this information before ending the call. "
+                    "Include the collected values in the collected_data argument when retrying."
+                ),
+            )
+
+        if unmatched_outcomes:
+            if diagnostics is not None:
+                diagnostics.record_conversation_event("hangup_premature_rejected")
+                diagnostics.record_conversation_event("hangup_validation_rejected")
+            logger.warning(
+                "call_agent_hangup_rejected_unmatched_completion_outcome",
+                extra={
+                    "session_id": session.session_id,
+                    "unmatched_fields": sorted(unmatched_outcomes),
+                },
+            )
+            return HangupValidationResult(
+                allowed=False,
+                status="rejected",
+                error="premature_hangup",
+                reason="completion_outcome_unmatched",
+                missing_fields=sorted(unmatched_outcomes),
+                message=(
+                    "Cannot complete the call because the reported outcome does not match "
+                    "a configured completion branch. Clarify the caller's answer or use an "
+                    "appropriate early-exit reason."
                 ),
             )
 

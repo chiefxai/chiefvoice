@@ -1,6 +1,9 @@
 import json
 import logging
+import asyncio
+import time
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 from fastapi import HTTPException
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -14,12 +17,14 @@ from chiefvoice.agents.call.completion import (
     completion_phrase_for_language,
 )
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
+from chiefvoice.agents.call.prepared_session import PreparedRealtimeSessionDirectory
 from chiefvoice.agents.call.providers.base import RealtimeAgentProvider
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
 from chiefvoice.identity.api_keys import ApiKeyDirectory
 from chiefvoice.sessions import AcceptedSession
 
 logger = logging.getLogger(__name__)
+
 
 
 class VertexGeminiLiveProvider(RealtimeAgentProvider):
@@ -43,6 +48,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         google_ai_api_key: str | None = None,
         google_ai_model: str = "gemini-3.1-flash-live-preview",
         api_key_directory: ApiKeyDirectory | None = None,
+        prepared_sessions: PreparedRealtimeSessionDirectory | None = None,
     ):
         if not location:
             raise ValueError("A Vertex AI location is required")
@@ -63,6 +69,115 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         self.google_ai_api_key = google_ai_api_key
         self.google_ai_model = google_ai_model
         self.api_key_directory = api_key_directory
+        self.prepared_sessions = prepared_sessions or PreparedRealtimeSessionDirectory()
+
+    async def preflight(self, session: AcceptedSession) -> None:
+        """Connect Gemini before dialing and retain that connection for the call."""
+        from pipecat.clocks.system_clock import SystemClock
+        from pipecat.processors.frame_processor import FrameProcessorSetup
+        from pipecat.utils.asyncio.task_manager import TaskManager
+
+        processors = await self.create_processors(session)
+        service = next(
+            (
+                processor
+                for processor in processors
+                if hasattr(processor, "_chiefvoice_connection_open_event")
+            ),
+            None,
+        )
+        if service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Gemini Live preflight is unavailable; no call was placed.",
+            )
+
+        started_at = time.monotonic()
+        task_manager = TaskManager()
+        setup = FrameProcessorSetup(
+            clock=SystemClock(),
+            task_manager=task_manager,
+            pipeline_worker=SimpleNamespace(),
+        )
+        setup_started = False
+        retained = False
+        open_waiter: asyncio.Task | None = None
+        error_waiter: asyncio.Task | None = None
+        try:
+            setup_started = True
+            await service.setup(setup)
+            open_event = service._chiefvoice_connection_open_event
+            error_event = service._chiefvoice_connection_error_event
+            open_waiter = asyncio.create_task(open_event.wait())
+            error_waiter = asyncio.create_task(error_event.wait())
+            done, _ = await asyncio.wait(
+                {open_waiter, error_waiter},
+                timeout=15.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if open_waiter not in done:
+                error_type = getattr(service, "_chiefvoice_connection_error_type", None)
+                raise TimeoutError(error_type or "Gemini Live connection timed out")
+            elapsed_ms = round((time.monotonic() - started_at) * 1000)
+            logger.info(
+                "gemini_prepared_session_ready",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": "vertex",
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+            service._chiefvoice_preconnected = True
+            await self.prepared_sessions.put(
+                session.session_id,
+                processors,
+                task_manager,
+                session.metadata,
+            )
+            retained = True
+        except Exception as exc:
+            error_type = getattr(service, "_chiefvoice_connection_error_type", None)
+            logger.warning(
+                "gemini_live_preflight_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": "vertex",
+                    "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+                    "error_type": error_type or type(exc).__name__,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Gemini Live could not be reached for this API and model; "
+                    "no call was placed. Check the API's Vertex project, model access, "
+                    "credentials, location, and quota."
+                ),
+            ) from exc
+        finally:
+            for waiter in (open_waiter, error_waiter):
+                if waiter is not None and not waiter.done():
+                    waiter.cancel()
+            if open_waiter is not None or error_waiter is not None:
+                await asyncio.gather(
+                    *(waiter for waiter in (open_waiter, error_waiter) if waiter is not None),
+                    return_exceptions=True,
+                )
+            if setup_started and not retained:
+                for processor in reversed(processors):
+                    try:
+                        await processor.cleanup()
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "gemini_live_preflight_cleanup_failed",
+                            extra={
+                                "session_id": session.session_id,
+                                "error_type": type(cleanup_exc).__name__,
+                            },
+                        )
+
+    async def cleanup_prepared_session(self, session_id: str, reason: str) -> None:
+        await self.prepared_sessions.discard(session_id, reason)
 
     async def create_processors(self, session: AcceptedSession) -> Sequence[FrameProcessor]:
         # Import lazily so deployments using another backend do not require Google packages.
@@ -83,7 +198,9 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
         voice = self.voice
         system_instruction = self.system_instruction
         params = None
-        language_tag = None
+        language_tag = session.live_agent_language
+        if language_tag:
+            session.metadata["voice_language"] = language_tag
         if session.bot_config_id is not None:
             if self.profile_directory is None or session.tenant_id is None:
                 raise HTTPException(
@@ -92,7 +209,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             profile = await self.profile_directory.get(session.tenant_id, session.bot_config_id)
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
-            language_tag = profile.language
+            if language_tag and language_tag.split("-", 1)[0].lower() != profile.language.split("-", 1)[0].lower():
+                raise HTTPException(
+                    status_code=422,
+                    detail="Calling template language must match the selected voice profile language",
+                )
+            language_tag = language_tag or profile.language
             session.metadata["voice_language"] = language_tag
             try:
                 Language(language_tag)
@@ -121,6 +243,13 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 params = GeminiLiveVertexLLMService.Settings(
                     model=model, voice=voice, language=language_tag
                 )
+
+        elif language_tag:
+            # A template can define language even when no separate profile is selected.
+            system_instruction = (
+                f"{system_instruction.strip()}\n\n"
+                f"Respond consistently in {language_tag}. Do not switch languages unless the caller explicitly asks."
+            )
 
         if session.live_agent_instructions and session.live_agent_instructions.strip():
             system_instruction = (
@@ -172,7 +301,10 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 if service_type == "google_ai"
                 else GeminiLiveVertexLLMService.Settings
             )
-            params = settings_type(model=model, voice=voice)
+            if service_type == "vertex" and language_tag:
+                params = settings_type(model=model, voice=voice, language=language_tag)
+            else:
+                params = settings_type(model=model, voice=voice)
         params.vad = GeminiVADParams(
             start_sensitivity=StartSensitivity.START_SENSITIVITY_LOW,
             end_sensitivity=EndSensitivity.END_SENSITIVITY_LOW,
@@ -194,24 +326,38 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
         tools = None
         if session.auto_hangup_when_complete:
-            completion_phrase = completion_phrase_for_language(
-                session.metadata.get("voice_language")
-            )
-            completion_marker = completion_marker_for_language(
-                session.metadata.get("voice_language")
-            )
-            session.metadata["auto_hangup_completion_phrase"] = completion_phrase
-            session.metadata["auto_hangup_completion_marker"] = completion_marker
+            effective_language = language_tag or session.metadata.get("voice_language")
+            completion_phrase = completion_phrase_for_language(effective_language)
+            completion_marker = completion_marker_for_language(effective_language)
+            if completion_phrase and completion_marker:
+                session.metadata["auto_hangup_completion_phrase"] = completion_phrase
+                session.metadata["auto_hangup_completion_marker"] = completion_marker
             logger.info(
                 "call_agent_hangup_tool_registered",
                 extra={"session_id": session.session_id, "provider": session.provider},
             )
+            completion_guidance = (
+                "make the following sentence your final spoken response, exactly as written: "
+                f"{completion_phrase} "
+                if completion_phrase
+                else "give a brief thank-you and goodbye in the same language used in the conversation. "
+            )
+            requirements_guidance = ""
+            if session.live_agent_completion_requirements:
+                requirements_guidance = (
+                    "The server will reject a completed hangup unless collected_data satisfies "
+                    "this completion contract. Include all collected values in hang_up_call: "
+                    f"{json.dumps(session.live_agent_completion_requirements, ensure_ascii=False)}. "
+                )
             system_instruction = (
                 f"{system_instruction.strip()}\n\n"
                 "Automatic call completion is enabled. Track every field or outcome requested "
                 "by the live-call instructions. Once all requested information is collected, "
-                "make the following sentence your final spoken response, exactly as written: "
-                f"{completion_phrase} Do not say this sentence before the task is complete. "
+                f"{completion_guidance}Do not say this sentence before the task is complete. "
+                f"{requirements_guidance}"
+                "If a conditional completion outcome does not match one of the configured "
+                "branches, ask a clarifying question or use an appropriate early-exit reason; "
+                "do not treat it as completed. "
                 "The platform will request hangup after this final audio has drained. Also call "
                 "hang_up_call with reason completed and the collected data when possible. If the "
                 "caller clearly declines, cannot provide a requested item, or asks to end the "
@@ -222,14 +368,6 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             async def hang_up_call(params: FunctionCallParams) -> None:
                 arguments = params.arguments if isinstance(params.arguments, dict) else {}
-                logger.info(
-                    "call_agent_hangup_tool_invoked",
-                    extra={
-                        "session_id": session.session_id,
-                        "provider": session.provider,
-                        "arguments": arguments,
-                    },
-                )
                 reason = str(arguments.get("reason", "completed")).strip().lower()
                 early_exit_reasons = {
                     "caller_declined",
@@ -240,21 +378,58 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     "emergency",
                     "wrong_number",
                 }
-                if (
+                recovery_active = bool(
                     session.metadata.get("gemini_watchdog_recovery_active")
-                    and not any(value in reason for value in early_exit_reasons)
+                )
+                caller_turn_count_value = session.metadata.get("caller_turn_count", 0)
+                recovery_turn_count_value = session.metadata.get(
+                    "gemini_watchdog_recovery_caller_turn_count", 0
+                )
+                caller_turn_count = (
+                    caller_turn_count_value
+                    if type(caller_turn_count_value) is int and caller_turn_count_value >= 0
+                    else 0
+                )
+                recovery_turn_count = (
+                    recovery_turn_count_value
+                    if type(recovery_turn_count_value) is int
+                    and recovery_turn_count_value >= 0
+                    else 0
+                )
+                caller_spoke_during_recovery = caller_turn_count > recovery_turn_count
+                logger.info(
+                    "call_agent_hangup_tool_invoked",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": session.provider,
+                        "reason": reason,
+                        "recovery_active": recovery_active,
+                        "caller_spoke_during_recovery": caller_spoke_during_recovery,
+                    },
+                )
+                if (
+                    recovery_active
+                    and (
+                        not any(value in reason for value in early_exit_reasons)
+                        or not caller_spoke_during_recovery
+                    )
                 ):
                     logger.warning(
                         "call_agent_hangup_rejected_during_gemini_recovery",
-                        extra={"session_id": session.session_id, "provider": session.provider},
+                        extra={
+                            "session_id": session.session_id,
+                            "provider": session.provider,
+                            "reason": reason,
+                            "caller_spoke_during_recovery": caller_spoke_during_recovery,
+                        },
                     )
                     await params.result_callback({
                         "success": False,
                         "reason": "gemini_recovery_in_progress",
                         "message": (
-                            "Do not end the call while the voice session is recovering. "
-                            "Continue the conversation after recovery and only end it when "
-                            "the requested task is complete."
+                            "Do not end the call based on a stale turn while the voice session "
+                            "is recovering. Continue the conversation after recovery. An early "
+                            "exit is allowed only after the caller speaks again during recovery."
                         ),
                     })
                     return
@@ -287,6 +462,20 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                         "message": validation.message,
                     })
                     return
+
+                logger.info(
+                    "call_agent_hangup_validation_passed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": session.provider,
+                        "reason": reason,
+                        "collected_fields": sorted(
+                            session.metadata.get("collected_data", {}).keys()
+                        )
+                        if isinstance(session.metadata.get("collected_data"), dict)
+                        else [],
+                    },
+                )
 
                 callback = session.metadata.get("hang_up_call")
                 if not callable(callback):
@@ -325,7 +514,11 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     },
                     "collected_data": {
                         "type": "object",
-                        "description": "Key-value dictionary of mandatory fields and data collected during the call.",
+                        "description": (
+                            "Key-value dictionary of all required values collected during the call. "
+                            "Required when the server has a completion contract; include the field "
+                            "names and caller-provided values exactly, without guessing."
+                        ),
                     },
                     "summary": {
                         "type": "string",

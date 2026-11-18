@@ -12,6 +12,8 @@ router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
 
 class ConfigurePostCallWebhookBody(BaseModel):
     target_url: str = Field(min_length=8, max_length=2048)
+    failure_webhook_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    failure_webhook_payload: dict | None = None
 
 
 def _directory(request: Request) -> PostCallWebhookDirectory:
@@ -32,15 +34,36 @@ async def configure_post_call_webhook(
     request: Request,
     principal: Annotated[Principal, Security(require_scope("webhooks:write"))],
 ):
+    directory = _directory(request)
+    failure_fields_sent = bool(
+        {"failure_webhook_url", "failure_webhook_payload"} & body.model_fields_set
+    )
+    current = await directory.get(principal.tenant_id) if failure_fields_sent else None
+    failure_target_url = (
+        body.failure_webhook_url
+        if "failure_webhook_url" in body.model_fields_set
+        else current.get("failure_target_url") if current else None
+    )
+    failure_custom_payload = (
+        body.failure_webhook_payload
+        if "failure_webhook_payload" in body.model_fields_set
+        else current.get("failure_custom_payload") if current else None
+    )
     try:
         secret, created_at = await _directory(request).configure(
-            principal.tenant_id, body.target_url
+            principal.tenant_id,
+            body.target_url,
+            failure_target_url=failure_target_url,
+            failure_custom_payload=failure_custom_payload,
+            update_failure_settings=failure_fields_sent,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "status": "configured",
         "target_url": body.target_url,
+        "failure_webhook_url": failure_target_url,
+        "failure_webhook_payload": failure_custom_payload,
         "signing_secret": secret,
         "configured_at": created_at.isoformat(),
         "message": "Copy the signing secret now; it will not be shown again.",
@@ -58,6 +81,8 @@ async def get_post_call_webhook(
     return {
         "status": "configured",
         "target_url": config["target_url"],
+        "failure_webhook_url": config.get("failure_target_url"),
+        "failure_webhook_payload": config.get("failure_custom_payload"),
         "created_at": config["created_at"].isoformat(),
         "updated_at": config["updated_at"].isoformat(),
         "signing_secret_configured": True,

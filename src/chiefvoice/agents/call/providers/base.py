@@ -14,3 +14,7 @@ class RealtimeAgentProvider(Protocol):
     def create_processors(
         self, session: AcceptedSession
     ) -> Sequence[FrameProcessor] | Awaitable[Sequence[FrameProcessor]]: ...
+
+    async def preflight(self, session: AcceptedSession) -> None:
+        """Confirm provider connectivity before an outbound call is dialed."""
+        ...

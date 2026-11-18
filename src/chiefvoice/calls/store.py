@@ -412,6 +412,8 @@ class SqlCallSessionStore:
                             if session.include_live_agent_context
                             else None
                         ),
+                        failure_webhook_url=session.post_call_failure_webhook_url,
+                        failure_webhook_payload=session.post_call_failure_webhook_payload,
                         recording_uri=session.metadata.get("recording_uri"),
                     )
                 )
@@ -443,6 +445,31 @@ class SqlCallSessionStore:
                 "transcript_available": bool(row.encrypted_transcript),
                 "transcript_persistence_failed": row.transcript_persistence_failed,
                 "post_call_enqueued": row.post_call_enqueued_at is not None,
+            }
+
+    async def get_transcript(self, tenant_id: str, session_id: str) -> dict[str, Any] | None:
+        """Load a tenant-owned transcript and its availability state."""
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+            )
+            if row is None:
+                return None
+            transcript = None
+            if row.encrypted_transcript:
+                transcript = self._fernet.decrypt(
+                    row.encrypted_transcript.encode("ascii")
+                ).decode("utf-8")
+            return {
+                "session_id": row.session_id,
+                "status": row.status,
+                "transcript_available": bool(transcript),
+                "transcript_characters": row.transcript_characters,
+                "transcript_persistence_failed": row.transcript_persistence_failed,
+                "transcript": transcript,
             }
 
     async def list_for_api_key(
@@ -609,9 +636,13 @@ class SqlCallSessionStore:
             "live_agent_template_id": session.live_agent_template_id,
             "live_agent_template_revision": session.live_agent_template_revision,
             "live_agent_context": session.live_agent_context,
+            "live_agent_language": session.live_agent_language,
+            "live_agent_completion_requirements": session.live_agent_completion_requirements,
             "post_call_context": session.post_call_context,
             "post_call_template_id": session.post_call_template_id,
             "post_call_template_revision": session.post_call_template_revision,
+            "post_call_failure_webhook_url": session.post_call_failure_webhook_url,
+            "post_call_failure_webhook_payload": session.post_call_failure_webhook_payload,
             "post_call_output_schema": session.post_call_output_schema,
             "post_call_tools": session.post_call_tools,
             "post_call_time_zone": session.post_call_time_zone,
@@ -644,9 +675,13 @@ class SqlCallSessionStore:
             live_agent_template_id=payload.get("live_agent_template_id"),
             live_agent_template_revision=payload.get("live_agent_template_revision"),
             live_agent_context=payload.get("live_agent_context"),
+            live_agent_language=payload.get("live_agent_language"),
+            live_agent_completion_requirements=payload.get("live_agent_completion_requirements"),
             post_call_context=payload.get("post_call_context"),
             post_call_template_id=payload.get("post_call_template_id"),
             post_call_template_revision=payload.get("post_call_template_revision"),
+            post_call_failure_webhook_url=payload.get("post_call_failure_webhook_url"),
+            post_call_failure_webhook_payload=payload.get("post_call_failure_webhook_payload"),
             post_call_output_schema=payload.get("post_call_output_schema"),
             post_call_tools=payload.get("post_call_tools"),
             post_call_time_zone=payload.get("post_call_time_zone"),

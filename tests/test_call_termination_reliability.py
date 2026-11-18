@@ -151,6 +151,21 @@ def test_hangup_rejected_when_no_caller_interaction():
     assert diagnostics._vad_events["hangup_premature_rejected"] == 1
 
 
+def test_hangup_allowed_after_vad_interaction_without_completed_turn():
+    """VAD speech-start counts even if no matching stop-speaking frame arrives."""
+    session = AcceptedSession(
+        channel="phone",
+        provider="vobiz",
+        direction=Direction.OUTBOUND,
+        metadata={"caller_interaction_seen": True},
+    )
+
+    result = validate_hangup_request(session, {"reason": "completed"})
+
+    assert result.allowed is True
+    assert result.status == "approved"
+
+
 def test_hangup_allowed_on_caller_declined_without_interaction():
     session = AcceptedSession(
         channel="phone",
