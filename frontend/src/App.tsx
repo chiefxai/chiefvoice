@@ -21,7 +21,6 @@ import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded'
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
 import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
-import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded'
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded'
@@ -866,14 +865,11 @@ function ApiPage({ numbers, keys, agents, loading, error, onView, onManage, onDe
   </>
 }
 
-function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal, callsPage, callsPageSize, onCallsPageChange, onCallsPageSizeChange, callsLoading, callsError, billing, billingLoading, billingError, onAdjustBilling, configurationOpen }: {
+function ApiDetailsPage({ api: apiKey, agents, loading, error, billing, billingLoading, billingError, onAdjustBilling, configurationOpen, onCloseConfiguration }: {
   api: PlatformApiKey | null; agents: AgentConfiguration[]; loading: boolean; error: unknown
-  calls: ApiCallLog[]; callsTotal: number; callsPage: number; callsPageSize: number
-  onCallsPageChange: (page: number) => void; onCallsPageSizeChange: (size: number) => void
-  callsLoading: boolean; callsError: unknown; billing?: ApiBillingUsage
-  billingLoading: boolean; billingError: unknown; onAdjustBilling: (amount: string) => void; configurationOpen: boolean
+  billing?: ApiBillingUsage; billingLoading: boolean; billingError: unknown
+  onAdjustBilling: (amount: string) => void; configurationOpen: boolean; onCloseConfiguration: () => void
 }) {
-  const [historyOpen, setHistoryOpen] = useState(false)
   const voiceAgent = agents.find(agent => agent.id === apiKey?.voice_agent_id)
   const postCallAgent = agents.find(agent => agent.id === apiKey?.post_call_agent_id)
   return <>
@@ -881,57 +877,33 @@ function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal
       <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1} sx={{ mb: 1.5 }}><Stack gap={0.25}><Typography variant="h6" sx={{ fontWeight: 800 }}>Billing overview</Typography><Typography variant="body2" color="text.secondary">{apiKey.customer_name} · <StatusChip enabled={!apiKey.revoked_at} label={apiKey.revoked_at ? 'Revoked' : 'Active'} /></Typography></Stack>{billing?.configured && billing.billing_mode && <Chip color="primary" variant="outlined" label={`${billing.billing_mode} plan`} sx={{ textTransform: 'capitalize' }} />}</Stack>
         {billingLoading ? <CircularProgress size={22} /> : billingError ? <Alert severity="error">{errorText(billingError)}</Alert> : billing?.configured ? <>
-          <div className="api-kpi-grid">
-            <UsageCard label="Charges" value={formatMoney(billing.charges_minor || 0, billing.currency || 'INR')} />
-            <UsageCard label="Billed time" value={`${Math.floor((billing.billable_seconds || 0) / 60)}m ${(billing.billable_seconds || 0) % 60}s`} />
-            <UsageCard label="Total calls" value={String(billing.calls ?? 0)} />
-            <UsageCard label={billing.billing_mode === 'prepaid' ? 'Available balance' : 'Available credit'} value={billing.billing_mode === 'prepaid' ? formatMoney(billing.customer_prepaid_balance_minor || 0, billing.currency || 'INR') : formatMoney(Math.max(0, (billing.customer_postpaid_credit_limit_minor || 0) - (billing.customer_postpaid_used_minor || 0)), billing.currency || 'INR')} />
-          </div>
+          <div className="api-kpi-grid"><UsageCard label="Charges" value={formatMoney(billing.charges_minor || 0, billing.currency || 'INR')} /><UsageCard label="Billed time" value={`${Math.floor((billing.billable_seconds || 0) / 60)}m ${(billing.billable_seconds || 0) % 60}s`} /><UsageCard label="Total calls" value={String(billing.calls ?? 0)} /><UsageCard label={billing.billing_mode === 'prepaid' ? 'Available balance' : 'Available credit'} value={billing.billing_mode === 'prepaid' ? formatMoney(billing.customer_prepaid_balance_minor || 0, billing.currency || 'INR') : formatMoney(Math.max(0, (billing.customer_postpaid_credit_limit_minor || 0) - (billing.customer_postpaid_used_minor || 0)), billing.currency || 'INR')} /></div>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1} sx={{ mt: 1.5 }}><Typography variant="body2" color="text.secondary">Rate: {formatMoney(billing.rate_per_minute_minor || 0, billing.currency || 'INR')} per minute</Typography><Button variant="outlined" size="small" onClick={() => { const minor = billing.billing_mode === 'prepaid' ? billing.customer_prepaid_balance_minor : billing.customer_postpaid_credit_limit_minor; onAdjustBilling(((minor || 0) / 100).toFixed(2)) }}>Adjust balance / limit</Button></Stack>
         </> : <Alert severity="warning">{billing?.message || 'No billing plan is configured for this API customer.'}</Alert>}
       </Card>
-
       <ApiTemplatesSection apiId={apiKey.id} />
-
-      <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-        <Typography variant="h6" sx={{ fontWeight: 800 }}>Call history</Typography>
-        <Button variant={historyOpen ? 'contained' : 'outlined'} startIcon={<HistoryRoundedIcon />} onClick={() => setHistoryOpen(value => !value)}>{historyOpen ? 'Hide history' : `View history · ${callsTotal}`}</Button>
-      </Stack>
-      <Collapse in={historyOpen} unmountOnExit>
-        <Card className="surface-card" sx={{ p: 0, overflow: 'hidden' }}>
-          {callsLoading && !calls.length ? <Stack alignItems="center" sx={{ py: 6 }}><CircularProgress size={24} /></Stack> : callsError ? <Alert severity="error" sx={{ m: 2 }}>{errorText(callsError)}</Alert> : calls.length ? <>
-          <TableContainer className="table-surface" sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 850 }}><TableHead><TableRow>{['Started', 'Direction', 'Caller → recipient', 'Duration', 'Call status', 'Post-call', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{calls.map(call => <ApiCallRecord key={call.session_id} apiId={apiKey.id} call={call} />)}</TableBody></Table></TableContainer>
-          <TablePagination
-            component="div"
-            count={callsTotal}
-            page={callsPage}
-            onPageChange={(_, page) => onCallsPageChange(page)}
-            rowsPerPage={callsPageSize}
-            onRowsPerPageChange={event => onCallsPageSizeChange(Number(event.target.value))}
-            rowsPerPageOptions={[10, 25, 50, 100]}
-            labelRowsPerPage="Calls per page"
-            showFirstButton
-            showLastButton
-            sx={{ borderTop: 1, borderColor: 'divider', '.MuiTablePagination-toolbar': { px: { xs: 1.5, md: 2.5 }, flexWrap: 'wrap' } }}
-          />
-          </> : <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 5 }}><Typography sx={{ fontWeight: 700 }}>No calls yet</Typography><Typography variant="body2" color="text.secondary">Calls placed with this API will appear here.</Typography></Stack>}
-        </Card>
-      </Collapse>
-      <Collapse in={configurationOpen} unmountOnExit>
-        <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-          <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}><Stack><Typography variant="h6" sx={{ fontWeight: 800 }}>API configuration</Typography><Typography variant="body2" color="text.secondary">Phone numbers, agents, and runtime settings</Typography></Stack><Chip size="small" variant="outlined" label={`Key · ${apiKey.key_prefix}`} /></Stack>
-          <div className="api-kpi-grid">
-            <UsageCard label="Assigned numbers" value={apiKey.assigned_numbers.map(number => number.phone_number).join(', ') || 'None'} />
-            <UsageCard label="Recording" value={apiKey.recording_allowed ? 'Enabled' : 'Disabled'} />
-            <UsageCard label="Calling agent" value={voiceAgent ? `${voiceAgent.name} · ${voiceAgent.provider}` : 'Not assigned'} />
-            <UsageCard label="Calling model / location" value={`${apiKey.voice_agent_enabled === false ? 'Disabled' : apiKey.voice_model || voiceAgent?.model || 'Not configured'} · ${apiKey.voice_location || apiKey.vertex_location || voiceAgent?.location || '—'}`} />
-            <UsageCard label="Post-call agent" value={postCallAgent ? `${postCallAgent.name} · ${postCallAgent.provider}` : 'Not assigned'} />
-            <UsageCard label="Post-call model / location" value={`${apiKey.post_call_agent_enabled === false ? 'Disabled' : apiKey.post_call_model || postCallAgent?.model || 'Not configured'} · ${apiKey.post_call_location || postCallAgent?.location || '—'}`} />
-          </div>
-        </Card>
-      </Collapse>
     </Stack>}
+    {apiKey && <Dialog open={configurationOpen} onClose={onCloseConfiguration} maxWidth="md" fullWidth>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}><Stack><span>API configuration</span><Typography variant="body2" color="text.secondary">Phone numbers, agents, and runtime settings</Typography></Stack><Stack direction="row" alignItems="center" gap={1}><Chip size="small" variant="outlined" label={`Key · ${apiKey.key_prefix}`} /><IconButton aria-label="Close API configuration" onClick={onCloseConfiguration}><CloseRoundedIcon /></IconButton></Stack></DialogTitle>
+      <DialogContent dividers><div className="api-kpi-grid"><UsageCard label="Assigned numbers" value={apiKey.assigned_numbers.map(number => number.phone_number).join(', ') || 'None'} /><UsageCard label="Recording" value={apiKey.recording_allowed ? 'Enabled' : 'Disabled'} /><UsageCard label="Calling agent" value={voiceAgent ? `${voiceAgent.name} · ${voiceAgent.provider}` : 'Not assigned'} /><UsageCard label="Calling model / location" value={`${apiKey.voice_agent_enabled === false ? 'Disabled' : apiKey.voice_model || voiceAgent?.model || 'Not configured'} · ${apiKey.voice_location || apiKey.vertex_location || voiceAgent?.location || '—'}`} /><UsageCard label="Post-call agent" value={postCallAgent ? `${postCallAgent.name} · ${postCallAgent.provider}` : 'Not assigned'} /><UsageCard label="Post-call model / location" value={`${apiKey.post_call_agent_enabled === false ? 'Disabled' : apiKey.post_call_model || postCallAgent?.model || 'Not configured'} · ${apiKey.post_call_location || postCallAgent?.location || '—'}`} /></div></DialogContent>
+      <DialogActions><Button onClick={onCloseConfiguration}>Close</Button></DialogActions>
+    </Dialog>}
   </>
+}
+
+function ApiCallHistoryPage({ api, loading, error, calls, callsTotal, callsPage, callsPageSize, onCallsPageChange, onCallsPageSizeChange, callsLoading, callsError }: {
+  api: PlatformApiKey | null; loading: boolean; error: unknown; calls: ApiCallLog[]; callsTotal: number; callsPage: number; callsPageSize: number
+  onCallsPageChange: (page: number) => void; onCallsPageSizeChange: (size: number) => void; callsLoading: boolean; callsError: unknown
+}) {
+  if (loading) return <Card className="surface-card" sx={{ p: 3 }}><CircularProgress size={24} /></Card>
+  if (error) return <Alert severity="error">{errorText(error)}</Alert>
+  if (!api) return <Alert severity="warning">This API could not be found. It may have been deleted.</Alert>
+  return <Stack gap={1.5}><Stack direction="row" alignItems="baseline" justifyContent="space-between" gap={1}><Typography variant="h6" sx={{ fontWeight: 800 }}>Call history</Typography><Typography variant="body2" color="text.secondary">{callsTotal} {callsTotal === 1 ? 'call' : 'calls'} · {api.customer_name}</Typography></Stack><Card className="surface-card" sx={{ p: 0, overflow: 'hidden' }}>
+    {callsLoading && !calls.length ? <Stack alignItems="center" sx={{ py: 6 }}><CircularProgress size={24} /></Stack> : callsError ? <Alert severity="error" sx={{ m: 2 }}>{errorText(callsError)}</Alert> : calls.length ? <>
+      <TableContainer className="table-surface" sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 850 }}><TableHead><TableRow>{['Started', 'Direction', 'Caller → recipient', 'Duration', 'Call status', 'Post-call', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{calls.map(call => <ApiCallRecord key={call.session_id} apiId={api.id} call={call} />)}</TableBody></Table></TableContainer>
+      <TablePagination component="div" count={callsTotal} page={callsPage} onPageChange={(_, page) => onCallsPageChange(page)} rowsPerPage={callsPageSize} onRowsPerPageChange={event => onCallsPageSizeChange(Number(event.target.value))} rowsPerPageOptions={[10, 25, 50, 100]} labelRowsPerPage="Calls per page" showFirstButton showLastButton sx={{ borderTop: 1, borderColor: 'divider', '.MuiTablePagination-toolbar': { px: { xs: 1.5, md: 2.5 }, flexWrap: 'wrap' } }} />
+    </> : <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 5 }}><Typography sx={{ fontWeight: 700 }}>No calls yet</Typography><Typography variant="body2" color="text.secondary">Calls placed with this API will appear here.</Typography></Stack>}
+  </Card></Stack>
 }
 
 function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
