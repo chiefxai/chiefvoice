@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import {
-  Accordion, AccordionDetails, AccordionSummary, Alert, Avatar, Button, Card, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
+  Alert, Avatar, Button, Card, Checkbox, Chip, CircularProgress, Collapse, Dialog, DialogActions,
   DialogContent, DialogTitle, Drawer, FormControl, IconButton, InputAdornment,
   InputLabel, ListItemText, Menu, MenuItem, Select, Snackbar, Stack, Switch, FormControlLabel, Table, TableBody, TableCell,
-  TableHead, TableRow, TableContainer, TablePagination, TextField, Tooltip, Typography,
+  TableHead, TableRow, TableContainer, TablePagination, Tabs, Tab, TextField, Tooltip, Typography,
 } from '@mui/material'
 import HubRoundedIcon from '@mui/icons-material/HubRounded'
 import KeyRoundedIcon from '@mui/icons-material/KeyRounded'
@@ -16,9 +16,14 @@ import MenuRoundedIcon from '@mui/icons-material/MenuRounded'
 import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded'
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded'
-import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded'
 import ScienceRoundedIcon from '@mui/icons-material/ScienceRounded'
-import ExpandMoreRoundedIcon from '@mui/icons-material/ExpandMoreRounded'
+import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded'
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
+import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded'
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
+import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
+import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded'
+import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded'
 import { useLocation, useNavigate } from 'react-router-dom'
 import LoginPage from './LoginPage'
 import { clearLoginCallbackFromUrl, currentUser, finishLogin, login, logout } from './auth'
@@ -210,6 +215,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null)
   const [apiCallsPage, setApiCallsPage] = useState(0)
   const [apiCallsPageSize, setApiCallsPageSize] = useState(10)
+  const [apiConfigurationOpen, setApiConfigurationOpen] = useState(false)
   const [token, setToken] = useState(sessionStorage.getItem('chiefvoice.token') || '')
   const [authReady, setAuthReady] = useState(false)
   const [signingIn, setSigningIn] = useState(false)
@@ -293,6 +299,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
 
   useEffect(() => {
     setApiCallsPage(0)
+    setApiConfigurationOpen(false)
   }, [apiDetailId])
 
   useEffect(() => {
@@ -353,6 +360,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const apiCallsQuery = useQuery({ queryKey: ['platform-api-calls', apiDetailId, apiCallsPage, apiCallsPageSize], queryFn: () => api.apiCalls(apiDetailId!, apiCallsPageSize, apiCallsPage * apiCallsPageSize), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 5000 : false })
   const apiBillingQuery = useQuery({ queryKey: ['platform-api-billing', apiDetailId], queryFn: () => api.apiBilling(apiDetailId!), enabled: connected && Boolean(apiDetailId), retry: false, refetchInterval: apiDetailId ? 10000 : false })
   const apiDetailKey = keysQuery.data?.find(key => key.id === apiDetailId) || null
+  const headerTitle = apiDetailId ? apiDetailKey?.name || 'API details' : page
   useEffect(() => {
     const assignments = apiAgentTemplatesQuery.data
     if (!managementKey || !assignments) return
@@ -624,7 +632,12 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setAuthError('')
     void queryClient.clear()
   }
-  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'Agents', 'API', 'Simulation', 'Docs'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { navigate(pagePaths[item]); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : item === 'Agents' ? <AutoAwesomeRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : item === 'Simulation' ? <ScienceRoundedIcon /> : <ContentCopyRoundedIcon />}>{item}</Button>)}</div></>
+  const profileTrigger = <div className="sidebar-profile"><Tooltip title="Profile menu" placement="right"><IconButton onClick={event => setProfileAnchor(event.currentTarget)} aria-label="Open profile menu"><Avatar sx={{ width: 34, height: 34, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar></IconButton></Tooltip><Typography variant="caption" sx={{ color: '#dce5f3', fontWeight: 700 }}>Platform admin</Typography></div>
+  const profileMenu = <Menu anchorEl={profileAnchor} open={Boolean(profileAnchor)} onClose={() => setProfileAnchor(null)} anchorOrigin={{ vertical: 'top', horizontal: 'right' }} transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}>
+    <MenuItem onClick={() => { onToggleTheme(); setProfileAnchor(null) }}>{mode === 'light' ? <DarkModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} /> : <LightModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} />}Switch to {mode === 'light' ? 'dark' : 'light'} theme</MenuItem>
+    <MenuItem onClick={() => { setProfileAnchor(null); void disconnect() }}>Sign out</MenuItem>
+  </Menu>
+  const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div><div className="brand-word">chief<span>voice</span></div></div><div className="nav-caption">Platform</div><div className="nav-list">{(['Numbers', 'Agents', 'API', 'Simulation', 'Docs'] as const).map(item => <Button key={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { navigate(pagePaths[item]); setDrawerOpen(false) }} startIcon={item === 'Numbers' ? <HubRoundedIcon /> : item === 'Agents' ? <AutoAwesomeRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : item === 'Simulation' ? <ScienceRoundedIcon /> : <ContentCopyRoundedIcon />}>{item}</Button>)}</div>{profileTrigger}</>
 
   if (!authReady || !connected) {
     return <LoginPage loading={!authReady} signingIn={signingIn} error={authError} onSignIn={() => { void connect() }} />
@@ -633,27 +646,24 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   return <div className={`app-shell ${mode === 'dark' ? 'theme-dark' : ''}`}>
     <aside className="sidebar">{navigation}</aside>
     <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} PaperProps={{ sx: { width: 248, bgcolor: '#101b2d', color: 'white', p: 2 } }}><div className="sidebar open" style={{ position: 'static', width: 'auto', minHeight: '100%', padding: 0 }}>{navigation}</div></Drawer>
+    {profileMenu}
     <main className="main-area">
       <header className="topbar">
-        <Stack direction="row" alignItems="center" gap={1}><IconButton className="mobile-menu" onClick={() => setDrawerOpen(true)}><MenuRoundedIcon /></IconButton><div className="eyebrow">Platform console</div></Stack>
-        <div className="auth-bar">
-          <Chip size="small" icon={connected ? <CheckCircleRoundedIcon /> : <ErrorOutlineRoundedIcon />} label={connected ? 'Signed in' : 'Not connected'} color={connected ? 'success' : 'default'} variant="outlined" sx={{ fontSize: 11, height: 27 }} />
-          <Tooltip title="Profile menu"><IconButton size="small" onClick={event => setProfileAnchor(event.currentTarget)} aria-label="Open profile menu"><Avatar sx={{ width: 31, height: 31, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar></IconButton></Tooltip>
-          <Menu anchorEl={profileAnchor} open={Boolean(profileAnchor)} onClose={() => setProfileAnchor(null)} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
-            <MenuItem onClick={() => { onToggleTheme(); setProfileAnchor(null) }}>
-              {mode === 'light' ? <DarkModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} /> : <LightModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} />}
-              Switch to {mode === 'light' ? 'dark' : 'light'} theme
-            </MenuItem>
-            <MenuItem onClick={() => { setProfileAnchor(null); void disconnect() }}>Sign out</MenuItem>
-          </Menu>
+        <Stack direction="row" alignItems="center" gap={1}><IconButton className="mobile-menu" onClick={() => setDrawerOpen(true)}><MenuRoundedIcon /></IconButton><Typography variant="h6" className="topbar-title">{headerTitle}</Typography></Stack>
+        <div className="topbar-actions">
+          {page === 'Numbers' && <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={event => setAddNumberAnchor(event.currentTarget)}>Add number</Button>}
+          {page === 'Agents' && <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openCreateAgentConfig}>Add agent</Button>}
+          {page === 'API' && !apiDetailId && <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openCreateApi}>Create API</Button>}
+          {page === 'API' && apiDetailId && <><Tooltip title="API configuration"><IconButton aria-label="API configuration" onClick={() => setApiConfigurationOpen(value => !value)}><InfoOutlinedIcon /></IconButton></Tooltip><Tooltip title="Back to APIs"><IconButton aria-label="Back to APIs" onClick={() => navigate(pagePaths.API)}><ArrowBackRoundedIcon /></IconButton></Tooltip>{apiDetailKey && !apiDetailKey.revoked_at && <Button variant="contained" onClick={() => openEditApi(apiDetailKey)}>Edit API</Button>}</>}
+          {page === 'Docs' && <Button component="a" href={`${API_BASE}/docs`} target="_blank" rel="noreferrer" variant="contained">API reference</Button>}
         </div>
       </header>
       <div className="content">
-        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onAddNumber={event => setAddNumberAnchor(event.currentTarget)} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)); setManagedNumberTags((number.tags || []).join(', ')) }} />}
+        {page === 'Numbers' && <NumbersPage connected={connected} onConnect={() => { void connect() }} numbers={currentNumbers} loading={numbersQuery.isLoading} error={numbersQuery.error} onManageNumber={number => { setManagedNumber(number); setManagedInbound(number.inbound_enabled); setManagedOutbound(number.outbound_enabled); setManagedStandardChannels(String(number.standard_channels)); setManagedUnlimitedChannels(String(number.unlimited_channels)); setManagedNumberTags((number.tags || []).join(', ')) }} />}
         {page === 'API' && (apiDetailId
-          ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsTotal={apiCallsQuery.data?.total || 0} callsPage={apiCallsPage} callsPageSize={apiCallsPageSize} onCallsPageChange={setApiCallsPage} onCallsPageSizeChange={size => { setApiCallsPageSize(size); setApiCallsPage(0) }} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onBack={() => navigate(pagePaths.API)} onEdit={key => openEditApi(key)} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} />
-          : <ApiPage connected={connected} numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onCreate={openCreateApi} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
-        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onCreate={openCreateAgentConfig} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
+          ? <ApiDetailsPage api={apiDetailKey} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} calls={apiCallsQuery.data?.items || []} callsTotal={apiCallsQuery.data?.total || 0} callsPage={apiCallsPage} callsPageSize={apiCallsPageSize} onCallsPageChange={setApiCallsPage} onCallsPageSizeChange={size => { setApiCallsPageSize(size); setApiCallsPage(0) }} callsLoading={apiCallsQuery.isLoading} callsError={apiCallsQuery.error} billing={apiBillingQuery.data} billingLoading={apiBillingQuery.isLoading} billingError={apiBillingQuery.error} onAdjustBilling={amount => { setBillingAdjustmentAmount(amount); setBillingAdjustmentOpen(true) }} configurationOpen={apiConfigurationOpen} />
+          : <ApiPage numbers={outboundNumbers} keys={keysQuery.data || []} agents={agentsQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} onView={key => navigate(`/api/${encodeURIComponent(key.id)}`)} onManage={openEditApi} onDelete={id => { const apiKey = (keysQuery.data || []).find(key => key.id === id); if (apiKey) openDeleteConfirmation({ kind: 'api', api: apiKey }) }} />)}
+        {page === 'Agents' && <AgentsPage agents={agentsQuery.data || []} loading={agentsQuery.isLoading} error={agentsQuery.error} onEdit={openEditAgentConfig} onDelete={agent => openDeleteConfirmation({ kind: 'agent', agent })} />}
         {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={setSimulationProfileId} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} templates={simulationAgentTemplatesQuery.data} templatesLoading={simulationAgentTemplatesQuery.isLoading} callingTemplateId={simulationCallingTemplateId} onCallingTemplateChange={setSimulationCallingTemplateId} postCallTemplateId={simulationPostCallTemplateId} onPostCallTemplateChange={setSimulationPostCallTemplateId} />}
         {page === 'Docs' && <DocsPage />}
       </div>
@@ -835,63 +845,55 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   </div>
 }
 
-function NumbersPage({ connected, onConnect, numbers, loading, error, onAddNumber, onManageNumber }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; loading: boolean; error: unknown; onAddNumber: (event: React.MouseEvent<HTMLButtonElement>) => void; onManageNumber: (number: RegisteredNumber) => void }) {
-  return <><PageIntro eyebrow="PHONE INVENTORY" title="Numbers" subtitle="Platform-owned phone inventory across telephony providers." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onAddNumber} disabled={!connected}>Add number</Button>} />
-    <Card className="surface-card" sx={{ mt: 3 }}>
+function NumbersPage({ connected, onConnect, numbers, loading, error, onManageNumber }: { connected: boolean; onConnect: () => void; numbers: RegisteredNumber[]; loading: boolean; error: unknown; onManageNumber: (number: RegisteredNumber) => void }) {
+  return <><Card className="table-surface" sx={{ mt: 1 }}>
       {!connected ? <ConnectPrompt onConnect={onConnect} /> : loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : numbers.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 1220 }}><TableHead><TableRow>{['Phone number', 'Provider', 'Tags', 'Owner', 'Credentials', 'Standard channels', 'Unlimited channels', 'Inbound', 'Outbound', 'API access', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{numbers.map(number => <TableRow key={`${number.provider}|${number.phone_number}|${number.customer_id}`} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{number.phone_number}</TableCell><TableCell className="table-cell"><Chip size="small" label={number.provider} variant="outlined" sx={{ textTransform: 'capitalize' }} /></TableCell><TableCell className="table-cell"><TagChips tags={number.tags || []} /></TableCell><TableCell className="table-cell">Platform</TableCell><TableCell className="table-cell">{number.credential_mode === 'platform' ? 'Platform' : number.credential_mode === 'custom' ? 'Custom account' : '—'}</TableCell><TableCell className="table-cell">{number.standard_channels}</TableCell><TableCell className="table-cell">{number.unlimited_channels}</TableCell><TableCell className="table-cell"><StatusChip enabled={number.inbound_enabled} /></TableCell><TableCell className="table-cell"><StatusChip enabled={number.outbound_enabled} /></TableCell><TableCell className="table-cell">{number.api_key_name || 'Unassigned'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onManageNumber(number)}>Manage</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><HubRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No phone numbers registered</b><div style={{ fontSize: 12, marginTop: 6 }}>Add a number to get started. You can use the platform Vobiz account or add a custom provider account owned by the platform.</div></div>}
     </Card>
   </>
 }
 
-function ApiPage({ connected, numbers, keys, agents, loading, error, onCreate, onView, onManage, onDelete }: { connected: boolean; numbers: RegisteredNumber[]; keys: PlatformApiKey[]; agents: AgentConfiguration[]; loading: boolean; error: unknown; onCreate: () => void; onView: (key: PlatformApiKey) => void; onManage: (key: PlatformApiKey) => void; onDelete: (id: string) => void }) {
-  return <><PageIntro eyebrow="DEVELOPER ACCESS" title="API" subtitle="Create a phone-number API key and manage existing keys." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate} disabled={!connected}>Create API</Button>} />
-    <Card className="surface-card" sx={{ mt: 3 }}>
+function ApiPage({ numbers, keys, agents, loading, error, onView, onManage, onDelete }: { numbers: RegisteredNumber[]; keys: PlatformApiKey[]; agents: AgentConfiguration[]; loading: boolean; error: unknown; onView: (key: PlatformApiKey) => void; onManage: (key: PlatformApiKey) => void; onDelete: (id: string) => void }) {
+  return <><Card className="table-surface" sx={{ mt: 1 }}>
       {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : keys.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 900 }}><TableHead><TableRow>{['API name', 'Phone numbers', 'Customer', 'Calling agent', 'Post-call agent', 'Created', 'State', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{keys.map(key => <TableRow key={key.id} hover><TableCell className="table-cell"><b>{key.name}</b><br /><Typography variant="caption"><code>{key.key_prefix}</code></Typography><TagChips tags={key.tags || []} /></TableCell><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{key.assigned_numbers.length ? key.assigned_numbers.map(number => number.phone_number).join(', ') : 'Unassigned'}</TableCell><TableCell className="table-cell">{key.customer_name}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.voice_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{agents.find(agent => agent.id === key.post_call_agent_id)?.name || 'None'}</TableCell><TableCell className="table-cell">{new Date(key.created_at).toLocaleDateString()}</TableCell><TableCell className="table-cell"><StatusChip enabled={!key.revoked_at} label={key.revoked_at ? 'Revoked' : 'Active'} /></TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onView(key)}>View</Button>{!key.revoked_at && <><Button size="small" onClick={() => onManage(key)}>Edit</Button><Button color="error" size="small" onClick={() => onDelete(key.id)}>Delete</Button></>}</TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><KeyRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No APIs created</b><div style={{ fontSize: 12, marginTop: 6 }}>{numbers.length ? 'Create an API by naming it, choosing phone numbers, and assigning configured agents.' : 'Register an outbound-enabled phone number first.'}</div></div>}
     </Card>
   </>
 }
 
-function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal, callsPage, callsPageSize, onCallsPageChange, onCallsPageSizeChange, callsLoading, callsError, billing, billingLoading, billingError, onBack, onEdit, onAdjustBilling }: {
+function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal, callsPage, callsPageSize, onCallsPageChange, onCallsPageSizeChange, callsLoading, callsError, billing, billingLoading, billingError, onAdjustBilling, configurationOpen }: {
   api: PlatformApiKey | null; agents: AgentConfiguration[]; loading: boolean; error: unknown
   calls: ApiCallLog[]; callsTotal: number; callsPage: number; callsPageSize: number
   onCallsPageChange: (page: number) => void; onCallsPageSizeChange: (size: number) => void
   callsLoading: boolean; callsError: unknown; billing?: ApiBillingUsage
-  billingLoading: boolean; billingError: unknown; onBack: () => void
-  onEdit: (key: PlatformApiKey) => void; onAdjustBilling: (amount: string) => void
+  billingLoading: boolean; billingError: unknown; onAdjustBilling: (amount: string) => void; configurationOpen: boolean
 }) {
+  const [historyOpen, setHistoryOpen] = useState(false)
   const voiceAgent = agents.find(agent => agent.id === apiKey?.voice_agent_id)
   const postCallAgent = agents.find(agent => agent.id === apiKey?.post_call_agent_id)
   return <>
-    <PageIntro eyebrow="API CUSTOMER" title={apiKey?.name || 'API details'} subtitle="Configuration, calls, recordings, transcripts, post-call results, and billing for this API." action={<Stack direction={{ xs: 'column', sm: 'row' }} gap={1}><Button variant="outlined" onClick={onBack}>Back to APIs</Button>{apiKey && !apiKey.revoked_at && <Button variant="contained" onClick={() => onEdit(apiKey)}>Edit API</Button>}</Stack>} />
     {loading ? <Card className="surface-card" sx={{ p: 3 }}><CircularProgress size={24} /></Card> : error ? <Alert severity="error">{errorText(error)}</Alert> : !apiKey ? <Alert severity="warning">This API could not be found. It may have been deleted.</Alert> : <Stack gap={2}>
       <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.5}>
-          <Stack gap={0.75}><Stack direction="row" alignItems="center" gap={1.25} flexWrap="wrap"><Typography variant="h5" sx={{ fontWeight: 800 }}>{apiKey.name}</Typography><StatusChip enabled={!apiKey.revoked_at} label={apiKey.revoked_at ? 'Revoked' : 'Active'} /></Stack><Typography color="text.secondary">{apiKey.customer_name} · Created {new Date(apiKey.created_at).toLocaleDateString()}</Typography><Stack direction="row" gap={1} alignItems="center" flexWrap="wrap"><Chip size="small" variant="outlined" label={`Key · ${apiKey.key_prefix}`} /><TagChips tags={apiKey.tags || []} /></Stack></Stack>
-          <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap"><Chip size="small" variant="outlined" label={`${apiKey.assigned_numbers.length} number${apiKey.assigned_numbers.length === 1 ? '' : 's'} assigned`} /><Chip size="small" variant="outlined" label={`Recording ${apiKey.recording_allowed ? 'on' : 'off'}`} /></Stack>
-        </Stack>
-      </Card>
-
-      <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1} sx={{ mb: 1.5 }}><Stack gap={0.25}><Typography variant="h6" sx={{ fontWeight: 800 }}>Billing & usage</Typography><Typography variant="body2" color="text.secondary">Usage totals and available call credit for this API.</Typography></Stack>{billing?.configured && billing.billing_mode && <Chip color="primary" variant="outlined" label={`${billing.billing_mode} plan`} sx={{ textTransform: 'capitalize' }} />}</Stack>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1} sx={{ mb: 1.5 }}><Stack gap={0.25}><Typography variant="h6" sx={{ fontWeight: 800 }}>Billing overview</Typography><Typography variant="body2" color="text.secondary">{apiKey.customer_name} · <StatusChip enabled={!apiKey.revoked_at} label={apiKey.revoked_at ? 'Revoked' : 'Active'} /></Typography></Stack>{billing?.configured && billing.billing_mode && <Chip color="primary" variant="outlined" label={`${billing.billing_mode} plan`} sx={{ textTransform: 'capitalize' }} />}</Stack>
         {billingLoading ? <CircularProgress size={22} /> : billingError ? <Alert severity="error">{errorText(billingError)}</Alert> : billing?.configured ? <>
           <div className="api-kpi-grid">
-            <UsageCard label="Total calls" value={String(billing.calls ?? 0)} />
-            <UsageCard label="Billable time" value={`${Math.floor((billing.billable_seconds || 0) / 60)}m ${(billing.billable_seconds || 0) % 60}s`} />
             <UsageCard label="Charges" value={formatMoney(billing.charges_minor || 0, billing.currency || 'INR')} />
-            <UsageCard label={billing.billing_mode === 'prepaid' ? 'Available balance' : 'Credit used / limit'} value={billing.billing_mode === 'prepaid' ? formatMoney(billing.customer_prepaid_balance_minor || 0, billing.currency || 'INR') : `${formatMoney(billing.customer_postpaid_used_minor || 0, billing.currency || 'INR')} / ${formatMoney(billing.customer_postpaid_credit_limit_minor || 0, billing.currency || 'INR')}`} />
+            <UsageCard label="Billed time" value={`${Math.floor((billing.billable_seconds || 0) / 60)}m ${(billing.billable_seconds || 0) % 60}s`} />
+            <UsageCard label="Total calls" value={String(billing.calls ?? 0)} />
+            <UsageCard label={billing.billing_mode === 'prepaid' ? 'Available balance' : 'Available credit'} value={billing.billing_mode === 'prepaid' ? formatMoney(billing.customer_prepaid_balance_minor || 0, billing.currency || 'INR') : formatMoney(Math.max(0, (billing.customer_postpaid_credit_limit_minor || 0) - (billing.customer_postpaid_used_minor || 0)), billing.currency || 'INR')} />
           </div>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1} sx={{ mt: 1.5 }}><Typography variant="body2" color="text.secondary">Rate: {formatMoney(billing.rate_per_minute_minor || 0, billing.currency || 'INR')} per minute</Typography><Button variant="outlined" size="small" onClick={() => { const minor = billing.billing_mode === 'prepaid' ? billing.customer_prepaid_balance_minor : billing.customer_postpaid_credit_limit_minor; onAdjustBilling(((minor || 0) / 100).toFixed(2)) }}>Adjust balance / limit</Button></Stack>
         </> : <Alert severity="warning">{billing?.message || 'No billing plan is configured for this API customer.'}</Alert>}
       </Card>
 
-      <Card className="surface-card" sx={{ overflow: 'hidden' }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'center' }} justifyContent="space-between" gap={1} sx={{ px: { xs: 2, md: 3 }, pt: { xs: 2, md: 2.5 }, pb: 2 }}>
-          <Stack gap={0.35}><Stack direction="row" alignItems="center" gap={1}><Typography variant="h6" sx={{ fontWeight: 800 }}>Call history</Typography><Chip size="small" label={callsTotal} /></Stack><Typography variant="body2" color="text.secondary">Review call outcomes and open a call to see its recording, transcript, and extracted result.</Typography></Stack>
-        </Stack>
-        {callsLoading && !calls.length ? <Stack alignItems="center" sx={{ py: 6 }}><CircularProgress size={24} /></Stack> : callsError ? <Alert severity="error" sx={{ mx: 3, mb: 2 }}>{errorText(callsError)}</Alert> : calls.length ? <>
-          <Stack gap={1} sx={{ px: { xs: 1.5, md: 2.5 }, pb: 1.5 }}>
-            {calls.map(call => <ApiCallRecord key={call.session_id} apiId={apiKey.id} call={call} />)}
-          </Stack>
+      <ApiTemplatesSection apiId={apiKey.id} />
+
+      <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+        <Typography variant="h6" sx={{ fontWeight: 800 }}>Call history</Typography>
+        <Button variant={historyOpen ? 'contained' : 'outlined'} startIcon={<HistoryRoundedIcon />} onClick={() => setHistoryOpen(value => !value)}>{historyOpen ? 'Hide history' : `View history · ${callsTotal}`}</Button>
+      </Stack>
+      <Collapse in={historyOpen} unmountOnExit>
+        <Card className="surface-card" sx={{ p: 0, overflow: 'hidden' }}>
+          {callsLoading && !calls.length ? <Stack alignItems="center" sx={{ py: 6 }}><CircularProgress size={24} /></Stack> : callsError ? <Alert severity="error" sx={{ m: 2 }}>{errorText(callsError)}</Alert> : calls.length ? <>
+          <TableContainer sx={{ overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 850 }}><TableHead><TableRow>{['Started', 'Direction', 'Caller → recipient', 'Duration', 'Call status', 'Post-call', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{calls.map(call => <ApiCallRecord key={call.session_id} apiId={apiKey.id} call={call} />)}</TableBody></Table></TableContainer>
           <TablePagination
             component="div"
             count={callsTotal}
@@ -905,22 +907,22 @@ function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal
             showLastButton
             sx={{ borderTop: 1, borderColor: 'divider', '.MuiTablePagination-toolbar': { px: { xs: 1.5, md: 2.5 }, flexWrap: 'wrap' } }}
           />
-        </> : <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 6 }}><Typography sx={{ fontWeight: 700 }}>No calls yet</Typography><Typography variant="body2" color="text.secondary">Use this API from the Docs or Simulation page to place a test call. Calls will appear here when they start.</Typography></Stack>}
-      </Card>
-
-      <Accordion className="surface-card" disableGutters elevation={0} sx={{ '&:before': { display: 'none' }, overflow: 'hidden' }}>
-        <AccordionSummary expandIcon={<ExpandMoreRoundedIcon />}><Stack><Typography sx={{ fontWeight: 800 }}>API configuration</Typography><Typography variant="caption" color="text.secondary">Phone numbers, agents, models, and locations</Typography></Stack></AccordionSummary>
-        <AccordionDetails><Stack gap={1.5}>
+          </> : <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 5 }}><Typography sx={{ fontWeight: 700 }}>No calls yet</Typography><Typography variant="body2" color="text.secondary">Calls placed with this API will appear here.</Typography></Stack>}
+        </Card>
+      </Collapse>
+      <Collapse in={configurationOpen} unmountOnExit>
+        <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}><Stack><Typography variant="h6" sx={{ fontWeight: 800 }}>API configuration</Typography><Typography variant="body2" color="text.secondary">Phone numbers, agents, and runtime settings</Typography></Stack><Chip size="small" variant="outlined" label={`Key · ${apiKey.key_prefix}`} /></Stack>
           <div className="api-kpi-grid">
             <UsageCard label="Assigned numbers" value={apiKey.assigned_numbers.map(number => number.phone_number).join(', ') || 'None'} />
+            <UsageCard label="Recording" value={apiKey.recording_allowed ? 'Enabled' : 'Disabled'} />
             <UsageCard label="Calling agent" value={voiceAgent ? `${voiceAgent.name} · ${voiceAgent.provider}` : 'Not assigned'} />
             <UsageCard label="Calling model / location" value={`${apiKey.voice_agent_enabled === false ? 'Disabled' : apiKey.voice_model || voiceAgent?.model || 'Not configured'} · ${apiKey.voice_location || apiKey.vertex_location || voiceAgent?.location || '—'}`} />
             <UsageCard label="Post-call agent" value={postCallAgent ? `${postCallAgent.name} · ${postCallAgent.provider}` : 'Not assigned'} />
             <UsageCard label="Post-call model / location" value={`${apiKey.post_call_agent_enabled === false ? 'Disabled' : apiKey.post_call_model || postCallAgent?.model || 'Not configured'} · ${apiKey.post_call_location || postCallAgent?.location || '—'}`} />
           </div>
-        </Stack></AccordionDetails>
-      </Accordion>
-      <ApiTemplatesSection apiId={apiKey.id} />
+        </Card>
+      </Collapse>
     </Stack>}
   </>
 }
@@ -939,50 +941,33 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
     return () => URL.revokeObjectURL(url)
   }, [recording.data])
 
-  return <Card variant="outlined" sx={{ p: { xs: 1.5, md: 2 } }}>
-    <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ md: 'center' }} gap={1.5} justifyContent="space-between">
-      <Stack gap={0.4}>
-        <Typography sx={{ fontWeight: 700 }}>{new Date(call.started_at).toLocaleString()} · {call.direction || 'call'}</Typography>
-        <Typography variant="body2" color="text.secondary">{call.caller || '—'} → {call.callee || '—'} · {call.provider || 'unknown provider'} · {call.duration_seconds == null ? 'duration pending' : `${call.duration_seconds}s`}</Typography>
-        <Typography variant="caption"><code>{call.session_id}</code></Typography>
-      </Stack>
-      <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-        <StatusChip enabled={call.status === 'completed'} label={call.status} />
-        {call.post_call_status && <StatusChip enabled={call.post_call_status === 'completed'} label={`post-call ${call.post_call_status}`} />}
-        <Button size="small" variant={expanded ? 'outlined' : 'contained'} onClick={() => setExpanded(value => !value)}>{expanded ? 'Hide details' : 'View details'}</Button>
-      </Stack>
-    </Stack>
-    {expanded && <Stack gap={1.5} sx={{ mt: 2 }}>
-      {detail.isLoading ? <CircularProgress size={20} /> : detail.error ? <Alert severity="error">{errorText(detail.error)}</Alert> : detail.data && <>
+  return <Fragment>
+    <TableRow hover>
+      <TableCell className="table-cell">{new Date(call.started_at).toLocaleString()}</TableCell>
+      <TableCell className="table-cell" sx={{ textTransform: 'capitalize' }}>{call.direction || '—'}</TableCell>
+      <TableCell className="table-cell"><Typography variant="body2">{call.caller || '—'} → {call.callee || '—'}</Typography><Typography variant="caption" color="text.secondary">{call.provider || 'unknown provider'} · <code>{call.session_id}</code></Typography></TableCell>
+      <TableCell className="table-cell">{call.duration_seconds == null ? '—' : `${call.duration_seconds}s`}</TableCell>
+      <TableCell className="table-cell"><StatusChip enabled={call.status === 'completed'} label={call.status} /></TableCell>
+      <TableCell className="table-cell">{call.post_call_status ? <StatusChip enabled={call.post_call_status === 'completed'} label={call.post_call_status} /> : '—'}</TableCell>
+      <TableCell className="table-cell"><Button size="small" onClick={() => setExpanded(value => !value)}>{expanded ? 'Hide' : 'Details'}</Button></TableCell>
+    </TableRow>
+    {expanded && <TableRow><TableCell colSpan={7} sx={{ p: { xs: 1.5, md: 2.5 }, backgroundColor: 'action.hover' }}>
+      {detail.isLoading ? <CircularProgress size={20} /> : detail.error ? <Alert severity="error">{errorText(detail.error)}</Alert> : detail.data && <Stack gap={1.5}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Recording</Typography>
-            {detail.data.recording_available ? <Stack gap={1}>
-              {recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)}>{recording.isFetching ? 'Loading secure recording…' : 'Load recording'}</Button>}
-              {recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}
-            </Stack> : <Typography variant="body2" color="text.secondary">{detail.data.recording_allowed ? 'Recording was allowed, but no audio was saved or it has expired. Check the recording storage logs.' : 'Recording was disabled for this call. Enable recordings for the API and for the call before placing a new one.'}</Typography>}
-          </Card>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Post-call output</Typography>
-            {detail.data.post_call_status && <StatusChip enabled={detail.data.post_call_status === 'completed'} label={detail.data.post_call_status} />}
-            {detail.data.post_call_error && <Alert severity="error" sx={{ mt: 1 }}>{detail.data.post_call_error}</Alert>}
-            {detail.data.post_call_result ? <pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 320, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre> : <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>The structured result will appear here when post-call processing completes.</Typography>}
-          </Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Recording</Typography>{detail.data.recording_available ? <Stack gap={1}>{recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)}>{recording.isFetching ? 'Loading recording…' : 'Load recording'}</Button>}{recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}</Stack> : <Typography variant="body2" color="text.secondary">{detail.data.recording_allowed ? 'No saved recording is available.' : 'Recording was disabled for this call.'}</Typography>}</Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Post-call result</Typography>{detail.data.post_call_error && <Alert severity="error" sx={{ mb: 1 }}>{detail.data.post_call_error}</Alert>}{detail.data.post_call_result ? <pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 280, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre> : <Typography variant="body2" color="text.secondary">Result appears after post-call processing completes.</Typography>}</Card>
         </Stack>
-        <Card variant="outlined" sx={{ p: 1.5 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Transcript</Typography>
-          {detail.data.transcript ? <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 420, overflowY: 'auto', margin: 0, fontFamily: 'inherit' }}>{detail.data.transcript}</pre> : <Typography variant="body2" color="text.secondary">{detail.data.status === 'completed' ? 'Transcript is unavailable for this call.' : 'Transcript will appear here after it is saved.'}</Typography>}
-        </Card>
-      </>}
-    </Stack>}
-  </Card>
+        <Card variant="outlined" sx={{ p: 1.5 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Transcript</Typography>{detail.data.transcript ? <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflowY: 'auto', margin: 0, fontFamily: 'inherit' }}>{detail.data.transcript}</pre> : <Typography variant="body2" color="text.secondary">{detail.data.status === 'completed' ? 'Transcript is unavailable.' : 'Transcript is not ready yet.'}</Typography>}</Card>
+      </Stack>}
+    </TableCell></TableRow>}
+  </Fragment>
 }
 
-function AgentsPage({ agents, loading, error, onEdit, onCreate, onDelete }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onCreate: () => void; onDelete: (agent: AgentConfiguration) => void }) {
-  return <><PageIntro eyebrow="AGENT CONFIGURATION" title="Agents" subtitle="Create platform-owned calling and post-call configurations with provider, model, default location, and cost." action={<Button variant="contained" startIcon={<AddRoundedIcon />} onClick={onCreate}>Create agent</Button>} />
+function AgentsPage({ agents, loading, error, onEdit, onDelete }: { agents: AgentConfiguration[]; loading: boolean; error: unknown; onEdit: (agent: AgentConfiguration) => void; onDelete: (agent: AgentConfiguration) => void }) {
+  return <>
     <Alert severity="info" sx={{ mt: 2 }}>Google Vertex AI is currently available for calling and post-call agents. API credentials and location overrides are configured on each API.</Alert>
-    <Card className="surface-card" sx={{ mt: 2 }}>
-      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : agents.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 980 }}><TableHead><TableRow>{['Agent', 'Type', 'Provider / model', 'Default location', 'Cost / minute', 'Auto hang-up', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{agents.map(agent => <TableRow key={agent.id} hover><TableCell className="table-cell"><b>{agent.name}</b><TagChips tags={agent.tags || []} /></TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{agent.provider} · {agent.model}</TableCell><TableCell className="table-cell">{agent.location}</TableCell><TableCell className="table-cell">{formatMoney(agent.cost_per_minute_minor, agent.currency)}/min</TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? <StatusChip enabled={agent.auto_hangup_when_complete} label={agent.auto_hangup_when_complete ? 'enabled' : 'disabled'} /> : '—'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(agent)}>Edit</Button><Button size="small" color="error" onClick={() => onDelete(agent)}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create calling or post-call agents first, then assign them to an API.</div><Button variant="contained" sx={{ mt: 2 }} onClick={onCreate}>Create agent</Button></div>}
+    <Card className="table-surface" sx={{ mt: 1 }}>
+      {loading ? <div style={{ textAlign: 'center', padding: 40 }}><CircularProgress size={24} /></div> : error ? <div className="error-box">{errorText(error)}</div> : agents.length ? <TableContainer sx={{ width: "100%", overflowX: "auto" }}><Table size="small" sx={{ minWidth: 980 }}><TableHead><TableRow>{['Agent', 'Type', 'Provider / model', 'Default location', 'Cost / minute', 'Auto hang-up', ''].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{agents.map(agent => <TableRow key={agent.id} hover><TableCell className="table-cell"><b>{agent.name}</b><TagChips tags={agent.tags || []} /></TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? 'Calling' : 'Post-call'}</TableCell><TableCell className="table-cell">{agent.provider} · {agent.model}</TableCell><TableCell className="table-cell">{agent.location}</TableCell><TableCell className="table-cell">{formatMoney(agent.cost_per_minute_minor, agent.currency)}/min</TableCell><TableCell className="table-cell">{agent.kind === 'calling' ? <StatusChip enabled={agent.auto_hangup_when_complete} label={agent.auto_hangup_when_complete ? 'enabled' : 'disabled'} /> : '—'}</TableCell><TableCell className="table-cell"><Button size="small" onClick={() => onEdit(agent)}>Edit</Button><Button size="small" color="error" onClick={() => onDelete(agent)}>Delete</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer> : <div className="empty-state"><div className="agent-avatar" style={{ margin: '0 auto 14px' }}><AutoAwesomeRoundedIcon /></div><b style={{ color: '#36425a', fontSize: 14 }}>No agents configured</b><div style={{ fontSize: 12, marginTop: 6 }}>Create calling or post-call agents first, then assign them to an API.</div></div>}
     </Card>
   </>
 }
@@ -1335,6 +1320,8 @@ function SimulationPage(props: {
 }) {
   const selected = props.keys.find(key => key.id === props.selectedApiId)
   const assignedNumbers = selected?.assigned_numbers || []
+  const [setupOpen, setSetupOpen] = useState(false)
+  const [setupView, setSetupView] = useState<'form' | 'json'>('form')
   const [templates, setTemplates] = useState<SimulationTemplate[]>(() => {
     try {
       const parsed: unknown = JSON.parse(window.localStorage.getItem('chiefvoice.simulation-templates') || '[]')
@@ -1345,6 +1332,36 @@ function SimulationPage(props: {
   const [templateName, setTemplateName] = useState('')
   const [editingTemplateId, setEditingTemplateId] = useState('')
   const [templateNotice, setTemplateNotice] = useState('')
+  const requestJson = (() => {
+    if (!selected) return '{}'
+    try {
+      const liveContext = JSON.parse(props.liveContext || '{}')
+      const postCallContext = JSON.parse(props.postCallContext || '{}')
+      const outputSchema = JSON.parse(props.outputSchema || '{}')
+      if (!liveContext || Array.isArray(liveContext) || typeof liveContext !== 'object') return '{\n  "error": "Live-call context must be a JSON object"\n}'
+      if (!postCallContext || Array.isArray(postCallContext) || typeof postCallContext !== 'object') return '{\n  "error": "Post-call context must be a JSON object"\n}'
+      if (!outputSchema || Array.isArray(outputSchema) || typeof outputSchema !== 'object') return '{\n  "error": "Output schema must be a JSON object"\n}'
+      const body: Record<string, unknown> = {
+        channel: 'phone',
+        destination: props.destination.trim(),
+        caller_id: props.callerId.split('|')[1] || '',
+        live_agent: { agent_id: props.profileId || null, template_id: props.callingTemplateId || null, context: liveContext },
+        recording_allowed: props.recording,
+      }
+      if (selected.post_call_agent_enabled) body.post_call = {
+        template_id: props.postCallTemplateId || null,
+        context: postCallContext,
+        output_schema: outputSchema,
+        ...(props.tools.length ? { tools: props.tools.map(name => ({ type: 'builtin', name })) } : {}),
+        time_zone: props.timeZone,
+        time_format: props.timeFormat,
+        include_live_agent_context: props.includeLiveContext,
+      }
+      return JSON.stringify(body, null, 2)
+    } catch (error) {
+      return JSON.stringify({ error: error instanceof Error ? error.message : 'Check the JSON fields.' }, null, 2)
+    }
+  })()
   useEffect(() => {
     try { window.localStorage.setItem('chiefvoice.simulation-templates', JSON.stringify(templates)) } catch { setTemplateNotice('Could not save templates in this browser storage.') }
   }, [templates])
@@ -1387,27 +1404,36 @@ function SimulationPage(props: {
     if (editingTemplateId === template.id) setEditingTemplateId('')
   }
   return <>
-    <PageIntro eyebrow="DEVELOPER TESTING" title="Simulation" subtitle="Place a real test call through a selected API and inspect its post-call result." />
     <Alert severity="warning" sx={{ mt: 2 }}>This places a real outbound call. The selected API’s billing plan, agent costs, and recording policy apply.</Alert>
-    <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
+    <Card className="surface-card" sx={{ p: { xs: 1.5, md: 2 }, mt: 2 }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1.5}>
-        <div><Typography variant="h6" sx={{ fontWeight: 800 }}>One-click simulation templates</Typography><Typography variant="body2" color="text.secondary">Save a complete call setup, then send a test call directly from its card. Templates are saved in this browser.</Typography></div>
+        <div><Typography variant="h6" sx={{ fontWeight: 800 }}>One-click simulation templates</Typography><Typography variant="body2" color="text.secondary">Saved test configurations for quick repeat calls.</Typography></div>
         <Button variant="outlined" onClick={openTemplateDialog} disabled={!canSaveTemplate}>Save current setup as template</Button>
       </Stack>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>Templates include the destination and context fields. Use placeholders instead of sensitive patient or customer data.</Typography>
       {templateNotice && <Alert severity="info" sx={{ mt: 1.5 }} onClose={() => setTemplateNotice('')}>{templateNotice}</Alert>}
-      {templates.length ? <Stack gap={1.25} sx={{ mt: 2 }}>{templates.map(template => {
+      {templates.length ? <TableContainer sx={{ mt: 1.5, overflowX: 'auto' }}><Table size="small" sx={{ minWidth: 800 }}><TableHead><TableRow>{['Template', 'API', 'Destination', 'Caller ID', 'Actions'].map(label => <TableCell className="table-head" key={label}>{label}</TableCell>)}</TableRow></TableHead><TableBody>{templates.map(template => {
         const templateApi = props.keys.find(key => key.id === template.apiId)
         const isUsable = Boolean(templateApi && !templateApi.revoked_at && templateApi.voice_agent_enabled && templateApi.assigned_numbers.some(number => `${number.provider}|${number.phone_number}` === template.callerId))
-        return <Card key={template.id} variant="outlined" sx={{ p: 1.5 }}><Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'center' }} gap={1.5}>
-          <div><Typography sx={{ fontWeight: 800 }}>{template.name}</Typography><Typography variant="caption" color="text.secondary">{templateApi ? `${templateApi.customer_name} · ${templateApi.name}` : 'API unavailable'} · {template.destination} · {templateApi?.assigned_numbers.find(number => `${number.provider}|${number.phone_number}` === template.callerId)?.phone_number || 'Caller ID unavailable'}</Typography></div>
-          <Stack direction="row" gap={0.5} flexWrap="wrap"><Button size="small" onClick={() => loadTemplateForEdit(template)}>Load / edit</Button><Button size="small" color="error" onClick={() => deleteTemplate(template)}>Delete</Button><Button size="small" variant="contained" startIcon={<ScienceRoundedIcon />} disabled={!isUsable || props.submitting} onClick={() => props.onStart(template)}>{props.submitting ? 'Sending…' : 'Send test call'}</Button></Stack>
-        </Stack></Card>
-      })}</Stack> : <div className="empty-state" style={{ marginTop: 16 }}>No saved templates. Fill in the call setup below and save it for one-click testing.</div>}
+        const caller = templateApi?.assigned_numbers.find(number => `${number.provider}|${number.phone_number}` === template.callerId)?.phone_number
+        return <TableRow key={template.id} hover><TableCell className="table-cell" sx={{ fontWeight: 700 }}>{template.name}</TableCell><TableCell className="table-cell">{templateApi ? `${templateApi.customer_name} · ${templateApi.name}` : 'API unavailable'}</TableCell><TableCell className="table-cell">{template.destination}</TableCell><TableCell className="table-cell">{caller || 'Unavailable'}</TableCell><TableCell className="table-cell"><Stack direction="row" gap={0.5} flexWrap="wrap"><Button size="small" onClick={() => { loadTemplateForEdit(template); setSetupOpen(true) }}>Edit</Button><Button size="small" color="error" onClick={() => deleteTemplate(template)}>Delete</Button><Button size="small" variant="contained" startIcon={<ScienceRoundedIcon />} disabled={!isUsable || props.submitting} onClick={() => props.onStart(template)}>{props.submitting ? 'Sending…' : 'Send'}</Button></Stack></TableCell></TableRow>
+      })}</TableBody></Table></TableContainer> : <div className="empty-state" style={{ padding: '32px 16px' }}>No saved templates yet.</div>}
     </Card>
-    <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
+    <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}><Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={() => { setSetupView('form'); setSetupOpen(true) }}>Open call setup</Button></Stack>
+    <Dialog open={setupOpen} onClose={() => setSetupOpen(false)} maxWidth="md" fullWidth scroll="paper">
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}>
+        Call setup
+        <IconButton aria-label="Close call setup" onClick={() => setSetupOpen(false)}><CloseRoundedIcon /></IconButton>
+      </DialogTitle>
+      <Tabs value={setupView} onChange={(_, value) => setSetupView(value)} sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
+        <Tab value="form" label="Form view" />
+        <Tab value="json" label="JSON view" />
+      </Tabs>
+      <DialogContent dividers>
+        {setupView === 'json' ? <Stack gap={1.5}>
+          <Typography variant="body2" color="text.secondary">This is the request body sent by the current form settings.</Typography>
+          <CopyableCode value={requestJson} minRows={Math.max(10, Math.min(30, requestJson.split('\n').length))} />
+        </Stack> : <>
       {props.loading ? <CircularProgress size={24} /> : props.error ? <Alert severity="error">{errorText(props.error)}</Alert> : !props.keys.length ? <div className="empty-state">Create an API and assign a phone number before starting a simulation.</div> : <Stack gap={2.5}>
-        <Typography variant="h6" sx={{ fontWeight: 800 }}>Call setup</Typography>
         <FormControl fullWidth><InputLabel id="simulation-api-label">API customer</InputLabel><Select labelId="simulation-api-label" label="API customer" value={props.selectedApiId} onChange={event => props.onSelectApi(event.target.value)}>
           {props.keys.filter(key => !key.revoked_at).map(key => <MenuItem key={key.id} value={key.id}>{key.customer_name} · {key.name} · {key.key_prefix}</MenuItem>)}
         </Select></FormControl>
@@ -1439,12 +1465,15 @@ function SimulationPage(props: {
         </>}
         {!selected?.recording_allowed && <Alert severity="warning">Recordings are disabled for this API. Enable them in the API’s Edit configuration before starting a call you want recorded.</Alert>}
         <FormControl><Stack direction="row" alignItems="center" gap={1}><Checkbox checked={props.recording} disabled={!selected?.recording_allowed} onChange={event => props.onRecordingChange(event.target.checked)} /><Typography variant="body2">Record this test call</Typography></Stack></FormControl>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
-          {editingTemplateId && <Button variant="outlined" onClick={() => setTemplateDialogOpen(true)} disabled={!canSaveTemplate}>Update current template</Button>}
-          <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={() => props.onStart()} disabled={!selected || !selected.voice_agent_enabled || !props.callerId || !props.destination.trim() || props.submitting}>{props.submitting ? 'Starting call…' : 'Start test call'}</Button>
-        </Stack>
       </Stack>}
-    </Card>
+        </>}
+      </DialogContent>
+      <DialogActions sx={{ p: 2 }}>
+        <Button onClick={() => setSetupOpen(false)}>Close</Button>
+        {editingTemplateId && <Button variant="outlined" onClick={() => setTemplateDialogOpen(true)} disabled={!canSaveTemplate}>Update template</Button>}
+        <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={() => props.onStart()} disabled={!selected || !selected.voice_agent_enabled || !props.callerId || !props.destination.trim() || props.submitting}>{props.submitting ? 'Starting call…' : 'Start test call'}</Button>
+      </DialogActions>
+    </Dialog>
     {props.call && <Card className="surface-card" sx={{ p: { xs: 2, md: 3 }, mt: 2 }}>
       <Stack gap={1.5}><Stack direction="row" alignItems="center" gap={1}><Typography variant="h6" sx={{ fontWeight: 800 }}>Simulation result</Typography><StatusChip enabled={props.call.status === 'completed'} label={props.call.status} />{props.callLoading && <CircularProgress size={16} />}</Stack>
         <Typography variant="body2">Session <code>{props.call.session_id}</code> · {props.call.caller} → {props.call.callee}</Typography>
@@ -1467,6 +1496,23 @@ function formatMoney(amountMinor: number, currency: string) { return new Intl.Nu
 function parseTags(value: string) { return [...new Set(value.split(',').map(tag => tag.trim().toLowerCase()).filter(Boolean))] }
 function TagChips({ tags }: { tags: string[] }) { return tags.length ? <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>{tags.map(tag => <Chip size="small" key={tag} label={tag} variant="outlined" />)}</Stack> : null }
 function DocsPage() {
+  const [search, setSearch] = useState('')
+  const [activeDoc, setActiveDoc] = useState('getting-started')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const docsNavigation = [
+    { id: 'getting-started', label: 'Getting started', group: 'Guides' },
+    { id: 'requirements', label: 'Before you start', group: 'Guides' },
+    { id: 'start-call', label: 'Place an outbound call', group: 'Guides' },
+    { id: 'call-response', label: 'Call response', group: 'Guides' },
+    { id: 'call-status', label: 'Status and results', group: 'Guides' },
+    { id: 'webhooks', label: 'Call outcome webhooks', group: 'Events' },
+    { id: 'recordings', label: 'Recordings', group: 'Calls' },
+  ]
+  const filteredNavigation = docsNavigation.filter(item => item.label.toLowerCase().includes(search.toLowerCase()))
+  const goToSection = (id: string) => {
+    setActiveDoc(id)
+    document.getElementById(`docs-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
   const callExample = `curl -X POST "$CHIEFVOICE_URL/v1/calls/outbound" \\
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
   -H "Content-Type: application/json" \\
@@ -1504,36 +1550,24 @@ function DocsPage() {
   const recordingExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/recording" \\
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
   --output call-recording.wav`
-  return <><PageIntro eyebrow="DEVELOPER GUIDE" title="Make an API call" subtitle="Configure your API once, place a call, then retrieve its status and result." action={<Button component="a" href={`${API_BASE}/docs`} target="_blank" rel="noreferrer" variant="outlined">Full API reference</Button>} />
-    <Stack gap={2} sx={{ mt: 3 }}>
-      <Card className="surface-card docs-prereq" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1 }}>Before you start</Typography>
-        <div className="docs-steps">
-          <div><span>1</span><section><b>Copy your API key</b><Typography variant="body2" color="text.secondary">Use the full key shown when the API was created.</Typography></section></div>
-          <div><span>2</span><section><b>Assign a phone number</b><Typography variant="body2" color="text.secondary">The caller ID must be assigned to this API. If only one number is assigned, you can omit <code>caller_id</code>.</Typography></section></div>
-          <div><span>3</span><section><b>Assign calling and post-call templates</b><Typography variant="body2" color="text.secondary">Replace the example template IDs below with templates assigned to this API.</Typography></section></div>
-        </div>
-        <Alert severity="info" sx={{ mt: 2 }}>Set <code>CHIEFVOICE_URL</code> to your API base URL and keep <code>CHIEFVOICE_API_KEY</code> secret.</Alert>
-      </Card>
-      <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1} sx={{ mb: 1.5 }}><Stack><Typography variant="h6" sx={{ fontWeight: 800 }}>1. Start a call</Typography><Typography variant="body2" color="text.secondary">This example calls a patient to confirm an appointment and extracts the outcome.</Typography></Stack><Chip size="small" color="primary" variant="outlined" label="POST · /v1/calls/outbound" /></Stack>
-        <CopyableCode value={callExample} minRows={26} />
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.25 }}>Use a unique <code>Idempotency-Key</code> for each call. Replace the example phone numbers and template IDs with your assigned values.</Typography>
-      </Card>
-      <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Typography variant="h6" sx={{ fontWeight: 800 }}>2. Save the session ID</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>A successful request returns <code>202 Accepted</code>. Use its <code>session_id</code> in the next requests.</Typography>
-        <pre className="docs-response">{`{\n  "session_id": "<returned-session-id>",\n  "provider": "vobiz",\n  "channel": "phone",\n  "direction": "outbound",\n  "status": "starting"\n}`}</pre>
-      </Card>
-      <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Typography variant="h6" sx={{ fontWeight: 800, mb: 0.5 }}>3. Follow the call</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Check status while the call is running, then fetch the structured result when analysis finishes.</Typography>
-        <Stack gap={2}><DocCodeBlock title="Check call status" value={statusExample} /><DocCodeBlock title="Get the post-call result" value={resultExample} /></Stack>
-      </Card>
-      <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Typography variant="h6" sx={{ fontWeight: 800 }}>Call outcome webhooks</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>Configure the API-level webhook when creating an API or with <code>PUT /v1/webhooks/post-call</code>. Post-call templates can override the failure URL and add a fixed <code>custom_payload</code> for different integrated services. A template override requires the API webhook configuration so deliveries can use its signing secret. Missing-transcript failures bypass AI. Return any 2xx response and deduplicate deliveries using <code>X-Chiefvoice-Event-Id</code> or the body’s <code>event_id</code>.</Typography>
-        <DocCodeBlock title="Example failure event" value={`{
+  return <div className={`docs-workspace ${sidebarCollapsed ? 'docs-collapsed' : ''}`}>
+    <aside className="docs-sidebar">
+      <div className="docs-brand"><span className="docs-brand-mark"><HubRoundedIcon fontSize="small" /></span><span className="docs-brand-name">Chiefvoice</span>{!sidebarCollapsed && <Chip size="small" label="API" />}<Tooltip title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} placement="right"><IconButton className="docs-collapse-button" size="small" aria-label={sidebarCollapsed ? 'Expand documentation sidebar' : 'Collapse documentation sidebar'} onClick={() => setSidebarCollapsed(value => !value)}>{sidebarCollapsed ? <ChevronRightRoundedIcon fontSize="small" /> : <ChevronLeftRoundedIcon fontSize="small" />}</IconButton></Tooltip></div>
+      {!sidebarCollapsed && <TextField size="small" fullWidth placeholder="Search documentation" value={search} onChange={event => setSearch(event.target.value)} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRoundedIcon fontSize="small" /></InputAdornment> }} />}
+      {['Guides', 'Events', 'Calls'].map(group => {
+        const items = filteredNavigation.filter(item => item.group === group)
+        return items.length ? <div className="docs-nav-group" key={group}>{!sidebarCollapsed && <Typography className="docs-nav-heading">{group}</Typography>}{items.map(item => <Tooltip key={item.id} title={sidebarCollapsed ? item.label : ''} placement="right"><Button aria-label={item.label} title={sidebarCollapsed ? item.label : undefined} className={`docs-nav-item ${activeDoc === item.id ? 'active' : ''}`} onClick={() => goToSection(item.id)}>{sidebarCollapsed ? <span className="docs-nav-initial">{item.label.slice(0, 1)}</span> : item.label}</Button></Tooltip>)}</div> : null
+      })}
+      {!sidebarCollapsed && !filteredNavigation.length && <Typography variant="body2" color="text.secondary" sx={{ p: 1.5 }}>No matching pages.</Typography>}
+    </aside>
+    <main className="docs-article">
+      <div className="docs-breadcrumb">Developer API <span>›</span> Getting started</div>
+      <div className="docs-article-heading" id="docs-getting-started"><Chip size="small" variant="outlined" label="GUIDE" /><Typography variant="h3">Make your first call</Typography><Typography variant="body1" color="text.secondary">Use your API key to place a phone call, follow its status, and retrieve the post-call result.</Typography></div>
+      <section className="docs-section" id="docs-requirements"><Typography variant="h5">Before you start</Typography><Typography>Have these items ready:</Typography><ul><li>The full API key shown when the API was created.</li><li>An outbound-enabled phone number assigned to the API.</li><li>Calling and post-call templates assigned to the API.</li></ul><Alert severity="info" sx={{ mt: 1.5 }}>Set <code>CHIEFVOICE_URL</code> to your API base URL and keep <code>CHIEFVOICE_API_KEY</code> secret.</Alert></section>
+      <section className="docs-section" id="docs-start-call"><div className="docs-section-title"><div><Typography variant="h5">Place an outbound call</Typography><Typography color="text.secondary">Example: confirm an appointment and extract the outcome.</Typography></div><Chip className="docs-method" label="POST  /v1/calls/outbound" /></div><CopyableCode value={callExample} minRows={26} /><Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>Replace the example phone numbers and template IDs with values assigned to your API. Use a unique <code>Idempotency-Key</code> for each call.</Typography></section>
+      <section className="docs-section" id="docs-call-response"><Typography variant="h5">Read the response</Typography><Typography color="text.secondary" sx={{ mb: 1.5 }}>The API returns <code>202 Accepted</code> with a session ID while the call runs.</Typography><pre className="docs-response">{`{\n  "session_id": "<returned-session-id>",\n  "provider": "vobiz",\n  "channel": "phone",\n  "direction": "outbound",\n  "status": "starting"\n}`}</pre></section>
+      <section className="docs-section" id="docs-call-status"><Typography variant="h5">Check status and results</Typography><Typography color="text.secondary" sx={{ mb: 2 }}>Use the returned session ID to check progress and retrieve structured analysis.</Typography><div className="docs-endpoint"><Typography variant="subtitle2">Call status</Typography><Chip size="small" label="GET" color="success" /><CopyableCode value={statusExample} minRows={2} /></div><div className="docs-endpoint"><Typography variant="subtitle2">Post-call result</Typography><Chip size="small" label="GET" color="success" /><CopyableCode value={resultExample} minRows={2} /></div></section>
+      <section className="docs-section" id="docs-webhooks"><Typography variant="h5">Call outcome webhooks</Typography><Typography color="text.secondary" sx={{ mb: 1.5 }}>Configure a callback URL in the API settings. Post-call templates can override the failure URL and include a fixed <code>custom_payload</code>. Return a 2xx response and deduplicate events using <code>X-Chiefvoice-Event-Id</code> or <code>event_id</code>.</Typography><DocCodeBlock title="Example failure event" value={`{
   "event": "call.post_call.failed",
   "event_id": "call.post_call.failed:SESSION_ID",
   "call": {
@@ -1553,26 +1587,20 @@ function DocsPage() {
   "custom_payload": {
     "attendance_status": "unable_to_verify"
   }
-}`} />
-        <Typography variant="caption" color="text.secondary">Event names: <code>call.failed</code> and <code>call.post_call.failed</code>. The payload contains a stable failure code, not raw exception details or transcript text.</Typography>
-      </Card>
-      <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
-        <Typography variant="h6" sx={{ fontWeight: 800 }}>Optional: download the recording</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>Recording must be enabled for the API and the call.</Typography>
-        <DocCodeBlock title="Save the recording" value={recordingExample} />
-      </Card>
-    </Stack>
-  </>
+}`} /><Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>Events: <code>call.failed</code> and <code>call.post_call.failed</code>. Failure payloads contain stable error codes, not transcript text.</Typography></section>
+      <section className="docs-section" id="docs-recordings"><Typography variant="h5">Download a recording</Typography><Typography color="text.secondary" sx={{ mb: 1.5 }}>Recording must be enabled for both the API and the call.</Typography><CopyableCode value={recordingExample} minRows={3} /></section>
+    </main>
+  </div>
 }
 function CopyableCode({ value, minRows = 2 }: { value: string; minRows?: number }) {
   const [copied, setCopied] = useState(false)
   const copy = () => {
     void navigator.clipboard.writeText(value).then(() => setCopied(true)).catch(() => setCopied(false))
   }
-  return <TextField value={value} fullWidth multiline minRows={minRows} InputProps={{ readOnly: true, endAdornment: <InputAdornment position="end"><Tooltip title={copied ? 'Copied' : 'Copy'}><IconButton aria-label={copied ? 'Copied' : 'Copy code'} onClick={copy}>{copied ? <CheckCircleRoundedIcon color="success" /> : <ContentCopyRoundedIcon />}</IconButton></Tooltip></InputAdornment> }} />
+  return <div className="docs-code"><pre style={{ minHeight: `${Math.min(minRows, 10) * 1.45}em` }}><code>{value}</code></pre><Tooltip title={copied ? 'Copied' : 'Copy'}><IconButton aria-label={copied ? 'Copied' : 'Copy code'} onClick={copy} className="docs-code-copy">{copied ? <CheckCircleRoundedIcon /> : <ContentCopyRoundedIcon />}</IconButton></Tooltip></div>
 }
 function DocCodeBlock({ title, value }: { title: string; value: string }) {
   return <Stack gap={0.75}><Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{title}</Typography><CopyableCode value={value} minRows={value.split('\n').length} /></Stack>
 }
 function StatusChip({ enabled, label }: { enabled: boolean; label?: string }) { return <Chip size="small" label={label || (enabled ? 'Enabled' : 'Disabled')} color={enabled ? 'success' : 'default'} variant={enabled ? 'filled' : 'outlined'} sx={{ fontSize: 10, height: 22 }} /> }
-function PageIntro({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: React.ReactNode }) { return <div style={{ display: 'flex', alignItems: 'end', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}><div><div className="eyebrow">{eyebrow}</div><Typography className="page-title" variant="h4">{title}</Typography><div className="page-subtitle">{subtitle}</div></div>{action}</div> }
+
