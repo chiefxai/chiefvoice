@@ -65,10 +65,21 @@ class ChiefvoiceClient:
                 raise TimeoutError(f"Post-call job {session_id} did not finish in time")
             await asyncio.sleep(min(poll_interval_seconds, remaining))
 
-    async def configure_post_call_webhook(self, target_url: str) -> dict[str, Any]:
+    async def configure_post_call_webhook(
+        self,
+        target_url: str,
+        *,
+        failure_webhook_url: str | None = None,
+        failure_webhook_payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"target_url": target_url}
+        if failure_webhook_url is not None:
+            body["failure_webhook_url"] = failure_webhook_url
+        if failure_webhook_payload is not None:
+            body["failure_webhook_payload"] = dict(failure_webhook_payload)
         response = await self._client.put(
             "/v1/webhooks/post-call",
-            json={"target_url": target_url},
+            json=body,
         )
         response.raise_for_status()
         return response.json()

@@ -48,6 +48,8 @@ class OutboundCallCommand:
     post_call_context: str | None = None
     post_call_template_id: str | None = None
     post_call_template_revision: int | None = None
+    post_call_failure_webhook_url: str | None = None
+    post_call_failure_webhook_payload: dict[str, Any] | None = None
     post_call_output_schema: dict[str, Any] | None = None
     post_call_tools: list[str] | None = None
     post_call_time_zone: str | None = None
@@ -170,6 +172,8 @@ class CallCoordinator:
             post_call_context=command.post_call_context,
             post_call_template_id=command.post_call_template_id,
             post_call_template_revision=command.post_call_template_revision,
+            post_call_failure_webhook_url=command.post_call_failure_webhook_url,
+            post_call_failure_webhook_payload=command.post_call_failure_webhook_payload,
             post_call_output_schema=command.post_call_output_schema,
             post_call_tools=command.post_call_tools,
             post_call_time_zone=command.post_call_time_zone,
@@ -195,6 +199,8 @@ class CallCoordinator:
                 "post_call_context": command.post_call_context,
                 "post_call_template_id": command.post_call_template_id,
                 "post_call_template_revision": command.post_call_template_revision,
+                "post_call_failure_webhook_url": command.post_call_failure_webhook_url,
+                "post_call_failure_webhook_payload": command.post_call_failure_webhook_payload,
                 "post_call_output_schema": command.post_call_output_schema,
                 "post_call_tools": command.post_call_tools,
                 "post_call_time_zone": command.post_call_time_zone,
@@ -543,6 +549,8 @@ class CallCoordinator:
                 started_at=session.started_at.isoformat(),
                 ended_at=(ended_at or datetime.now(UTC)).isoformat(),
                 retryable=False,
+                target_url=session.post_call_failure_webhook_url,
+                custom_payload=session.post_call_failure_webhook_payload,
             )
         except Exception as exc:
             logger.error(
@@ -692,6 +700,8 @@ class CallCoordinator:
             live_agent_context=(
                 session.live_agent_context if session.include_live_agent_context else None
             ),
+            failure_webhook_url=session.post_call_failure_webhook_url,
+            failure_webhook_payload=session.post_call_failure_webhook_payload,
             recording_uri=session.metadata.get("recording_uri"),
         )
         try:

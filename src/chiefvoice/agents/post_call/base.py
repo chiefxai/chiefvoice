@@ -22,6 +22,8 @@ class CompletedCall:
     time_zone: str = "UTC"
     time_format: str = "%Y-%m-%dT%H:%M:%S%z"
     live_agent_context: dict[str, Any] | None = None
+    failure_webhook_url: str | None = None
+    failure_webhook_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

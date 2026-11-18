@@ -30,6 +30,8 @@ class AcceptedSession:
     post_call_context: str | None = None
     post_call_template_id: str | None = None
     post_call_template_revision: int | None = None
+    post_call_failure_webhook_url: str | None = None
+    post_call_failure_webhook_payload: dict[str, Any] | None = None
     post_call_output_schema: dict[str, Any] | None = None
     post_call_tools: list[str] | None = None
     post_call_time_zone: str | None = None

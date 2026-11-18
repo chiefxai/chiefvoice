@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from chiefvoice.agents.post_call.output_schema import validate_output_schema
 from chiefvoice.agents.template_store import SqlAgentTemplateDirectory
 from chiefvoice.agents.templates import AgentTemplate, AgentTemplateBody, new_template_id
+from chiefvoice.agents.post_call.queue import validate_public_webhook_url
 from chiefvoice.core.config import settings
 from chiefvoice.identity.auth import Principal, current_principal
 
@@ -56,6 +57,30 @@ def _validate_settings(body: AgentTemplateBody) -> dict:
         values["time_zone"] = time_zone
         values["time_format"] = time_format
     return values
+
+
+async def _validate_failure_webhook(body: AgentTemplateBody) -> None:
+    target_url = body.settings.get("failure_webhook_url")
+    if target_url:
+        try:
+            await validate_public_webhook_url(target_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _require_api_webhook_for_fallback(request: Request, tenant_id: str, body: AgentTemplateBody) -> None:
+    has_fallback = bool(
+        body.settings.get("failure_webhook_url")
+        or body.settings.get("failure_webhook_payload") is not None
+    )
+    if not has_fallback:
+        return
+    directory = getattr(request.app.state, "post_call_webhook_directory", None)
+    if directory is None or await directory.get(tenant_id) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Configure the API Call outcome webhook first; its signing secret authenticates template fallback deliveries.",
+        )
 
 
 def _serialize(template: AgentTemplate) -> dict:
@@ -118,6 +143,9 @@ async def create_agent_template(
     principal: Annotated[Principal, Security(_admin("platform:customers:write"))],
 ):
     del principal
+    await _validate_failure_webhook(body)
+    if body.settings.get("failure_webhook_url") or body.settings.get("failure_webhook_payload") is not None:
+        raise HTTPException(status_code=422, detail="Failure fallback settings must be scoped to an API template")
     try:
         created = await _directory(request).create(_to_template(new_template_id(), body))
     except ValueError as exc:
@@ -152,6 +180,9 @@ async def update_agent_template(
         raise HTTPException(status_code=404, detail="Agent template not found")
     if current.kind != body.kind:
         raise HTTPException(status_code=422, detail="Template kind cannot be changed")
+    await _validate_failure_webhook(body)
+    if body.settings.get("failure_webhook_url") or body.settings.get("failure_webhook_payload") is not None:
+        raise HTTPException(status_code=422, detail="Failure fallback settings must be scoped to an API template")
     try:
         updated = await directory.update(template_id, _to_template(template_id, body, current.revision + 1))
     except ValueError as exc:
@@ -224,6 +255,8 @@ async def create_api_agent_template(
     key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None) if api_keys else None
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
+    await _validate_failure_webhook(body)
+    await _require_api_webhook_for_fallback(request, key.tenant_id, body)
     try:
         created = await _directory(request).create_for_api(
             key_id,
@@ -264,6 +297,12 @@ async def update_api_agent_template(
         raise HTTPException(status_code=404, detail="Template not found for this API")
     if current.kind != body.kind:
         raise HTTPException(status_code=422, detail="Template kind cannot be changed")
+    await _validate_failure_webhook(body)
+    api_keys = getattr(request.app.state, "api_key_directory", None)
+    api_key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None) if api_keys else None
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    await _require_api_webhook_for_fallback(request, api_key.tenant_id, body)
     try:
         updated = await directory.update_for_api(
             key_id,

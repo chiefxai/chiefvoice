@@ -105,9 +105,23 @@ class AgentTemplateBody(BaseModel):
             if set(spec) - {"type", "required", "description"}:
                 raise ValueError(f"Unsupported variable declaration fields: {name}")
         if self.kind == "post_call":
-            allowed_settings = {"time_zone", "time_format", "output_schema"}
+            allowed_settings = {
+                "time_zone", "time_format", "output_schema",
+                "failure_webhook_url", "failure_webhook_payload",
+            }
             if unknown := self.settings.keys() - allowed_settings:
                 raise ValueError("Unsupported post-call template settings: " + ", ".join(sorted(unknown)))
+            failure_url = self.settings.get("failure_webhook_url")
+            if failure_url is not None and (
+                not isinstance(failure_url, str) or not failure_url.strip() or len(failure_url) > 2048
+            ):
+                raise ValueError("failure_webhook_url must be a non-empty URL up to 2048 characters")
+            failure_payload = self.settings.get("failure_webhook_payload")
+            if failure_payload is not None:
+                if not isinstance(failure_payload, dict):
+                    raise ValueError("failure_webhook_payload must be a JSON object")
+                if len(json.dumps(failure_payload, ensure_ascii=False).encode("utf-8")) > 16 * 1024:
+                    raise ValueError("failure_webhook_payload exceeds the 16 KiB limit")
         else:
             allowed_settings = {
                 "auto_hangup_when_complete",

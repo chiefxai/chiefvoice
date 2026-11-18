@@ -97,7 +97,7 @@ type ApiAgentTemplates = {
 type IssuedApiKey = {
   key: string
   api_key_record: PlatformApiKey
-  post_call_webhook?: { target_url: string; signing_secret: string; configured_at: string } | null
+  post_call_webhook?: { target_url: string; failure_target_url?: string | null; failure_custom_payload?: Record<string, unknown> | null; signing_secret: string; configured_at: string } | null
   webhook_setup_error?: string | null
 }
 type Customer = { customer_id: string; display_name: string }
@@ -171,7 +171,7 @@ const api = {
   addNumbers: (data: { credential_mode: 'platform' | 'custom'; phone_numbers: string[]; standard_channels: number; unlimited_channels: number; tags: string[]; auth_id?: string; auth_token?: string }) => http.post('/v1/admin/customers/phone-numbers', data),
   updateNumber: (number: RegisteredNumber, inbound: boolean, outbound: boolean, standardChannels: number, unlimitedChannels: number, tags: string[]) => http.put(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { inbound_enabled: inbound, outbound_enabled: outbound, standard_channels: standardChannels, unlimited_channels: unlimitedChannels, tags }, { params: { customer_id: number.customer_id } }),
   deleteNumber: (number: RegisteredNumber) => http.delete(`/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`, { params: { customer_id: number.customer_id } }),
-  createApiKey: (customerName: string, billingMode: 'prepaid' | 'postpaid', billingAmountMinor: number, tags: string[], numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string, recordingAllowed: boolean, postCallWebhookUrl: string) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { customer_name: customerName, billing_mode: billingMode, prepaid_balance_minor: billingMode === 'prepaid' ? billingAmountMinor : 0, postpaid_credit_limit_minor: billingMode === 'postpaid' ? billingAmountMinor : 0, tags, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation, recording_allowed: recordingAllowed, post_call_webhook_url: postCallWebhookUrl.trim() || null }).then(r => r.data),
+  createApiKey: (customerName: string, billingMode: 'prepaid' | 'postpaid', billingAmountMinor: number, tags: string[], numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string, recordingAllowed: boolean, postCallWebhookUrl: string, failureWebhookUrl: string, failureWebhookPayload: Record<string, unknown> | null) => http.post<IssuedApiKey>('/v1/admin/customers/api-keys', { customer_name: customerName, billing_mode: billingMode, prepaid_balance_minor: billingMode === 'prepaid' ? billingAmountMinor : 0, postpaid_credit_limit_minor: billingMode === 'postpaid' ? billingAmountMinor : 0, tags, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials, voice_location: voiceLocation, post_call_location: postCallLocation, recording_allowed: recordingAllowed, post_call_webhook_url: postCallWebhookUrl.trim() || null, failure_webhook_url: failureWebhookUrl.trim() || null, failure_webhook_payload: failureWebhookPayload }).then(r => r.data),
   updateApiConfig: (id: string, name: string, tags: string[], numbers: RegisteredNumber[], voiceAgentId: string | null, postCallAgentId: string | null, credentials: string, voiceLocation: string, postCallLocation: string, recordingAllowed: boolean) => http.put(`/v1/admin/customers/api-keys/${id}/config`, { name, tags, phone_numbers: numbers.map(number => ({ provider: number.provider, phone_number: number.phone_number })), voice_agent_id: voiceAgentId, post_call_agent_id: postCallAgentId, gcp_credentials_json: credentials || null, voice_location: voiceLocation, post_call_location: postCallLocation, recording_allowed: recordingAllowed }),
   createAgentConfig: (data: { name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string; tags: string[]; auto_hangup_when_complete: boolean }) => http.post<AgentConfiguration>('/v1/admin/customers/agent-configs', data).then(r => r.data),
   updateAgentConfig: (id: string, data: { name: string; kind: 'calling' | 'post_call'; provider: 'vertex'; model: string; location: string; cost_per_minute_minor: number; currency: string; tags: string[]; auto_hangup_when_complete: boolean }) => http.put<AgentConfiguration>(`/v1/admin/customers/agent-configs/${id}`, data).then(r => r.data),
@@ -220,6 +220,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [apiTags, setApiTags] = useState('')
   const [apiCustomerName, setApiCustomerName] = useState('')
   const [apiWebhookUrl, setApiWebhookUrl] = useState('')
+  const [apiFailureWebhookUrl, setApiFailureWebhookUrl] = useState('')
+  const [apiFailureWebhookPayload, setApiFailureWebhookPayload] = useState('{}')
   const [apiBillingMode, setApiBillingMode] = useState<'prepaid' | 'postpaid'>('prepaid')
   const [apiBillingAmount, setApiBillingAmount] = useState('1000')
   const [apiRecordingAllowed, setApiRecordingAllowed] = useState(false)
@@ -360,7 +362,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setApiDefaultPostCallTemplateId(assignments.default_post_call_id || '')
   }, [managementKey?.id, apiAgentTemplatesQuery.data])
   const issueMutation = useMutation({
-    mutationFn: ({ customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl }: { customerName: string; billingMode: 'prepaid' | 'postpaid'; billingAmountMinor: number; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean; webhookUrl: string }) => api.createApiKey(customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl),
+    mutationFn: ({ customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl, failureWebhookUrl, failureWebhookPayload }: { customerName: string; billingMode: 'prepaid' | 'postpaid'; billingAmountMinor: number; tags: string[]; numbers: RegisteredNumber[]; voiceAgentId: string | null; postCallAgentId: string | null; credentials: string; voiceLocation: string; postCallLocation: string; recordingAllowed: boolean; webhookUrl: string; failureWebhookUrl: string; failureWebhookPayload: Record<string, unknown> | null }) => api.createApiKey(customerName, billingMode, billingAmountMinor, tags, numbers, voiceAgentId, postCallAgentId, credentials, voiceLocation, postCallLocation, recordingAllowed, webhookUrl, failureWebhookUrl, failureWebhookPayload),
     onSuccess: async result => {
       void queryClient.invalidateQueries({ queryKey: ['platform-api-keys'] })
       void queryClient.invalidateQueries({ queryKey: ['platform-phone-numbers'] })
@@ -368,7 +370,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       setOneTimeKey(result)
       setAssignmentOpen(false)
       setSelectedNumbers([])
-      setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setApiRecordingAllowed(false)
+      setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiFailureWebhookUrl(''); setApiFailureWebhookPayload('{}'); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCredentials(''); setApiRecordingAllowed(false)
       setApiCallingTemplateIds([]); setApiPostCallTemplateIds([]); setApiDefaultCallingTemplateId(''); setApiDefaultPostCallTemplateId('')
       setToast('API key created successfully. You can now add and manage prompt templates inside the API page.')
     },
@@ -492,7 +494,14 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     if (configuredRate < 1) { setToast('Selected agents need a positive combined INR per-minute cost before billing can be enabled.'); return }
     const amount = Number(apiBillingAmount)
     if (!Number.isFinite(amount) || amount <= 0) { setToast('Enter a positive INR starting balance or credit limit.'); return }
-    issueMutation.mutate({ customerName: apiCustomerName.trim(), billingMode: apiBillingMode, billingAmountMinor: Math.round(amount * 100), tags: parseTags(apiTags), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim(), recordingAllowed: apiRecordingAllowed, webhookUrl: apiWebhookUrl })
+    let failurePayload: Record<string, unknown> | null = null
+    try {
+      const parsed: unknown = JSON.parse(apiFailureWebhookPayload || '{}')
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('Failure fallback payload must be a JSON object.')
+      failurePayload = Object.keys(parsed).length ? parsed as Record<string, unknown> : null
+    } catch (error) { setToast(error instanceof Error ? error.message : 'Check the failure fallback JSON.'); return }
+    if ((apiFailureWebhookUrl.trim() || failurePayload) && !apiWebhookUrl.trim()) { setToast('Add the Call outcome webhook URL before configuring a failure fallback.'); return }
+    issueMutation.mutate({ customerName: apiCustomerName.trim(), billingMode: apiBillingMode, billingAmountMinor: Math.round(amount * 100), tags: parseTags(apiTags), numbers: selected, voiceAgentId: voiceAgentId || null, postCallAgentId: postCallAgentId || null, credentials: apiCredentials, voiceLocation: voiceLocation.trim(), postCallLocation: postCallLocation.trim(), recordingAllowed: apiRecordingAllowed, webhookUrl: apiWebhookUrl, failureWebhookUrl: apiFailureWebhookUrl, failureWebhookPayload: failurePayload })
   }
   const selectSimulationApi = (id: string) => {
     setSimulationApiId(id)
@@ -581,7 +590,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setPostCallLocation(availableAgents.find(agent => agent.id === postCallAgentId)?.location || availableAgents.find(agent => agent.kind === 'post_call')?.location || 'global')
   }
   const openCreateApi = () => {
-    setSelectedNumbers([]); setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCallingTemplateIds([]); setApiPostCallTemplateIds([]); setApiDefaultCallingTemplateId(''); setApiDefaultPostCallTemplateId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('global'); setApiRecordingAllowed(false); setAssignmentOpen(true)
+    setSelectedNumbers([]); setApiName(''); setApiTags(''); setApiCustomerName(''); setApiWebhookUrl(''); setApiFailureWebhookUrl(''); setApiFailureWebhookPayload('{}'); setApiBillingMode('prepaid'); setApiBillingAmount('1000'); setVoiceAgentId(''); setPostCallAgentId(''); setApiCallingTemplateIds([]); setApiPostCallTemplateIds([]); setApiDefaultCallingTemplateId(''); setApiDefaultPostCallTemplateId(''); setApiCredentials(''); setVoiceLocation('us-central1'); setPostCallLocation('global'); setApiRecordingAllowed(false); setAssignmentOpen(true)
   }
   const openEditApi = (key: PlatformApiKey) => {
     setManagementKey(key); setSelectedNumbers(key.assigned_numbers.map(number => `${number.provider}|${number.phone_number}`))
@@ -722,6 +731,8 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <Alert severity="info" sx={{ fontSize: 12 }}>Reusable prompt templates are scoped to this API and can be created and managed under the Templates section on the API page after creation.</Alert>
         {(() => { const rate = (agentsQuery.data || []).filter(agent => agent.id === voiceAgentId || agent.id === postCallAgentId).reduce((sum, agent) => sum + agent.cost_per_minute_minor, 0); return <Alert severity={rate > 0 ? 'info' : 'warning'}>API billing rate: <b>{formatMoney(rate, 'INR')}/minute</b>. It is calculated from the selected calling and post-call agent template costs.</Alert> })()}
         <TextField label="Call outcome webhook URL (optional)" type="url" value={apiWebhookUrl} onChange={event => setApiWebhookUrl(event.target.value)} fullWidth placeholder="https://your-service.example.com/webhooks/chiefvoice" helperText="Chiefvoice sends completed results and call or post-call failure events here. Failure notifications are sent directly without AI. A signing secret is shown once after creation." />
+        <TextField label="Failure fallback webhook URL (optional)" type="url" value={apiFailureWebhookUrl} onChange={event => setApiFailureWebhookUrl(event.target.value)} fullWidth placeholder="Leave blank to use the Call outcome webhook URL" helperText="Used for failed calls and missing transcripts. The signed standard failure event is still included." />
+        <TextField label="Custom failure payload (optional JSON)" value={apiFailureWebhookPayload} onChange={event => setApiFailureWebhookPayload(event.target.value)} multiline minRows={3} fullWidth helperText={'Added under "custom_payload" without replacing the call ID or failure code. Static JSON only; AI is not run to fill it.'} />
         <TextField label="Google Cloud service account JSON" value={apiCredentials} onChange={event => setApiCredentials(event.target.value)} multiline minRows={5} required fullWidth placeholder="Paste the service account JSON for this API's Vertex project" />
         {!voiceAgentId && postCallAgentId && <Alert severity="warning">This API has only a post-call agent assigned. Outbound phone calls require a calling agent.</Alert>}
       </Stack></DialogContent>
@@ -734,7 +745,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         <Alert severity="warning">The full API key appears once. Save it in the customer’s secret manager before closing this window.</Alert>
         <Typography sx={{ fontSize: 12 }}>Assigned phone numbers: <b>{oneTimeKey?.api_key_record.assigned_numbers.map(number => `${number.phone_number} · ${number.provider}`).join(', ')}</b></Typography>
         <TextField label="API key" value={oneTimeKey?.key || ''} fullWidth multiline minRows={2} InputProps={{ readOnly: true, endAdornment: <InputAdornment position="end"><Tooltip title="Copy key"><IconButton onClick={() => { if (oneTimeKey) void navigator.clipboard.writeText(oneTimeKey.key) }}><ContentCopyRoundedIcon /></IconButton></Tooltip></InputAdornment> }} />
-        {oneTimeKey?.post_call_webhook && <><Alert severity="warning">The webhook signing secret is shown once. Store it securely and use it to verify callbacks.</Alert><Typography variant="body2">Webhook endpoint: <b>{oneTimeKey.post_call_webhook.target_url}</b></Typography><TextField label="Webhook signing secret" value={oneTimeKey.post_call_webhook.signing_secret} fullWidth multiline minRows={2} InputProps={{ readOnly: true, endAdornment: <InputAdornment position="end"><Tooltip title="Copy signing secret"><IconButton onClick={() => { if (oneTimeKey?.post_call_webhook) void navigator.clipboard.writeText(oneTimeKey.post_call_webhook.signing_secret) }}><ContentCopyRoundedIcon /></IconButton></Tooltip></InputAdornment> }} /></>}
+        {oneTimeKey?.post_call_webhook && <><Alert severity="warning">This signing secret is shown once and verifies deliveries to both webhook endpoints. Store it securely.</Alert><Typography variant="body2">Call outcome endpoint: <b>{oneTimeKey.post_call_webhook.target_url}</b></Typography>{oneTimeKey.post_call_webhook.failure_target_url && <Typography variant="body2">Failure fallback endpoint: <b>{oneTimeKey.post_call_webhook.failure_target_url}</b></Typography>}{oneTimeKey.post_call_webhook.failure_custom_payload && <TextField label="Custom failure payload" value={JSON.stringify(oneTimeKey.post_call_webhook.failure_custom_payload, null, 2)} fullWidth multiline minRows={3} InputProps={{ readOnly: true }} />}<TextField label="Webhook signing secret" value={oneTimeKey.post_call_webhook.signing_secret} fullWidth multiline minRows={2} InputProps={{ readOnly: true, endAdornment: <InputAdornment position="end"><Tooltip title="Copy signing secret"><IconButton onClick={() => { if (oneTimeKey?.post_call_webhook) void navigator.clipboard.writeText(oneTimeKey.post_call_webhook.signing_secret) }}><ContentCopyRoundedIcon /></IconButton></Tooltip></InputAdornment> }} /></>}
         {oneTimeKey?.webhook_setup_error && <Alert severity="error">{oneTimeKey.webhook_setup_error}</Alert>}
       </Stack></DialogContent>
       <DialogActions sx={{ p: 2.5 }}><Button variant="contained" onClick={() => setOneTimeKey(null)}>Done</Button></DialogActions>
@@ -992,6 +1003,8 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
   const [tools, setTools] = useState<string[]>([])
   const [variablesJson, setVariablesJson] = useState('{}')
   const [settingsJson, setSettingsJson] = useState('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
+  const [failureWebhookUrl, setFailureWebhookUrl] = useState('')
+  const [failureWebhookPayloadJson, setFailureWebhookPayloadJson] = useState('{}')
   const [isDefault, setIsDefault] = useState(false)
   const [formError, setFormError] = useState('')
 
@@ -1032,6 +1045,8 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
     setTools([])
     setVariablesJson('{}')
     setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
+    setFailureWebhookUrl('')
+    setFailureWebhookPayloadJson('{}')
     setIsDefault(false)
     setFormError('')
     setOpen(true)
@@ -1044,7 +1059,10 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
     setInstructions(item.instructions)
     setTools(item.tools.map(tool => tool.name))
     setVariablesJson(JSON.stringify(item.variables, null, 2))
-    setSettingsJson(JSON.stringify(item.settings, null, 2))
+    const { failure_webhook_url, failure_webhook_payload, ...templateSettings } = item.settings
+    setSettingsJson(JSON.stringify(templateSettings, null, 2))
+    setFailureWebhookUrl(typeof failure_webhook_url === 'string' ? failure_webhook_url : '')
+    setFailureWebhookPayloadJson(JSON.stringify(failure_webhook_payload || {}, null, 2))
     setIsDefault(Boolean(item.is_default))
     setFormError('')
     setOpen(true)
@@ -1059,6 +1077,18 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
       }
       if (!settings || Array.isArray(settings) || typeof settings !== 'object') {
         throw new Error('Settings must be a JSON object.')
+      }
+      if (kind === 'post_call') {
+        let customFailurePayload: unknown
+        try { customFailurePayload = JSON.parse(failureWebhookPayloadJson || '{}') }
+        catch { throw new Error('Failure fallback payload must be valid JSON.') }
+        if (!customFailurePayload || Array.isArray(customFailurePayload) || typeof customFailurePayload !== 'object') {
+          throw new Error('Failure fallback payload must be a JSON object.')
+        }
+        if (failureWebhookUrl.trim()) settings.failure_webhook_url = failureWebhookUrl.trim()
+        else delete settings.failure_webhook_url
+        if (Object.keys(customFailurePayload).length) settings.failure_webhook_payload = customFailurePayload
+        else delete settings.failure_webhook_payload
       }
       saveMutation.mutate({
         name: name.trim(),
@@ -1099,7 +1129,7 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
         </Stack>
 
         <Alert severity="info" sx={{ mb: 2 }}>
-          No-transcript fallback applies to every template in this API. When a call has no transcript, post-call AI is skipped and the configured Call outcome webhook receives a signed <code>call.post_call.failed</code> event with code <code>transcript_unavailable</code>. Configure the webhook URL in this API's settings.
+          When a call has no transcript, post-call AI is skipped and a signed <code>call.post_call.failed</code> event is sent. A post-call template can override the API’s fallback URL and add a custom payload for its own integration; otherwise the API-level fallback settings are used.
         </Alert>
 
         {isLoading ? (
@@ -1214,6 +1244,8 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
                     setSettingsJson('{\n  "time_zone": "UTC",\n  "time_format": "%Y-%m-%dT%H:%M:%S%z"\n}')
                   } else {
                     setSettingsJson('{}')
+                    setFailureWebhookUrl('')
+                    setFailureWebhookPayloadJson('{}')
                   }
                 }}
               >
@@ -1259,8 +1291,13 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
               multiline
               minRows={3}
               fullWidth
-              helperText={kind === 'post_call' ? 'Optional defaults: time_zone, time_format, output_schema.' : 'Optional: language (for example ta-IN), auto_hangup_when_complete, and completion_requirements. Automatic hang-up requires always/when field rules or live_agent.context.mandatory_fields.'}
+              helperText={kind === 'post_call' ? 'Optional defaults: time_zone, time_format, output_schema. Failure fallback settings are configured below.' : 'Optional: language (for example ta-IN), auto_hangup_when_complete, and completion_requirements. Automatic hang-up requires always/when field rules or live_agent.context.mandatory_fields.'}
             />
+            {kind === 'post_call' && <>
+              <Alert severity="info">These fallback settings override this API’s default only for calls using this post-call template. If the URL is blank, the API failure webhook is used.</Alert>
+              <TextField label="Template failure webhook URL (optional)" type="url" value={failureWebhookUrl} onChange={event => setFailureWebhookUrl(event.target.value)} fullWidth placeholder="https://service.example.com/call-failures" />
+              <TextField label="Template custom failure payload (JSON object)" value={failureWebhookPayloadJson} onChange={event => setFailureWebhookPayloadJson(event.target.value)} multiline minRows={3} fullWidth helperText={'Added under "custom_payload"; the signed event still includes call ID and failure code. Static JSON only.'} />
+            </>}
             {!editing && (
               <FormControlLabel
                 control={<Switch checked={isDefault} onChange={event => setIsDefault(event.target.checked)} />}
@@ -1495,7 +1532,7 @@ function DocsPage() {
       </Card>
       <Card className="surface-card" sx={{ p: { xs: 2, md: 2.5 } }}>
         <Typography variant="h6" sx={{ fontWeight: 800 }}>Call outcome webhooks</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>Configure the optional webhook URL when creating an API. Chiefvoice sends signed completed-result events and failure events. Failures such as no transcript or exhausted post-call retries are reported without running AI. Return any 2xx response and deduplicate deliveries using <code>event_id</code>.</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>Configure the API-level webhook when creating an API or with <code>PUT /v1/webhooks/post-call</code>. Post-call templates can override the failure URL and add a fixed <code>custom_payload</code> for different integrated services. A template override requires the API webhook configuration so deliveries can use its signing secret. Missing-transcript failures bypass AI. Return any 2xx response and deduplicate deliveries using <code>X-Chiefvoice-Event-Id</code> or the body’s <code>event_id</code>.</Typography>
         <DocCodeBlock title="Example failure event" value={`{
   "event": "call.post_call.failed",
   "event_id": "call.post_call.failed:SESSION_ID",
@@ -1512,6 +1549,9 @@ function DocsPage() {
     "code": "transcript_unavailable",
     "retryable": false,
     "attempts": null
+  },
+  "custom_payload": {
+    "attendance_status": "unable_to_verify"
   }
 }`} />
         <Typography variant="caption" color="text.secondary">Event names: <code>call.failed</code> and <code>call.post_call.failed</code>. The payload contains a stable failure code, not raw exception details or transcript text.</Typography>

@@ -167,6 +167,8 @@ def _completed_call(payload: dict) -> CompletedCall:
         time_zone=payload.get("time_zone", "UTC"),
         time_format=payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
         live_agent_context=payload.get("live_agent_context"),
+        failure_webhook_url=payload.get("failure_webhook_url"),
+        failure_webhook_payload=payload.get("failure_webhook_payload"),
     )
 
 

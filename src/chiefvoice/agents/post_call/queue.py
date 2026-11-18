@@ -79,6 +79,8 @@ class PostCallWebhookConfigRow(Base):
     tenant_id: Mapped[str] = mapped_column(String(200), primary_key=True)
     target_url: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_target_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encrypted_failure_custom_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -120,7 +122,10 @@ Index(
 
 
 class PostCallWebhookDirectory(Protocol):
-    async def configure(self, tenant_id: str, target_url: str) -> tuple[str, datetime]: ...
+    async def configure(
+        self, tenant_id: str, target_url: str, *, failure_target_url: str | None = None,
+        failure_custom_payload: dict | None = None, update_failure_settings: bool = False,
+    ) -> tuple[str, datetime]: ...
     async def get(self, tenant_id: str) -> dict | None: ...
     async def delete(self, tenant_id: str) -> bool: ...
 
@@ -139,18 +144,44 @@ class SqlPostCallWebhookDirectory:
     async def close(self) -> None:
         await self._engine.dispose()
 
-    async def configure(self, tenant_id: str, target_url: str) -> tuple[str, datetime]:
+    async def configure(
+        self, tenant_id: str, target_url: str, *, failure_target_url: str | None = None,
+        failure_custom_payload: dict | None = None, update_failure_settings: bool = False,
+    ) -> tuple[str, datetime]:
         await validate_public_webhook_url(target_url)
+        if update_failure_settings and failure_target_url:
+            await validate_public_webhook_url(failure_target_url)
+        encrypted_failure_custom_payload = None
+        if update_failure_settings and failure_custom_payload is not None:
+            if not isinstance(failure_custom_payload, dict):
+                raise ValueError("failure_custom_payload must be a JSON object")
+            payload_bytes = json.dumps(
+                failure_custom_payload, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            if len(payload_bytes) > 16 * 1024:
+                raise ValueError("failure_custom_payload exceeds the 16 KiB limit")
+            encrypted_failure_custom_payload = self._fernet.encrypt(payload_bytes).decode("ascii")
         secret = secrets.token_urlsafe(32)
         encrypted_secret = self._fernet.encrypt(secret.encode("ascii")).decode("ascii")
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
+            current = await session.get(PostCallWebhookConfigRow, tenant_id)
+            saved_failure_target_url = (
+                failure_target_url if update_failure_settings
+                else current.failure_target_url if current is not None else None
+            )
+            saved_failure_custom_payload = (
+                encrypted_failure_custom_payload if update_failure_settings
+                else current.encrypted_failure_custom_payload if current is not None else None
+            )
             stmt = (
                 insert(PostCallWebhookConfigRow)
                 .values(
                     tenant_id=tenant_id,
                     target_url=target_url,
                     encrypted_secret=encrypted_secret,
+                    failure_target_url=saved_failure_target_url,
+                    encrypted_failure_custom_payload=saved_failure_custom_payload,
                     created_at=now,
                     updated_at=now,
                 )
@@ -159,6 +190,8 @@ class SqlPostCallWebhookDirectory:
                     set_={
                         "target_url": target_url,
                         "encrypted_secret": encrypted_secret,
+                        "failure_target_url": saved_failure_target_url,
+                        "encrypted_failure_custom_payload": saved_failure_custom_payload,
                         "updated_at": now,
                     },
                 )
@@ -191,6 +224,11 @@ class SqlPostCallWebhookDirectory:
                 return None
             return {
                 "target_url": row.target_url,
+                "failure_target_url": row.failure_target_url,
+                "failure_custom_payload": (
+                    json.loads(self._fernet.decrypt(row.encrypted_failure_custom_payload.encode("ascii")))
+                    if row.encrypted_failure_custom_payload else None
+                ),
                 "created_at": row.created_at,
                 "updated_at": row.updated_at,
             }
@@ -303,6 +341,8 @@ class SqlPostCallQueue:
             "time_format": call.time_format,
             "live_agent_context": call.live_agent_context,
             "api_key_id": call.api_key_id,
+            "failure_webhook_url": call.failure_webhook_url,
+            "failure_webhook_payload": call.failure_webhook_payload,
         }
         encrypted_payload = self._fernet.encrypt(
             json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -351,6 +391,8 @@ class SqlPostCallQueue:
         ended_at: str | None = None,
         retryable: bool = False,
         attempts: int | None = None,
+        target_url: str | None = None,
+        custom_payload: dict | None = None,
     ) -> bool:
         """Queue a signed failure callback without invoking a model."""
         if event_type not in {"call.failed", "call.post_call.failed"}:
@@ -359,6 +401,7 @@ class SqlPostCallQueue:
         event_id = f"{event_type}:{session_id}"
         body = {
             "event": event_type,
+            "event_id": event_id,
             "call": {
                 "session_id": session_id,
                 "provider": provider,
@@ -374,20 +417,27 @@ class SqlPostCallQueue:
                 "attempts": attempts,
             },
         }
-        encrypted_payload = self._fernet.encrypt(
-            json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        ).decode("ascii")
         async with self._sessions.begin() as session:
             config = await session.get(PostCallWebhookConfigRow, tenant_id)
             if config is None:
                 return False
+            configured_payload = (
+                json.loads(self._fernet.decrypt(config.encrypted_failure_custom_payload.encode("ascii")))
+                if config.encrypted_failure_custom_payload else None
+            )
+            effective_payload = custom_payload if custom_payload is not None else configured_payload
+            if effective_payload is not None:
+                body["custom_payload"] = effective_payload
+            encrypted_payload = self._fernet.encrypt(
+                json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).decode("ascii")
             result = await session.execute(
                 insert(PostCallWebhookDeliveryRow)
                 .values(
                     event_id=event_id,
                     session_id=session_id,
                     tenant_id=tenant_id,
-                    target_url=config.target_url,
+                    target_url=target_url or config.failure_target_url or config.target_url,
                     encrypted_secret=config.encrypted_secret,
                     event_type=event_type,
                     encrypted_event_payload=encrypted_payload,
@@ -645,6 +695,7 @@ class SqlPostCallQueue:
                         "started_at": row.started_at.isoformat() if row.started_at else None,
                         "ended_at": row.ended_at.isoformat(),
                         "attempts": row.attempts,
+                        "encrypted_payload": row.encrypted_payload,
                     }
                 else:
                     row.status = "processing"
@@ -665,6 +716,13 @@ class SqlPostCallQueue:
                     }
 
         if lease_expired_failure is not None:
+            lease_payload = {}
+            try:
+                lease_payload = json.loads(
+                    self._fernet.decrypt(lease_expired_failure["encrypted_payload"].encode("ascii"))
+                )
+            except Exception:
+                pass
             await self.enqueue_failure(
                 session_id=lease_expired_failure["session_id"],
                 tenant_id=lease_expired_failure["tenant_id"],
@@ -678,10 +736,13 @@ class SqlPostCallQueue:
                 ended_at=lease_expired_failure["ended_at"],
                 retryable=False,
                 attempts=lease_expired_failure["attempts"],
+                target_url=lease_payload.get("failure_webhook_url"),
+                custom_payload=lease_payload.get("failure_webhook_payload"),
             )
             return True
 
         failure_stage = "payload_decryption"
+        payload: dict = {}
         try:
             payload = json.loads(self._fernet.decrypt(job["encrypted_payload"].encode("ascii")))
             completed_call = CompletedCall(
@@ -701,6 +762,8 @@ class SqlPostCallQueue:
                 time_zone=payload.get("time_zone", "UTC"),
                 time_format=payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
                 live_agent_context=payload.get("live_agent_context"),
+                failure_webhook_url=payload.get("failure_webhook_url"),
+                failure_webhook_payload=payload.get("failure_webhook_payload"),
             )
             failure_stage = "agent_processing"
             result = await asyncio.wait_for(
@@ -762,6 +825,8 @@ class SqlPostCallQueue:
                     ended_at=job["ended_at"],
                     retryable=False,
                     attempts=attempt,
+                    target_url=payload.get("failure_webhook_url"),
+                    custom_payload=payload.get("failure_webhook_payload"),
                 )
             return True
 
