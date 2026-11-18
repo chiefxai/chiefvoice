@@ -412,6 +412,28 @@ async def get_call_status(
     return result
 
 
+@router.get("/v1/calls/{session_id}/transcript", tags=["calls"])
+async def get_call_transcript(
+    session_id: str,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Security(require_scope("calls:read"))],
+):
+    """Return a tenant-owned call transcript when available."""
+    store = getattr(request.app.state, "call_session_store", None)
+    if store is None or not hasattr(store, "get_transcript"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Call transcript storage is not configured",
+        )
+    result = await store.get_transcript(principal.tenant_id, session_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+    await _enforce_number_binding(store, principal, session_id)
+    response.headers["Cache-Control"] = "private, no-store"
+    return result
+
+
 async def _enforce_number_binding(store: Any, principal: Principal, session_id: str) -> None:
     if principal.auth_method != "api_key":
         return

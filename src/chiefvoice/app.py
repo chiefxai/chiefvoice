@@ -140,7 +140,7 @@ async def lifespan(_app: FastAPI):
             ))
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             await post_call_dispatcher.initialize()
-            if call_session_store is not None:
+            if call_session_store is not None and post_call_agent is not None:
                 # The transcript checkpoint is written throughout the call, so a VM
                 # restart after hangup can still enqueue analysis exactly once.
                 while True:
@@ -167,6 +167,8 @@ async def lifespan(_app: FastAPI):
                 )))
             elif post_call_agent is not None:
                 worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_worker(post_call_agent)))
+            else:
+                worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_delivery_worker()))
         if post_call_dispatcher is not None and post_call_recovery_spool is not None:
             worker_tasks.append(asyncio.create_task(
                 run_spool_reconciler(post_call_recovery_spool, post_call_dispatcher)
@@ -387,10 +389,6 @@ def create_app(
     post_call_required = settings.post_call_agent_provider != "disabled"
     if (
         post_call_dispatcher is None
-        and (
-            post_call_agent is not None
-            or settings.post_call_execution_backend in {"lambda", "gcp_function", "sqs", "gcp_cloud_tasks"}
-        )
         and settings.database_url
         and settings.post_call_encryption_key
     ):

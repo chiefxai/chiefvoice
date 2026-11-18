@@ -86,10 +86,14 @@ class PostCallWebhookConfigRow(Base):
 class PostCallWebhookDeliveryRow(Base):
     __tablename__ = "post_call_webhook_deliveries"
     event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False)
     target_url: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="call.analysis.completed", server_default="call.analysis.completed"
+    )
+    encrypted_event_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -170,6 +174,7 @@ class SqlPostCallWebhookDirectory:
                     status="cancelled",
                     target_url="",
                     encrypted_secret="",
+                    encrypted_event_payload=None,
                     next_attempt_at=None,
                     lease_expires_at=None,
                     updated_at=now,
@@ -208,6 +213,7 @@ class SqlPostCallWebhookDirectory:
                     status="cancelled",
                     target_url="",
                     encrypted_secret="",
+                    encrypted_event_payload=None,
                     next_attempt_at=None,
                     lease_expires_at=None,
                     updated_at=now,
@@ -330,6 +336,79 @@ class SqlPostCallQueue:
             post_call_job_event("enqueued")
         return inserted
 
+    async def enqueue_failure(
+        self,
+        *,
+        session_id: str,
+        tenant_id: str,
+        event_type: str,
+        provider: str,
+        channel: str,
+        direction: str,
+        failure_stage: str,
+        failure_code: str,
+        started_at: str | None = None,
+        ended_at: str | None = None,
+        retryable: bool = False,
+        attempts: int | None = None,
+    ) -> bool:
+        """Queue a signed failure callback without invoking a model."""
+        if event_type not in {"call.failed", "call.post_call.failed"}:
+            raise ValueError("Unsupported failure webhook event")
+        now = datetime.now(UTC)
+        event_id = f"{event_type}:{session_id}"
+        body = {
+            "event": event_type,
+            "call": {
+                "session_id": session_id,
+                "provider": provider,
+                "channel": channel,
+                "direction": direction,
+                "started_at": started_at,
+                "ended_at": ended_at,
+            },
+            "failure": {
+                "stage": failure_stage,
+                "code": failure_code,
+                "retryable": retryable,
+                "attempts": attempts,
+            },
+        }
+        encrypted_payload = self._fernet.encrypt(
+            json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        async with self._sessions.begin() as session:
+            config = await session.get(PostCallWebhookConfigRow, tenant_id)
+            if config is None:
+                return False
+            result = await session.execute(
+                insert(PostCallWebhookDeliveryRow)
+                .values(
+                    event_id=event_id,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    target_url=config.target_url,
+                    encrypted_secret=config.encrypted_secret,
+                    event_type=event_type,
+                    encrypted_event_payload=encrypted_payload,
+                    status="queued",
+                    attempts=0,
+                    next_attempt_at=now,
+                    lease_expires_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=[PostCallWebhookDeliveryRow.event_id])
+            )
+        if result.rowcount == 1:
+            post_call_webhook_event("queued")
+            logger.info(
+                "failure_webhook_queued",
+                extra={"session_id": session_id, "tenant_id": tenant_id, "event": event_type, "code": failure_code},
+            )
+            return True
+        return False
+
     async def get_status(self, tenant_id: str, session_id: str) -> dict | None:
         """Return tenant-scoped job status and decrypted analysis, never the transcript."""
         async with self._sessions() as session:
@@ -346,10 +425,13 @@ class SqlPostCallQueue:
             if row.status == "completed" and row.encrypted_result:
                 result = json.loads(self._fernet.decrypt(row.encrypted_result.encode("ascii")))
             delivery = await session.scalar(
-                select(PostCallWebhookDeliveryRow).where(
+                select(PostCallWebhookDeliveryRow)
+                .where(
                     PostCallWebhookDeliveryRow.tenant_id == tenant_id,
                     PostCallWebhookDeliveryRow.session_id == session_id,
                 )
+                .order_by(PostCallWebhookDeliveryRow.created_at.desc())
+                .limit(1)
             )
             return {
                 "session_id": row.session_id,
@@ -420,10 +502,31 @@ class SqlPostCallQueue:
                 analysis_worked = await self.process_one(agent)
                 delivery_worked = await self.process_delivery_one()
                 worked = analysis_worked or delivery_worked
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 post_call_job_event("worker_iteration_failed")
                 logger.error(
                     "post_call_worker_iteration_failed",
+                    extra={"error_type": type(exc).__name__},
+                )
+                await asyncio.sleep(self.poll_interval)
+                continue
+            if not worked:
+                await asyncio.sleep(self.poll_interval)
+
+    async def run_delivery_worker(self) -> None:
+        """Deliver webhook outbox events when AI analysis is disabled."""
+        while True:
+            try:
+                worked = await self.process_delivery_one()
+                if not worked:
+                    await asyncio.sleep(self.poll_interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "post_call_webhook_worker_iteration_failed",
                     extra={"error_type": type(exc).__name__},
                 )
                 await asyncio.sleep(self.poll_interval)
@@ -525,6 +628,7 @@ class SqlPostCallQueue:
                 )
                 if row is None:
                     return False
+                lease_expired_failure = None
                 if row.attempts >= self.max_attempts:
                     row.status = "failed"
                     row.lease_expires_at = None
@@ -532,23 +636,50 @@ class SqlPostCallQueue:
                     row.last_error_type = "worker_lease_expired"
                     row.updated_at = now
                     post_call_job_event("failed")
-                    return True
-                row.status = "processing"
-                row.attempts += 1
-                attempt = row.attempts
-                row.lease_expires_at = now + self.lease_duration
-                row.next_attempt_at = None
-                row.updated_at = now
-                job = {
-                    "session_id": row.session_id,
-                    "tenant_id": row.tenant_id,
-                    "provider": row.provider,
-                    "channel": row.channel,
-                    "direction": row.direction,
-                    "started_at": row.started_at.isoformat() if row.started_at else None,
-                    "ended_at": row.ended_at.isoformat(),
-                    "encrypted_payload": row.encrypted_payload,
-                }
+                    lease_expired_failure = {
+                        "session_id": row.session_id,
+                        "tenant_id": row.tenant_id,
+                        "provider": row.provider,
+                        "channel": row.channel,
+                        "direction": row.direction,
+                        "started_at": row.started_at.isoformat() if row.started_at else None,
+                        "ended_at": row.ended_at.isoformat(),
+                        "attempts": row.attempts,
+                    }
+                else:
+                    row.status = "processing"
+                    row.attempts += 1
+                    attempt = row.attempts
+                    row.lease_expires_at = now + self.lease_duration
+                    row.next_attempt_at = None
+                    row.updated_at = now
+                    job = {
+                        "session_id": row.session_id,
+                        "tenant_id": row.tenant_id,
+                        "provider": row.provider,
+                        "channel": row.channel,
+                        "direction": row.direction,
+                        "started_at": row.started_at.isoformat() if row.started_at else None,
+                        "ended_at": row.ended_at.isoformat(),
+                        "encrypted_payload": row.encrypted_payload,
+                    }
+
+        if lease_expired_failure is not None:
+            await self.enqueue_failure(
+                session_id=lease_expired_failure["session_id"],
+                tenant_id=lease_expired_failure["tenant_id"],
+                event_type="call.post_call.failed",
+                provider=lease_expired_failure["provider"],
+                channel=lease_expired_failure["channel"],
+                direction=lease_expired_failure["direction"],
+                failure_stage="worker",
+                failure_code="worker_lease_expired",
+                started_at=lease_expired_failure["started_at"],
+                ended_at=lease_expired_failure["ended_at"],
+                retryable=False,
+                attempts=lease_expired_failure["attempts"],
+            )
+            return True
 
         failure_stage = "payload_decryption"
         try:
@@ -617,6 +748,21 @@ class SqlPostCallQueue:
                 },
             )
             post_call_job_event("retrying" if new_status == "queued" else "failed")
+            if new_status == "failed":
+                await self.enqueue_failure(
+                    session_id=job["session_id"],
+                    tenant_id=job["tenant_id"],
+                    event_type="call.post_call.failed",
+                    provider=job["provider"],
+                    channel=job["channel"],
+                    direction=job["direction"],
+                    failure_stage=failure_stage,
+                    failure_code=type(exc).__name__,
+                    started_at=job["started_at"],
+                    ended_at=job["ended_at"],
+                    retryable=False,
+                    attempts=attempt,
+                )
             return True
 
         delivery_enqueued = False
@@ -697,6 +843,7 @@ class SqlPostCallQueue:
                     row.status = "failed"
                     row.target_url = ""
                     row.encrypted_secret = ""
+                    row.encrypted_event_payload = None
                     row.next_attempt_at = None
                     row.lease_expires_at = None
                     row.last_error_type = "delivery_attempts_exhausted"
@@ -715,20 +862,25 @@ class SqlPostCallQueue:
                         "target_url": row.target_url,
                         "encrypted_secret": row.encrypted_secret,
                         "attempts": row.attempts,
+                        "event_type": row.event_type,
+                        "encrypted_event_payload": row.encrypted_event_payload,
                     }
-                    job = await session.get(PostCallJobRow, row.session_id)
-                    if job is None or job.status != "completed" or not job.encrypted_result:
-                        delivery["invalid_job"] = True
+                    if row.event_type == "call.analysis.completed":
+                        job = await session.get(PostCallJobRow, row.session_id)
+                        if job is None or job.status != "completed" or not job.encrypted_result:
+                            delivery["invalid_job"] = True
+                        else:
+                            delivery.update(
+                                provider=job.provider,
+                                channel=job.channel,
+                                direction=job.direction,
+                                started_at=job.started_at.isoformat() if job.started_at else None,
+                                ended_at=job.ended_at.isoformat(),
+                                encrypted_result=job.encrypted_result,
+                                encrypted_payload=job.encrypted_payload,
+                            )
                     else:
-                        delivery.update(
-                            provider=job.provider,
-                            channel=job.channel,
-                            direction=job.direction,
-                            started_at=job.started_at.isoformat() if job.started_at else None,
-                            ended_at=job.ended_at.isoformat(),
-                            encrypted_result=job.encrypted_result,
-                            encrypted_payload=job.encrypted_payload,
-                        )
+                        delivery["failure_event"] = True
 
         if delivery is None:
             logger.error("post_call_webhook_delivery_failed", extra={"error_type": "attempts_exhausted"})
@@ -737,37 +889,47 @@ class SqlPostCallQueue:
         status_code = None
         failure_stage = "webhook_target_resolution"
         try:
-            if delivery.get("invalid_job"):
-                raise RuntimeError("completed_call_result_missing")
-            parsed_target, pinned_address = await _resolve_public_webhook_target(delivery["target_url"])
-            failure_stage = "webhook_payload_decryption"
-            result = json.loads(
-                self._fernet.decrypt(delivery["encrypted_result"].encode("ascii"))
-            )
-            call_payload = json.loads(
-                self._fernet.decrypt(delivery["encrypted_payload"].encode("ascii"))
-            )
-            failure_stage = "webhook_payload_serialization"
-            body = {
-                "event": "call.analysis.completed",
-                "event_id": delivery["event_id"],
-                "call": {
-                    "session_id": delivery["session_id"],
-                    "provider": delivery["provider"],
-                    "channel": delivery["channel"],
-                    "direction": delivery["direction"],
-                    "started_at": delivery["started_at"],
-                    "ended_at": delivery["ended_at"],
-                },
-                "post_call": {
-                    "time_zone": call_payload.get("time_zone", "UTC"),
-                    "time_format": call_payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
-                },
-                "result": result,
-            }
-            body_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(
-                "utf-8"
-            )
+            if delivery.get("failure_event"):
+                parsed_target, pinned_address = await _resolve_public_webhook_target(delivery["target_url"])
+                body = json.loads(
+                    self._fernet.decrypt(delivery["encrypted_event_payload"].encode("ascii"))
+                )
+                body["event_id"] = delivery["event_id"]
+                failure_stage = "webhook_payload_serialization"
+                body_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                result = None
+            else:
+                if delivery.get("invalid_job"):
+                    raise RuntimeError("completed_call_result_missing")
+                parsed_target, pinned_address = await _resolve_public_webhook_target(delivery["target_url"])
+                failure_stage = "webhook_payload_decryption"
+                result = json.loads(
+                    self._fernet.decrypt(delivery["encrypted_result"].encode("ascii"))
+                )
+                call_payload = json.loads(
+                    self._fernet.decrypt(delivery["encrypted_payload"].encode("ascii"))
+                )
+                failure_stage = "webhook_payload_serialization"
+                body = {
+                    "event": "call.analysis.completed",
+                    "event_id": delivery["event_id"],
+                    "call": {
+                        "session_id": delivery["session_id"],
+                        "provider": delivery["provider"],
+                        "channel": delivery["channel"],
+                        "direction": delivery["direction"],
+                        "started_at": delivery["started_at"],
+                        "ended_at": delivery["ended_at"],
+                    },
+                    "post_call": {
+                        "time_zone": call_payload.get("time_zone", "UTC"),
+                        "time_format": call_payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
+                    },
+                    "result": result,
+                }
+                body_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(
+                    "utf-8"
+                )
             if len(body_bytes) > MAX_WEBHOOK_BODY_BYTES:
                 raise RuntimeError("webhook_body_too_large")
             timestamp = str(int(time.time()))
@@ -833,7 +995,11 @@ class SqlPostCallQueue:
                         last_error_type=error_type,
                         updated_at=datetime.now(UTC),
                         **(
-                            {"target_url": "", "encrypted_secret": ""}
+                            {
+                                "target_url": "",
+                                "encrypted_secret": "",
+                                "encrypted_event_payload": None,
+                            }
                             if new_status == "failed"
                             else {}
                         ),
@@ -869,6 +1035,7 @@ class SqlPostCallQueue:
                     status="delivered",
                     target_url="",
                     encrypted_secret="",
+                    encrypted_event_payload=None,
                     lease_expires_at=None,
                     last_status_code=status_code,
                     last_error_type=None,

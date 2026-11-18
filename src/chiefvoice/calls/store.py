@@ -445,6 +445,31 @@ class SqlCallSessionStore:
                 "post_call_enqueued": row.post_call_enqueued_at is not None,
             }
 
+    async def get_transcript(self, tenant_id: str, session_id: str) -> dict[str, Any] | None:
+        """Load a tenant-owned transcript and its availability state."""
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+            )
+            if row is None:
+                return None
+            transcript = None
+            if row.encrypted_transcript:
+                transcript = self._fernet.decrypt(
+                    row.encrypted_transcript.encode("ascii")
+                ).decode("utf-8")
+            return {
+                "session_id": row.session_id,
+                "status": row.status,
+                "transcript_available": bool(transcript),
+                "transcript_characters": row.transcript_characters,
+                "transcript_persistence_failed": row.transcript_persistence_failed,
+                "transcript": transcript,
+            }
+
     async def list_for_api_key(
         self, tenant_id: str, api_key_id: str, *, limit: int = 50, offset: int = 0
     ) -> dict[str, Any]:

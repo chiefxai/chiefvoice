@@ -87,6 +87,7 @@ class SqlPostCallReplayService:
                 .where(
                     PostCallWebhookDeliveryRow.tenant_id == tenant_id,
                     PostCallWebhookDeliveryRow.session_id == session_id,
+                    PostCallWebhookDeliveryRow.event_type == "call.analysis.completed",
                 )
                 .with_for_update()
             )

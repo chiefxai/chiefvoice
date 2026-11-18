@@ -245,6 +245,9 @@ class CallCoordinator:
                 await self.call_session_store.update_state(
                     session, status="failed", end_reason="billing_authorization_failed"
                 )
+            await self._enqueue_failure_webhook(
+                session, stage="call", code="billing_authorization_failed"
+            )
             raise
         if self.realtime_preflight is not None:
             try:
@@ -255,6 +258,9 @@ class CallCoordinator:
                     await self.call_session_store.update_state(
                         session, status="failed", end_reason="realtime_preflight_failed"
                     )
+                await self._enqueue_failure_webhook(
+                    session, stage="call", code="realtime_preflight_failed"
+                )
                 if isinstance(exc, HTTPException):
                     raise
                 logger.warning(
@@ -302,6 +308,9 @@ class CallCoordinator:
                 await self.call_session_store.update_state(
                     session, status="failed", end_reason="call_state_persist_failed"
                 )
+                await self._enqueue_failure_webhook(
+                    session, stage="call", code="call_state_persist_failed"
+                )
                 raise
         try:
             session = await adapter.initiate_outbound(call, session)
@@ -334,6 +343,9 @@ class CallCoordinator:
                 await self.call_session_store.update_state(
                     session, status="failed", end_reason="provider_start_failed"
                 )
+            await self._enqueue_failure_webhook(
+                session, stage="call", code="provider_start_failed"
+            )
             raise
         if self.call_session_store is not None:
             await self.call_session_store.update_state(
@@ -512,6 +524,37 @@ class CallCoordinator:
 
         session.metadata["persist_transcript_segment"] = persist_segment
 
+    async def _enqueue_failure_webhook(
+        self, session: AcceptedSession, *, stage: str, code: str, ended_at: datetime | None = None
+    ) -> None:
+        enqueue_failure = getattr(self.post_call_dispatcher, "enqueue_failure", None)
+        if not callable(enqueue_failure) or not session.tenant_id:
+            return
+        try:
+            await enqueue_failure(
+                session_id=session.session_id,
+                tenant_id=session.tenant_id,
+                event_type="call.failed" if stage == "call" else "call.post_call.failed",
+                provider=session.provider,
+                channel=session.channel,
+                direction=session.direction.value,
+                failure_stage=stage,
+                failure_code=code,
+                started_at=session.started_at.isoformat(),
+                ended_at=(ended_at or datetime.now(UTC)).isoformat(),
+                retryable=False,
+            )
+        except Exception as exc:
+            logger.error(
+                "failure_webhook_enqueue_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "failure_code": code,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
     async def end_session(self, session: AcceptedSession, reason: str) -> None:
         if session.metadata.get("coordinator_session_ended"):
             return
@@ -587,6 +630,11 @@ class CallCoordinator:
                         extra={"session_id": session.session_id, "error_type": type(exc).__name__},
                     )
             session.metadata["call_status"] = "completed"
+            session.metadata["call_end_reason"] = reason
+            if reason == "provider_error":
+                await self._enqueue_failure_webhook(
+                    session, stage="call", code="provider_media_pipeline_failed", ended_at=ended_at
+                )
             await self._enqueue_post_call(session, ended_at)
 
     async def _enqueue_post_call(self, session: AcceptedSession, ended_at: datetime) -> None:
@@ -614,6 +662,17 @@ class CallCoordinator:
                     "provider": session.provider,
                 },
             )
+            if session.metadata.get("call_end_reason") != "provider_error":
+                await self._enqueue_failure_webhook(
+                    session,
+                    stage="post_call",
+                    code=(
+                        "transcript_persistence_failed"
+                        if session.metadata.get("transcript_persistence_error")
+                        else "transcript_unavailable"
+                    ),
+                    ended_at=ended_at,
+                )
             return
         call = CompletedCall(
             session_id=session.session_id,

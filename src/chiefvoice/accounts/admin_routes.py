@@ -1038,13 +1038,8 @@ async def issue_phone_api_key(
     post_call_agent = await _assigned_agent(request, body.post_call_agent_id, PLATFORM_OWNER_ID, "post_call")
     webhook_directory = getattr(request.app.state, "post_call_webhook_directory", None)
     if body.post_call_webhook_url:
-        if post_call_agent is None:
-            raise HTTPException(
-                status_code=422,
-                detail="A post-call agent is required when configuring a completion webhook",
-            )
         if webhook_directory is None:
-            raise HTTPException(status_code=503, detail="Post-call webhook storage is not configured")
+            raise HTTPException(status_code=503, detail="Webhook storage is not configured")
         try:
             await validate_public_webhook_url(body.post_call_webhook_url)
         except ValueError as exc:
