@@ -1508,6 +1508,26 @@ function DocsPage() {
   const transcriptExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/transcript" \\
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
   -H "Accept: application/json"`
+  const webhookVerifyExample = `import hashlib
+import hmac
+
+raw_body = request.get_data()
+timestamp = request.headers["X-Chiefvoice-Timestamp"]
+event_id = request.headers["X-Chiefvoice-Event-Id"]
+provided = request.headers["X-Chiefvoice-Signature"]
+signed = timestamp.encode() + b"." + event_id.encode() + b"." + raw_body
+expected = "sha256=" + hmac.new(
+    WEBHOOK_SIGNING_SECRET.encode(), signed, hashlib.sha256
+).hexdigest()
+if not hmac.compare_digest(provided, expected):
+    return "invalid signature", 401
+
+event = request.get_json()
+if already_processed(event_id):
+    return "already processed", 200
+process_failure(event)
+mark_processed(event_id)
+return "ok", 200`
   const recordingExample = `curl "$CHIEFVOICE_URL/v1/calls/$SESSION_ID/recording" \\
   -H "Authorization: Bearer $CHIEFVOICE_API_KEY" \\
   --output call-recording.wav`
@@ -1536,7 +1556,15 @@ function DocsPage() {
   "transcript_persistence_failed": false,
   "transcript": "Agent: Hello, Avery.\\nCustomer: Yes, I confirm the appointment."
 }`}</pre></section>
-      <section className="docs-section" id="docs-webhooks"><Typography variant="h5">Call outcome webhooks</Typography><Typography color="text.secondary" sx={{ mb: 1.5 }}>Configure a callback URL in the API settings. Post-call templates can override the failure URL and include a fixed <code>custom_payload</code>. Return a 2xx response and deduplicate events using <code>X-Chiefvoice-Event-Id</code> or <code>event_id</code>.</Typography><DocCodeBlock title="Example failure event" value={`{
+      <section className="docs-section" id="docs-webhooks">
+        <Typography variant="h5">Fallback failure webhooks</Typography>
+        <Typography color="text.secondary" sx={{ mb: 1.5 }}>A fallback webhook notifies your service when Chiefvoice cannot complete a call or its post-call processing. It lets your system update the record, alert a team, or schedule a follow-up without relying on a successful AI result.</Typography>
+        <Typography variant="subtitle1" sx={{ fontWeight: 750, mt: 2 }}>When it is sent</Typography>
+        <ul><li><code>call.failed</code>: the call fails, for example because the provider media pipeline fails.</li><li><code>call.post_call.failed</code>: post-call processing cannot continue, such as when no transcript is available or transcript persistence failed.</li></ul>
+        <Typography variant="subtitle1" sx={{ fontWeight: 750, mt: 2 }}>Choose the destination</Typography>
+        <Typography color="text.secondary">Configure the API’s failure fallback URL alongside its main Call outcome webhook URL. A post-call template may override the failure URL and add a static custom payload for calls using that template. Delivery chooses the template URL first, then the API failure fallback URL, then the main webhook URL. If no webhook is configured, no event is delivered.</Typography>
+        <Typography variant="subtitle1" sx={{ fontWeight: 750, mt: 2, mb: 1 }}>Example event</Typography>
+        <DocCodeBlock title="call.post_call.failed" value={`{
   "event": "call.post_call.failed",
   "event_id": "call.post_call.failed:SESSION_ID",
   "call": {
@@ -1556,7 +1584,12 @@ function DocsPage() {
   "custom_payload": {
     "attendance_status": "unable_to_verify"
   }
-}`} /><Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>Events: <code>call.failed</code> and <code>call.post_call.failed</code>. Failure payloads contain stable error codes, not transcript text.</Typography></section>
+}`} />
+        <Typography variant="subtitle1" sx={{ fontWeight: 750, mt: 2 }}>Verify and process it safely</Typography>
+        <Typography color="text.secondary" sx={{ mb: 1.5 }}>The webhook signing secret is returned when webhook settings are configured. Store it securely. Verify the signature against the exact raw request body before parsing JSON. Use <code>event_id</code> as an idempotency key because a delivery may be repeated. Return any 2xx status after accepting the event; network failures and non-2xx responses are retried with increasing delays until delivery stops retrying.</Typography>
+        <DocCodeBlock title="Python signature check and idempotent handling" value={webhookVerifyExample} />
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>Headers include <code>X-Chiefvoice-Event</code>, <code>X-Chiefvoice-Event-Id</code>, <code>X-Chiefvoice-Timestamp</code>, and <code>X-Chiefvoice-Signature</code>. The signature is HMAC-SHA256 over <code>timestamp.event_id.raw_body</code> and is prefixed with <code>sha256=</code>. Failure codes are stable identifiers; transcript text is not included.</Typography>
+      </section>
       <section className="docs-section" id="docs-recordings"><Typography variant="h5">Download a recording</Typography><Typography color="text.secondary" sx={{ mb: 1.5 }}>Recording must be enabled for both the API and the call.</Typography><CopyableCode value={recordingExample} minRows={3} /></section>
     </main>
   </div>
