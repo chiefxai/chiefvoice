@@ -64,10 +64,43 @@ jobs:
         run: |
           set -Eeuo pipefail
           build_service_account="projects/${GCP_PROJECT_ID}/serviceAccounts/${GCP_CLOUD_BUILD_SERVICE_ACCOUNT}"
+          diagnostics_file="$(mktemp)"
+          set +e
           gcloud builds submit \
             --project="$GCP_PROJECT_ID" \
             --region="$GCP_REGION" \
             --config=cloudbuild.yaml \
             --service-account="$build_service_account" \
+            --log-http \
+            --verbosity=debug \
             --quiet \
-            .
+            . 2>"$diagnostics_file"
+          submit_status=$?
+          set -e
+
+          if [[ "$submit_status" -ne 0 ]]; then
+            python - "$diagnostics_file" <<'PY'
+          import re
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8", errors="replace") as diagnostic_file:
+              lines = diagnostic_file.read().splitlines()
+
+          relevant = re.compile(
+              r"403|error|forbidden|permission|serviceusage|storage\.buckets|billing|organization",
+              re.IGNORECASE,
+          )
+          sensitive = re.compile(r"authorization|bearer|send:", re.IGNORECASE)
+          for line in lines:
+              if relevant.search(line) and not sensitive.search(line):
+                  line = re.sub(
+                      r"(?i)(access_token[\"'=:\s]+)[^,\s\"']+",
+                      r"\1[REDACTED]",
+                      line,
+                  )
+                  print(line[:2000])
+          PY
+          fi
+
+          rm -f "$diagnostics_file"
+          exit "$submit_status"
