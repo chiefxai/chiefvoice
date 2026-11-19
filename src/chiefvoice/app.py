@@ -386,6 +386,7 @@ def create_app(
     application.state.post_call_async_invoker = post_call_async_invoker
     application.state.vertex_project_directory = vertex_project_directory
     application.state.vertex_project_provisioner = vertex_project_provisioner
+    recording_store = create_recording_store()
     post_call_required = settings.post_call_agent_provider != "disabled"
     if (
         post_call_dispatcher is None
@@ -396,6 +397,7 @@ def create_app(
             settings.database_url,
             settings.post_call_encryption_key,
             poll_interval=settings.post_call_dispatch_interval_seconds,
+            recording_store=recording_store,
         )
     application.state.post_call_dispatcher = post_call_dispatcher
     post_call_replay_service = (
@@ -407,7 +409,6 @@ def create_app(
     application.state.post_call_required = post_call_required
     if agent_profile_directory is None and settings.database_url:
         agent_profile_directory = SqlAgentProfileDirectory(settings.database_url)
-    recording_store = create_recording_store()
     object_storage_checks: list[Callable[[], Awaitable[None]]] = []
     if recording_store is not None and hasattr(recording_store, "check_storage"):
         object_storage_checks.append(recording_store.check_storage)

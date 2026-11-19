@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 
@@ -16,6 +17,8 @@ class CompletedCall:
     ended_at: str | None = None
     transcript: str | None = None
     recording_uri: str | None = None
+    recording_audio: bytes | None = None
+    recording_loader: Callable[[], Awaitable[bytes | None]] | None = None
     post_call_context: str | None = None
     output_schema: dict[str, Any] | None = None
     tools: tuple[str, ...] = ()

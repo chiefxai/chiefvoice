@@ -11,7 +11,7 @@ import socket
 import time
 import traceback
 import urllib.parse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -46,6 +46,7 @@ from chiefvoice.observability.setup import (
 
 logger = logging.getLogger(__name__)
 MAX_WEBHOOK_BODY_BYTES = 64 * 1024
+MAX_POST_CALL_RECORDING_BYTES = 14 * 1024 * 1024
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=CONSTRAINT_NAMING)
@@ -284,6 +285,7 @@ class SqlPostCallQueue:
         poll_interval: float = 1.0,
         lease_duration: timedelta = timedelta(minutes=5),
         max_attempts: int = 5,
+        recording_store: object | None = None,
     ):
         self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
@@ -291,6 +293,7 @@ class SqlPostCallQueue:
         self.poll_interval = poll_interval
         self.lease_duration = lease_duration
         self.max_attempts = max_attempts
+        self.recording_store = recording_store
         self._last_metrics_refresh = 0.0
 
     async def initialize(self) -> None:
@@ -765,6 +768,45 @@ class SqlPostCallQueue:
                 failure_webhook_url=payload.get("failure_webhook_url"),
                 failure_webhook_payload=payload.get("failure_webhook_payload"),
             )
+            if completed_call.recording_uri and self.recording_store is not None:
+                read_wav = getattr(self.recording_store, "read_wav", None)
+                if callable(read_wav):
+
+                    async def load_recording() -> bytes | None:
+                        try:
+                            recording_audio = await read_wav(
+                                completed_call.tenant_id,
+                                completed_call.session_id,
+                                completed_call.recording_uri,
+                            )
+                            if (
+                                recording_audio
+                                and len(recording_audio) > MAX_POST_CALL_RECORDING_BYTES
+                            ):
+                                logger.info(
+                                    "post_call_recording_transcription_skipped",
+                                    extra={
+                                        "session_id": completed_call.session_id,
+                                        "reason": "recording_exceeds_inline_limit",
+                                        "recording_bytes": len(recording_audio),
+                                    },
+                                )
+                                return None
+                            return recording_audio
+                        except Exception as recording_exc:
+                            logger.warning(
+                                "post_call_recording_unavailable",
+                                extra={
+                                    "session_id": completed_call.session_id,
+                                    "tenant_id": completed_call.tenant_id,
+                                    "error_type": type(recording_exc).__name__,
+                                },
+                            )
+                            return None
+
+                    completed_call = replace(
+                        completed_call, recording_loader=load_recording
+                    )
             failure_stage = "agent_processing"
             result = await asyncio.wait_for(
                 agent.process(completed_call), timeout=self.lease_duration.total_seconds() / 2

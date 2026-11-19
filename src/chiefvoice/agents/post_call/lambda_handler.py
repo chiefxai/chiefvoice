@@ -19,6 +19,7 @@ from chiefvoice.cloud_projects.post_call import TenantVertexPostCallAgent
 from chiefvoice.cloud_projects.store import SqlTenantVertexProjectDirectory
 from chiefvoice.core.config import settings
 from chiefvoice.observability import configure_logging
+from chiefvoice.recordings.storage import create_recording_store
 
 configure_logging()
 
@@ -62,7 +63,11 @@ async def _process(event: Mapping[str, object]) -> dict[str, object]:
     if not has_global_vertex and not settings.credentials_encryption_key:
         raise RuntimeError("Per-API GCP credentials require CREDENTIALS_ENCRYPTION_KEY")
 
-    queue = SqlPostCallQueue(database_url, post_call_key)
+    queue = SqlPostCallQueue(
+        database_url,
+        post_call_key,
+        recording_store=create_recording_store(),
+    )
     await queue.initialize()
     directory: SqlTenantVertexProjectDirectory | None = None
     api_key_directory: SqlApiKeyDirectory | None = None

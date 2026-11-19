@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import io
@@ -9,18 +11,19 @@ import shutil
 import wave
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
-from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
-
 from chiefvoice.core.config import settings
 from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.observability.setup import recording_storage_event
-from chiefvoice.sessions import AcceptedSession
 from chiefvoice.storage.s3 import create_s3_compatible_client, object_key
+
+if TYPE_CHECKING:
+    from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+    from chiefvoice.sessions import AcceptedSession
 
 logger = logging.getLogger(__name__)
 MAX_RECORDING_DOWNLOAD_BYTES = 128 * 1024 * 1024
@@ -669,6 +672,8 @@ def attach_recording(
 
 def create_recording_processor(session: AcceptedSession) -> AudioBufferProcessor:
     """Create Pipecat's audio recorder with recording gated by session consent and config."""
+    from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+
     return AudioBufferProcessor(
         auto_start_recording=settings.recordings_enabled and session.recording_allowed
     )
