@@ -740,6 +740,8 @@ async def _update_platform_phone_number(
     integration = await store.get(provider, customer_id)
     if integration is None:
         raise HTTPException(status_code=404, detail="Provider configuration not found")
+    if not any(item.number == phone_number for item in integration.phone_numbers):
+        raise HTTPException(status_code=404, detail="Phone number not found")
     numbers = [
         ProviderPhoneNumber(
             item.number, body.inbound_enabled, body.outbound_enabled, item.agent_id,
@@ -748,8 +750,6 @@ async def _update_platform_phone_number(
         if item.number == phone_number else item
         for item in integration.phone_numbers
     ]
-    if len(numbers) == len(integration.phone_numbers):
-        raise HTTPException(status_code=404, detail="Phone number not found")
     integration_settings = dict(integration.settings)
     outbound_numbers = {item.number for item in numbers if item.outbound_enabled}
     if integration_settings.get("default_caller_id") not in outbound_numbers:
