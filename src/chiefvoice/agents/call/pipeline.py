@@ -39,15 +39,22 @@ class BotSpeechDrainObserver(FrameProcessor):
     telephony provider is asked to disconnect the call.
     """
 
-    def __init__(self, drain_event: asyncio.Event) -> None:
+    def __init__(self, drain_event: asyncio.Event, checkpoint_callback=None) -> None:
         super().__init__()
         self._drain_event = drain_event
+        self._checkpoint_callback = checkpoint_callback
 
     async def process_frame(self, frame, direction) -> None:
         await super().process_frame(frame, direction)
         if isinstance(frame, BotStartedSpeakingFrame):
             self._drain_event.clear()
         elif isinstance(frame, BotStoppedSpeakingFrame):
+            if self._checkpoint_callback is not None:
+                try:
+                    await self._checkpoint_callback()
+                except Exception:
+                    # Checkpoint trouble must not wedge the voice pipeline.
+                    pass
             self._drain_event.set()
         await self.push_frame(frame, direction)
 
@@ -132,6 +139,8 @@ def build_pipeline(
     processors.extend(conversation_processors)
     if session is not None and model_service is not None and audio_diagnostics is not None:
         processors.append(GeminiConversationWatchdog(session, model_service, audio_diagnostics))
+        if callable(getattr(model_service, "prompt_caller_inactivity", None)):
+            session.metadata["prompt_caller_inactivity"] = model_service.prompt_caller_inactivity
     if assistant_transcript_processor is not None:
         processors.append(assistant_transcript_processor)
     if audio_diagnostics is not None:
@@ -140,7 +149,12 @@ def build_pipeline(
         )
     processors.append(transport.output())
     if bot_speech_drain_event is not None:
-        processors.append(BotSpeechDrainObserver(bot_speech_drain_event))
+        processors.append(
+            BotSpeechDrainObserver(
+                bot_speech_drain_event,
+                session.metadata.get("send_vobiz_playback_checkpoint") if session else None,
+            )
+        )
     if recording_processor is not None:
         processors.append(recording_processor)
     processors.append(assistant_aggregator)

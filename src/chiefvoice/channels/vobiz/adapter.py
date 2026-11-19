@@ -25,6 +25,7 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
+
 from chiefvoice.agents.call.audio_diagnostics import (
     CallAudioDiagnostics,
     ObservedVobizSerializer,
@@ -33,6 +34,7 @@ from chiefvoice.agents.call.audio_diagnostics import (
 from chiefvoice.calls.store import SqlCallSessionStore
 from chiefvoice.channels.base import AmbiguousCallStart, InboundCall, OutboundCall
 from chiefvoice.channels.integrations import ProviderIntegrationStore
+from chiefvoice.channels.vobiz.playback import VobizPlaybackTracker
 from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
 from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession, Direction
@@ -198,9 +200,7 @@ class VobizAdapter:
                     "reason": "live_ai_or_media_pipeline_failed",
                 },
             )
-            raise AmbiguousCallStart(
-                "Vobiz call request outcome could not be confirmed"
-            ) from exc
+            raise AmbiguousCallStart("Vobiz call request outcome could not be confirmed") from exc
 
         if not isinstance(result, dict):
             raise AmbiguousCallStart("Vobiz returned an unrecognized call response")
@@ -356,6 +356,15 @@ class VobizAdapter:
         provider_call_id = _string_value(form.get("CallUUID") or form.get("RequestUUID"))
         if provider_call_id:
             session.provider_call_id = provider_call_id[:256]
+        callback_diagnostics = {
+            key: _string_value(form.get(key))[:128]
+            for key in ("HangupCauseCode", "HangupSource", "CallStatus")
+            if _string_value(form.get(key))
+        }
+        logger.info(
+            "vobiz_hangup_callback_received",
+            extra={"session_id": session.session_id, **callback_diagnostics},
+        )
         return session
 
     async def close_active_media_session(self, session_id: str) -> bool:
@@ -437,9 +446,7 @@ class VobizAdapter:
         )
         return True
 
-    async def _await_media_finalizer(
-        self, active: _ActiveMediaSession, session_id: str
-    ) -> None:
+    async def _await_media_finalizer(self, active: _ActiveMediaSession, session_id: str) -> None:
         media_task = active.media_task
         if media_task is None or media_task is asyncio.current_task() or media_task.done():
             return
@@ -501,13 +508,20 @@ class VobizAdapter:
             extra={"session_id": session.session_id, "provider": self.provider},
         )
         diagnostics = diagnostics_for_session(session)
+        playback_tracker = VobizPlaybackTracker(session.session_id, diagnostics)
+        session.metadata["vobiz_playback_tracker"] = playback_tracker
+
+        async def send_playback_checkpoint() -> None:
+            await playback_tracker.send_checkpoint(connection, parsed["stream_id"])
+
+        session.metadata["send_vobiz_playback_checkpoint"] = send_playback_checkpoint
         return FastAPIWebsocketTransport(
             websocket=connection,
             params=FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
                 add_wav_header=False,
-                serializer=ObservedVobizSerializer(serializer, diagnostics),
+                serializer=ObservedVobizSerializer(serializer, diagnostics, playback_tracker),
             ),
         )
 
@@ -563,6 +577,7 @@ class VobizAdapter:
             # monitor waits for the downstream transport drain signal and then
             # hangs up, so the pipeline can continue delivering audio frames.
             agent_hangup_request.set()
+
         session.metadata["hang_up_call"] = hang_up_from_agent
 
         async def hang_up_after_audio_drain() -> None:
@@ -590,7 +605,9 @@ class VobizAdapter:
                         raise TimeoutError
                     # If Gemini is actively generating or bot audio is still playing,
                     # allow the closing audio turn to finish delivery.
-                    if session.metadata.get("gemini_is_generating") or session.metadata.get("bot_audio_playing"):
+                    if session.metadata.get("gemini_is_generating") or session.metadata.get(
+                        "bot_audio_playing"
+                    ):
                         quiet_since = None
                         await asyncio.sleep(min(0.1, max(0.01, remaining)))
                         continue
@@ -626,6 +643,47 @@ class VobizAdapter:
                 diagnostics = session.metadata.get("call_audio_diagnostics")
                 if isinstance(diagnostics, CallAudioDiagnostics):
                     diagnostics.record_conversation_event("closing_audio_drain_completed")
+            playback_tracker = session.metadata.get("vobiz_playback_tracker")
+            if isinstance(playback_tracker, VobizPlaybackTracker):
+                playback_result = await playback_tracker.wait_for_latest_ack(
+                    settings.vobiz_playback_ack_timeout_seconds,
+                    agent_hangup_cancel,
+                )
+                if playback_result == "caller_activity":
+                    session.metadata.pop("agent_hangup_pending", None)
+                    session.metadata.pop("auto_hangup_completion_phrase_detected", None)
+                    agent_hangup_request.clear()
+                    logger.info(
+                        "vobiz_agent_hangup_cancelled_by_caller",
+                        extra={"session_id": session.session_id, "provider": self.provider},
+                    )
+                    return
+                if playback_result in {"no_checkpoint", "timeout", "interrupted", "send_failed"}:
+                    # Keep the call live so the caller can hear a retry instead
+                    # of disconnecting after audio that was never confirmed.
+                    session.metadata.pop("agent_hangup_pending", None)
+                    session.metadata.pop("auto_hangup_completion_phrase_detected", None)
+                    agent_hangup_request.clear()
+                    prompt = session.metadata.get("prompt_caller_inactivity")
+                    if callable(prompt):
+                        try:
+                            await prompt(
+                                "Briefly repeat your last sentence, then ask the caller whether they heard you."
+                            )
+                        except Exception:
+                            logger.warning(
+                                "vobiz_playback_recovery_prompt_failed",
+                                extra={"session_id": session.session_id},
+                                exc_info=True,
+                            )
+                    logger.warning(
+                        "vobiz_agent_hangup_held_for_unconfirmed_playback",
+                        extra={
+                            "session_id": session.session_id,
+                            "playback_result": playback_result,
+                        },
+                    )
+                    return
             # Keep the media path and Gemini active briefly after the goodbye.
             # The caller may have one final correction or response; VAD signals
             # this event and the pending hangup is cancelled without ending the
@@ -639,8 +697,7 @@ class VobizAdapter:
                 },
             )
             listen_deadline = (
-                asyncio.get_running_loop().time()
-                + AGENT_HANGUP_CALLER_RESPONSE_WINDOW_SECONDS
+                asyncio.get_running_loop().time() + AGENT_HANGUP_CALLER_RESPONSE_WINDOW_SECONDS
             )
             while asyncio.get_running_loop().time() < listen_deadline:
                 if agent_hangup_cancel.is_set():
@@ -827,7 +884,11 @@ class VobizAdapter:
         if session.metadata.get("provider_call_terminated"):
             logger.info(
                 "vobiz_call_hangup_already_completed",
-                extra={"session_id": session.session_id, "provider": self.provider, "reason": reason},
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "reason": reason,
+                },
             )
             return
         session.metadata["provider_call_terminated"] = True
@@ -930,19 +991,21 @@ class VobizAdapter:
                 "post_call_time_format": session.post_call_time_format,
                 "include_live_agent_context": session.include_live_agent_context,
             }
-            has_call_context = any(
-                value is not None
-                for name, value in call_context.items()
-                if name not in {"include_live_agent_context", "auto_hangup_when_complete"}
-            ) or session.include_live_agent_context or session.auto_hangup_when_complete
+            has_call_context = (
+                any(
+                    value is not None
+                    for name, value in call_context.items()
+                    if name not in {"include_live_agent_context", "auto_hangup_when_complete"}
+                )
+                or session.include_live_agent_context
+                or session.auto_hangup_when_complete
+            )
             if self.call_session_store is not None:
                 if not session.tenant_id:
                     raise ValueError("tenant_id is required for durable callback state")
                 claims = {
                     "state_version": 2,
-                    "session_id": _required_state_string(
-                        session.session_id, "session_id", 128
-                    ),
+                    "session_id": _required_state_string(session.session_id, "session_id", 128),
                     "tenant_id": _required_state_string(session.tenant_id, "tenant_id", 200),
                 }
             elif has_call_context:
@@ -1079,8 +1142,7 @@ class VobizAdapter:
                     if post_call_tools is not None and (
                         not isinstance(post_call_tools, list)
                         or any(
-                            not isinstance(tool, str)
-                            or tool not in {"calculator", "time"}
+                            not isinstance(tool, str) or tool not in {"calculator", "time"}
                             for tool in post_call_tools
                         )
                         or len(set(post_call_tools)) != len(post_call_tools)
@@ -1155,9 +1217,7 @@ class VobizAdapter:
             max_call_seconds=claims.get("max_call_seconds"),
             live_agent_context=claims.get("call_context", {}).get("live_agent_context"),
             post_call_context=claims.get("call_context", {}).get("post_call_context"),
-            post_call_output_schema=claims.get("call_context", {}).get(
-                "post_call_output_schema"
-            ),
+            post_call_output_schema=claims.get("call_context", {}).get("post_call_output_schema"),
             post_call_tools=claims.get("call_context", {}).get("post_call_tools"),
             post_call_time_zone=claims.get("call_context", {}).get("post_call_time_zone"),
             post_call_time_format=claims.get("call_context", {}).get("post_call_time_format"),

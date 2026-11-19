@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
-from pipecat.frames.frames import InputAudioRawFrame, OutputAudioRawFrame
+from pipecat.frames.frames import InputAudioRawFrame, InterruptionFrame, OutputAudioRawFrame
 from pipecat.processors.frame_processor import (
     FrameDirection,
     FrameProcessor,
@@ -64,6 +65,11 @@ class CallAudioDiagnostics:
             "hangup_premature_rejected": 0,
             "hangup_idempotent_duplicate": 0,
             "closing_audio_drain_completed": 0,
+            "vobiz_playback_checkpoint_sent": 0,
+            "vobiz_playback_checkpoint_send_failed": 0,
+            "vobiz_playback_ack_received": 0,
+            "vobiz_playback_ack_timeout": 0,
+            "vobiz_playback_interrupted": 0,
         }
 
     def record_gemini_audio(self, outcome: str, *, frames: int = 1) -> None:
@@ -236,15 +242,25 @@ class CallerAudioGain(FrameProcessor):
 class ObservedVobizSerializer(FrameSerializer):
     """Wrap the Vobiz serializer and count decoded/encoded audio frames."""
 
-    def __init__(self, serializer: Any, diagnostics: CallAudioDiagnostics):
+    def __init__(self, serializer: Any, diagnostics: CallAudioDiagnostics, playback_tracker=None):
         super().__init__()
         self._serializer = serializer
         self._diagnostics = diagnostics
+        self._playback_tracker = playback_tracker
 
     async def setup(self, setup: FrameProcessorSetup) -> None:
         await self._serializer.setup(setup)
 
     async def deserialize(self, data: str | bytes):
+        # Pipecat's Vobiz serializer currently only decodes media frames. Keep
+        # provider playback receipts visible before delegating to it.
+        if self._playback_tracker is not None:
+            try:
+                payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
+                if isinstance(payload, dict) and payload.get("event") == "playedStream":
+                    self._playback_tracker.acknowledge(payload.get("name"))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                pass
         frame = await self._serializer.deserialize(data)
         if isinstance(frame, InputAudioRawFrame):
             wire_bytes = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
@@ -252,6 +268,8 @@ class ObservedVobizSerializer(FrameSerializer):
         return frame
 
     async def serialize(self, frame):
+        if self._playback_tracker is not None and isinstance(frame, InterruptionFrame):
+            self._playback_tracker.mark_interrupted()
         payload = await self._serializer.serialize(frame)
         if isinstance(frame, OutputAudioRawFrame):
             if payload is None:
@@ -263,9 +281,7 @@ class ObservedVobizSerializer(FrameSerializer):
                 payload_bytes = (
                     len(payload.encode("utf-8")) if isinstance(payload, str) else len(payload)
                 )
-                self._diagnostics.record_frame(
-                    "vobiz_outbound_serialized", frame, payload_bytes
-                )
+                self._diagnostics.record_frame("vobiz_outbound_serialized", frame, payload_bytes)
         return payload
 
 
