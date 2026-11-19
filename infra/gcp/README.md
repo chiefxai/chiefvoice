@@ -47,6 +47,18 @@ Terraform reserves a regional static IP; point DNS to the `backend_external_ip` 
 
 Cloud Build builds the API and React console images, deploys the post-call function, applies migrations, and exposes the API and console together on the same HTTPS domain. It also runs unit tests, lint, compilation and public `/healthz`, `/readyz` and `/metrics` probes. Register the trigger after Terraform has created the VM, Artifact Registry repository, connector, queue and service accounts. Later builds repeat migrations under an instance-local deployment lock and only expose the API after migration succeeds.
 
+For a manual VM-only deployment (for example, a change confined to the API or console), SSH to the VM and run the repository script. The VM startup installs Docker but may not install Git, so install it if needed. Keep the checkout beside `/opt/chiefvoice/compose.yaml`; the script uses that compose directory for the running services:
+
+```sh
+gcloud compute ssh chiefvoice-backend --project=chief-502717 --zone=us-central1-a --tunnel-through-iap
+sudo apt-get update && sudo apt-get install -y git # only if git is missing
+sudo git clone https://github.com/chiefxai/chiefvoice.git /opt/chiefvoice/source # first deployment only
+cd /opt/chiefvoice/source
+sudo bash deploy.sh main
+```
+
+For later deployments, run `cd /opt/chiefvoice/source && sudo bash deploy.sh main`. The script fast-forwards to `origin/main`, builds the API and console images on the VM, applies migrations, restarts the services, and checks the public health endpoint. It shares the VM deployment lock with Cloud Build, so concurrent deployments wait for each other. This VM-only path does not deploy changes under `deploy/gcp/post-call-function/`; use Cloud Build for those changes or for the full production validation sequence. Frontend OIDC build values can be overridden with `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_AUDIENCE`, and `VITE_OIDC_SCOPE`; `HEALTHCHECK_URL` changes the final health probe.
+
 For Auth0, configure an API audience (for example `https://chiefvoice.elvoryx.in/api`) and a single-page application whose allowed callback and web origin are `https://chiefvoice.elvoryx.in`. Create an Auth0 Action that adds the configured namespaced tenant claim (default `https://chiefvoice.elvoryx.in/tenant_id`) to access tokens. Request the `platform:customers:read` and `platform:customers:write` API permissions. Set the OIDC issuer, audience, JWKS URL, and your Auth0 user `sub` in `terraform.tfvars`; set the frontend authority, client ID, audience, and scope substitutions in `cloudbuild.yaml` before running Cloud Build.
 
 ## Backup and restore
