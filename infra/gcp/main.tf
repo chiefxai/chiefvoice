@@ -164,6 +164,11 @@ resource "google_project_iam_member" "github_deploy_cloud_build" {
   role    = "roles/cloudbuild.builds.editor"
   member  = "serviceAccount:${google_service_account.github_deploy.email}"
 }
+resource "google_project_iam_member" "github_deploy_service_usage" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageConsumer"
+  member  = "serviceAccount:${google_service_account.github_deploy.email}"
+}
 resource "google_service_account_iam_member" "github_deploy_build_act_as" {
   service_account_id = google_service_account.cloud_build.name
   role               = "roles/iam.serviceAccountUser"
