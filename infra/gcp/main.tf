@@ -169,6 +169,11 @@ resource "google_project_iam_member" "github_deploy_service_usage" {
   role    = "roles/serviceusage.serviceUsageConsumer"
   member  = "serviceAccount:${google_service_account.github_deploy.email}"
 }
+resource "google_project_iam_member" "github_deploy_cloudbuild_bucket_lister" {
+  project = var.project_id
+  role    = "roles/storage.bucketViewer"
+  member  = "serviceAccount:${google_service_account.github_deploy.email}"
+}
 data "google_storage_bucket" "cloudbuild_source" {
   name = "${var.project_id}_cloudbuild"
 }
