@@ -284,7 +284,9 @@ class SqlPostCallQueue:
         *,
         poll_interval: float = 1.0,
         lease_duration: timedelta = timedelta(minutes=5),
-        max_attempts: int = 5,
+        # One initial processing attempt plus three automatic retries.
+        max_attempts: int = 4,
+        max_delivery_attempts: int = 5,
         recording_store: object | None = None,
     ):
         self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
@@ -293,6 +295,7 @@ class SqlPostCallQueue:
         self.poll_interval = poll_interval
         self.lease_duration = lease_duration
         self.max_attempts = max_attempts
+        self.max_delivery_attempts = max_delivery_attempts
         self.recording_store = recording_store
         self._last_metrics_refresh = 0.0
 
@@ -370,7 +373,26 @@ class SqlPostCallQueue:
                 created_at=created_at,
                 updated_at=created_at,
             )
-            .on_conflict_do_nothing(index_elements=[PostCallJobRow.session_id])
+            .on_conflict_do_update(
+                index_elements=[PostCallJobRow.session_id],
+                set_={
+                    "tenant_id": call.tenant_id,
+                    "provider": call.provider,
+                    "channel": call.channel,
+                    "direction": call.direction,
+                    "started_at": _parse_datetime(call.started_at),
+                    "ended_at": _parse_datetime(call.ended_at) or created_at,
+                    "encrypted_payload": encrypted_payload,
+                    "status": "queued",
+                    "attempts": 0,
+                    "next_attempt_at": created_at,
+                    "lease_expires_at": None,
+                    "last_error_type": None,
+                    "encrypted_result": None,
+                    "updated_at": created_at,
+                },
+                where=or_(PostCallJobRow.status.is_(None), PostCallJobRow.status == ""),
+            )
         )
         async with self._sessions.begin() as session:
             result = await session.execute(stmt)
@@ -946,7 +968,7 @@ class SqlPostCallQueue:
                 )
                 if row is None:
                     return False
-                if row.attempts >= self.max_attempts:
+                if row.attempts >= self.max_delivery_attempts:
                     row.status = "failed"
                     row.target_url = ""
                     row.encrypted_secret = ""
@@ -1085,7 +1107,7 @@ class SqlPostCallQueue:
             retry_at = datetime.now(UTC) + timedelta(
                 seconds=min(2 ** delivery["attempts"], 3600)
             )
-            new_status = "queued" if delivery["attempts"] < self.max_attempts else "failed"
+            new_status = "queued" if delivery["attempts"] < self.max_delivery_attempts else "failed"
             async with self._sessions.begin() as session:
                 await session.execute(
                     update(PostCallWebhookDeliveryRow)

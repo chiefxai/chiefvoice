@@ -8,13 +8,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from cryptography.fernet import Fernet
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, func, select, update
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from chiefvoice.accounts.store import Base
 from chiefvoice.agents.post_call.base import CompletedCall
+from chiefvoice.agents.post_call.queue import PostCallJobRow
 from chiefvoice.core.db_schema import verify_schema_revision
 from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.sessions import AcceptedSession, Direction
@@ -373,9 +374,18 @@ class SqlCallSessionStore:
         async with self._sessions() as db:
             rows = await db.scalars(
                 select(CallSessionRow)
+                .outerjoin(
+                    PostCallJobRow,
+                    PostCallJobRow.session_id == CallSessionRow.session_id,
+                )
                 .where(
                     CallSessionRow.status == "completed",
-                    CallSessionRow.post_call_enqueued_at.is_(None),
+                    or_(
+                        CallSessionRow.post_call_enqueued_at.is_(None),
+                        PostCallJobRow.session_id.is_(None),
+                        PostCallJobRow.status.is_(None),
+                        PostCallJobRow.status == "",
+                    ),
                     CallSessionRow.encrypted_transcript.is_not(None),
                     CallSessionRow.transcript_persistence_failed.is_(False),
                     CallSessionRow.encrypted_session.is_not(None),
@@ -386,10 +396,15 @@ class SqlCallSessionStore:
             calls = []
             for row in rows:
                 session = self._decrypt_session(row.encrypted_session or "")
+                if not session.tenant_id:
+                    continue
+                if not session.post_call_agent_enabled:
+                    await self.mark_post_call_enqueued(session.tenant_id, session.session_id)
+                    continue
                 transcript = self._fernet.decrypt(row.encrypted_transcript.encode("ascii")).decode(
                     "utf-8"
                 )
-                if not session.tenant_id or not transcript.strip():
+                if not transcript.strip():
                     continue
                 calls.append(
                     CompletedCall(

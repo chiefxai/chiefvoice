@@ -35,7 +35,10 @@ from chiefvoice.agents.post_call.gcp_function_dispatch import GoogleCloudFunctio
 from chiefvoice.agents.post_call.sqs_dispatch import SqsPostCallInvoker
 from chiefvoice.agents.post_call.cloud_tasks_dispatch import CloudTasksPostCallInvoker
 from chiefvoice.agents.post_call.fallback_spool import S3PostCallFallbackSpool
-from chiefvoice.agents.post_call.recovery import run_spool_reconciler
+from chiefvoice.agents.post_call.recovery import (
+    run_call_session_reconciler,
+    run_spool_reconciler,
+)
 from chiefvoice.agents.post_call.replay import SqlPostCallReplayService
 from chiefvoice.agents.post_call.queue import PostCallDispatcher, SqlPostCallQueue
 from chiefvoice.agents.post_call.queue import SqlPostCallWebhookDirectory
@@ -154,6 +157,9 @@ async def lifespan(_app: FastAPI):
                         )
                     if len(pending_calls) < 100:
                         break
+                worker_tasks.append(asyncio.create_task(
+                    run_call_session_reconciler(call_session_store, post_call_dispatcher)
+                ))
         if post_call_replay_service is not None:
             await post_call_replay_service.initialize()
         for check_storage in storage_checks:
