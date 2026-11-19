@@ -10,3 +10,7 @@ output "object_storage_signing_region" { value = "auto" }
 output "vm_backend_service_account" { value = google_service_account.backend.email }
 output "post_call_function_service_account" { value = google_service_account.post_call_function.email }
 output "cloud_build_service_account" { value = google_service_account.cloud_build.email }
+output "github_deploy_service_account" { value = google_service_account.github_deploy.email }
+output "github_workload_identity_provider" {
+  value = "projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${google_iam_workload_identity_pool.github.workload_identity_pool_id}/providers/${google_iam_workload_identity_pool_provider.github.workload_identity_pool_provider_id}"
+}

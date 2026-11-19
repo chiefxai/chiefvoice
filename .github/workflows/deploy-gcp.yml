@@ -1,0 +1,73 @@
+name: Deploy to GCP
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "**.txt"
+      - "**.text"
+  workflow_dispatch:
+
+concurrency:
+  group: chiefvoice-gcp-production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy production GCP stack
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      GCP_CLOUD_BUILD_SERVICE_ACCOUNT: ${{ vars.GCP_CLOUD_BUILD_SERVICE_ACCOUNT }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+    steps:
+      - name: Check out production revision
+        uses: actions/checkout@v7
+
+      - name: Validate deployment settings
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for name in GCP_PROJECT_ID GCP_REGION GCP_DEPLOY_SERVICE_ACCOUNT GCP_CLOUD_BUILD_SERVICE_ACCOUNT GCP_WORKLOAD_IDENTITY_PROVIDER; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing GitHub repository variable: ${name}" >&2
+              exit 1
+            fi
+          done
+          [[ "$GCP_REGION" =~ ^[a-z]+-[a-z0-9]+[0-9]$ ]] || { echo "GCP_REGION must be a valid region, such as us-central1" >&2; exit 1; }
+          [[ "$GCP_DEPLOY_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || { echo "GCP_DEPLOY_SERVICE_ACCOUNT must be a service account email" >&2; exit 1; }
+          [[ "$GCP_CLOUD_BUILD_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || { echo "GCP_CLOUD_BUILD_SERVICE_ACCOUNT must be a service account email" >&2; exit 1; }
+
+      - name: Authenticate to Google Cloud with Workload Identity Federation
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Submit production deployment to Cloud Build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          build_service_account="projects/${GCP_PROJECT_ID}/serviceAccounts/${GCP_CLOUD_BUILD_SERVICE_ACCOUNT}"
+          gcloud builds submit \
+            --project="$GCP_PROJECT_ID" \
+            --region="$GCP_REGION" \
+            --config=cloudbuild.yaml \
+            --service-account="$build_service_account" \
+            --quiet \
+            .

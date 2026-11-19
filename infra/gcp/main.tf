@@ -4,7 +4,7 @@ locals {
     "aiplatform.googleapis.com", "artifactregistry.googleapis.com", "cloudbuild.googleapis.com",
     "cloudresourcemanager.googleapis.com", "cloudtasks.googleapis.com", "compute.googleapis.com",
     "cloudfunctions.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com",
-    "run.googleapis.com", "secretmanager.googleapis.com", "serviceusage.googleapis.com",
+    "run.googleapis.com", "secretmanager.googleapis.com", "serviceusage.googleapis.com", "sts.googleapis.com",
     "storage.googleapis.com", "vpcaccess.googleapis.com",
   ])
 }
@@ -124,6 +124,60 @@ resource "google_service_account" "task_invoker" {
 resource "google_service_account" "cloud_build" {
   account_id   = "chiefvoice-build"
   display_name = "Chiefvoice Cloud Build deployer"
+}
+resource "google_service_account" "github_deploy" {
+  account_id   = "chiefvoice-github-deploy"
+  display_name = "Chiefvoice GitHub Actions Cloud Build submitter"
+}
+data "google_project" "current" {
+  project_id = var.project_id
+}
+resource "google_iam_workload_identity_pool" "github" {
+  workload_identity_pool_id = "github-actions"
+  display_name              = "GitHub Actions"
+  description               = "Federation for the Chiefvoice production deployment workflow"
+  disabled                  = false
+  depends_on                = [google_project_service.apis]
+}
+resource "google_iam_workload_identity_pool_provider" "github" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
+  workload_identity_pool_provider_id = "chiefvoice-production"
+  display_name                       = "Chiefvoice production repository"
+  description                        = "Only the main branch of the Chiefvoice GitHub repository may federate"
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.repository" = "assertion.repository"
+    "attribute.ref"        = "assertion.ref"
+  }
+  attribute_condition = "assertion.repository == '${var.github_repository}' && assertion.ref == 'refs/heads/main'"
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+resource "google_service_account_iam_member" "github_deploy_wif" {
+  service_account_id = google_service_account.github_deploy.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
+}
+resource "google_project_iam_member" "github_deploy_cloud_build" {
+  project = var.project_id
+  role    = "roles/cloudbuild.builds.editor"
+  member  = "serviceAccount:${google_service_account.github_deploy.email}"
+}
+resource "google_service_account_iam_member" "github_deploy_build_act_as" {
+  service_account_id = google_service_account.cloud_build.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.github_deploy.email}"
+}
+resource "google_service_account_iam_member" "cloud_build_agent_token_creator" {
+  service_account_id = google_service_account.cloud_build.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com"
+}
+resource "google_project_iam_member" "cloud_build_log_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.cloud_build.email}"
 }
 resource "google_service_account" "function_build" {
   account_id   = "chiefvoice-function-build"

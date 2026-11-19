@@ -1,4 +1,9 @@
 variable "project_id" { type = string }
+variable "github_repository" {
+  type        = string
+  default     = "chiefxai/chiefvoice"
+  description = "GitHub owner/repository allowed to deploy from its main branch using Workload Identity Federation."
+}
 variable "region" {
   type    = string
   default = "us-central1"
