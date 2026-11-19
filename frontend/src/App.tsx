@@ -186,23 +186,22 @@ const api = {
     }
     const params = { customer_id: number.customer_id }
     try {
+      // Keep the established route first so this frontend works with API
+      // containers that have not yet received the body-based route.
       return await http.put(
-        `/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}`,
+        `/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`,
         body,
         { params },
       )
     } catch (error) {
-      // Older API containers only expose the phone-number-in-path route.
-      // Fall back only for a route-level 404, not a missing stored number/config.
-      if (
-        !axios.isAxiosError(error) ||
-        error.response?.status !== 404 ||
-        error.response?.data?.detail !== 'Not Found'
-      ) {
+      // Fall back to the body-based route if the old path route cannot decode
+      // the international number. If the record is actually missing, the API's
+      // response detail is returned by the existing mutation error handler.
+      if (!axios.isAxiosError(error) || error.response?.status !== 404) {
         throw error
       }
       return http.put(
-        `/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}/${encodeURIComponent(number.phone_number)}`,
+        `/v1/admin/customers/phone-numbers/${encodeURIComponent(number.provider)}`,
         body,
         { params },
       )
