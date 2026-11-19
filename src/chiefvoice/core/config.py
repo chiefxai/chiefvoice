@@ -63,6 +63,7 @@ class Settings:
     vertex_system_instruction: str = os.getenv(
         "VERTEX_SYSTEM_INSTRUCTION", "You are a helpful, concise voice assistant."
     )
+    caller_audio_gain_db: float = float(os.getenv("CALLER_AUDIO_GAIN_DB", "6"))
     gemini_response_watchdog_seconds: float = float(
         os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "8")
     )

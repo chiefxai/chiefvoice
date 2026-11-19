@@ -200,6 +200,39 @@ class GeminiInputResampler(FrameProcessor):
             )
 
 
+class CallerAudioGain(FrameProcessor):
+    """Apply configurable gain to inbound signed 16-bit PCM with peak limiting."""
+
+    def __init__(self, gain_db: float = 6.0):
+        super().__init__()
+        if not 0.0 <= gain_db <= 24.0:
+            raise ValueError("Caller audio gain must be between 0 and 24 dB")
+        self._linear_gain = 10 ** (gain_db / 20)
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if not isinstance(frame, InputAudioRawFrame) or self._linear_gain == 1.0:
+            await self.push_frame(frame, direction)
+            return
+        if len(frame.audio) % 2:
+            logger.warning(
+                "caller_audio_gain_skipped_invalid_pcm",
+                extra={"audio_bytes": len(frame.audio)},
+            )
+            await self.push_frame(frame, direction)
+            return
+
+        # Vobiz's decoded audio is signed 16-bit little-endian PCM. Saturating
+        # each sample prevents boosted speech peaks from wrapping and distorting.
+        amplified = bytearray(len(frame.audio))
+        for offset in range(0, len(frame.audio), 2):
+            sample = int.from_bytes(frame.audio[offset : offset + 2], "little", signed=True)
+            sample = max(-32768, min(32767, round(sample * self._linear_gain)))
+            amplified[offset : offset + 2] = sample.to_bytes(2, "little", signed=True)
+        frame.audio = bytes(amplified)
+        await self.push_frame(frame, direction)
+
+
 class ObservedVobizSerializer(FrameSerializer):
     """Wrap the Vobiz serializer and count decoded/encoded audio frames."""
 

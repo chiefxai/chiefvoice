@@ -21,10 +21,12 @@ from pipecat.transports.base_transport import BaseTransport
 from chiefvoice.agents.call.audio_diagnostics import (
     AudioFrameCounter,
     CallAudioDiagnostics,
+    CallerAudioGain,
     GeminiInputResampler,
 )
 from chiefvoice.agents.call.conversation_reliability import GeminiConversationWatchdog
 from chiefvoice.agents.post_call.transcript import TranscriptCollector
+from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession
 
 
@@ -104,7 +106,12 @@ def build_pipeline(
 
     # Vobiz supplies narrowband 8 kHz PCM, while Gemini Live requires 16 kHz
     # PCM input. Resample before both diagnostics and the realtime model.
-    processors: list[FrameProcessor] = [transport.input(), GeminiInputResampler(), user_aggregator]
+    processors: list[FrameProcessor] = [
+        transport.input(),
+        CallerAudioGain(settings.caller_audio_gain_db),
+        GeminiInputResampler(),
+        user_aggregator,
+    ]
     # Gemini emits caller transcription frames upstream. Put the collector
     # after the LLM and before the user aggregator: the aggregator consumes
     # TranscriptionFrame, so a tap before it never sees the text.
