@@ -240,6 +240,7 @@ class AddPlatformNumbersBody(BaseModel):
 
 
 class UpdatePlatformNumberBody(BaseModel):
+    phone_number: str | None = Field(default=None, min_length=5, max_length=64)
     inbound_enabled: bool
     outbound_enabled: bool
     standard_channels: int = Field(ge=0, le=1_000)
@@ -724,8 +725,7 @@ async def add_platform_phone_numbers(
             "tags": body.tags}
 
 
-@router.put("/phone-numbers/{provider}/{phone_number:path}")
-async def update_platform_phone_number(
+async def _update_platform_phone_number(
     provider: str,
     phone_number: str,
     body: UpdatePlatformNumberBody,
@@ -758,6 +758,35 @@ async def update_platform_phone_number(
     await store.save(ProviderIntegration(provider, customer_id, integration.credentials, integration_settings, tuple(numbers)))
     await _sync_api_channel_capacity(request, (provider, phone_number))
     return {"status": "updated", "phone_number": phone_number, "tags": body.tags}
+
+
+@router.put("/phone-numbers/{provider}/{phone_number:path}")
+async def update_platform_phone_number(
+    provider: str,
+    phone_number: str,
+    body: UpdatePlatformNumberBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+    customer_id: str = Query(min_length=1, max_length=200),
+):
+    return await _update_platform_phone_number(
+        provider, phone_number, body, request, principal, customer_id
+    )
+
+
+@router.put("/phone-numbers/{provider}")
+async def update_platform_phone_number_by_body(
+    provider: str,
+    body: UpdatePlatformNumberBody,
+    request: Request,
+    principal: Annotated[Principal, Depends(_platform_admin("platform:customers:write"))],
+    customer_id: str = Query(min_length=1, max_length=200),
+):
+    if not body.phone_number:
+        raise HTTPException(status_code=422, detail="Phone number is required")
+    return await _update_platform_phone_number(
+        provider, body.phone_number, body, request, principal, customer_id
+    )
 
 
 @router.delete("/phone-numbers/{provider}/{phone_number:path}", status_code=status.HTTP_204_NO_CONTENT)
