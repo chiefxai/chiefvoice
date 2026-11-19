@@ -7,6 +7,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     InputAudioRawFrame,
+    InterruptionFrame,
     OutputAudioRawFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
@@ -34,22 +35,25 @@ class BotSpeechDrainObserver(FrameProcessor):
     """Track when the transport has finished sending a bot speech turn.
 
     This processor is deliberately placed after ``transport.output()``. The
-    websocket output transport emits BotStoppedSpeakingFrame only after its
-    queued audio has been written, making this a useful drain barrier before a
-    telephony provider is asked to disconnect the call.
+    transport emits BotStoppedSpeakingFrame after a normal drain or when
+    an interruption discards queued audio. Only a normal drain gets a checkpoint.
     """
 
     def __init__(self, drain_event: asyncio.Event, checkpoint_callback=None) -> None:
         super().__init__()
         self._drain_event = drain_event
         self._checkpoint_callback = checkpoint_callback
+        self._interrupted = False
 
     async def process_frame(self, frame, direction) -> None:
         await super().process_frame(frame, direction)
         if isinstance(frame, BotStartedSpeakingFrame):
+            self._interrupted = False
             self._drain_event.clear()
+        elif isinstance(frame, InterruptionFrame):
+            self._interrupted = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            if self._checkpoint_callback is not None:
+            if not self._interrupted and self._checkpoint_callback is not None:
                 try:
                     await self._checkpoint_callback()
                 except Exception:

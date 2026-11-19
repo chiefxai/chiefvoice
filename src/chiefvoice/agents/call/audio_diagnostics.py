@@ -70,6 +70,7 @@ class CallAudioDiagnostics:
             "vobiz_playback_ack_received": 0,
             "vobiz_playback_ack_timeout": 0,
             "vobiz_playback_interrupted": 0,
+            "vobiz_playback_clear_received": 0,
         }
 
     def record_gemini_audio(self, outcome: str, *, frames: int = 1) -> None:
@@ -259,6 +260,8 @@ class ObservedVobizSerializer(FrameSerializer):
                 payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
                 if isinstance(payload, dict) and payload.get("event") == "playedStream":
                     self._playback_tracker.acknowledge(payload.get("name"))
+                elif isinstance(payload, dict) and payload.get("event") == "clearedAudio":
+                    self._diagnostics.record_conversation_event("vobiz_playback_clear_received")
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
                 pass
         frame = await self._serializer.deserialize(data)

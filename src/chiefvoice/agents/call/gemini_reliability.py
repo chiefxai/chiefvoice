@@ -157,6 +157,10 @@ def reliable_vertex_service_class(
             await super().setup(setup)
 
         async def _handle_connection_error(self, error: Exception) -> bool:
+            # The receive loop waits here before reconnecting. Buffer new
+            # caller audio during that wait instead of writing to the closed socket.
+            self._ready_for_realtime_input = False
+            self._chiefvoice_ready_event.clear()
             should_retry = await super()._handle_connection_error(error)
             failures = int(getattr(self, "_consecutive_failures", 1))
             details = {
