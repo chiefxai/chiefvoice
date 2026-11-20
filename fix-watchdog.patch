@@ -1,0 +1,838 @@
+--- a/src/chiefvoice/agents/call/conversation_reliability.py
++++ b/src/chiefvoice/agents/call/conversation_reliability.py
+@@ -1,4 +1,9 @@
+-"""Turn diagnostics and bounded recovery for Gemini Live phone conversations."""
++"""Independent caller inactivity and turn-scoped Gemini response monitoring.
++
++The watchdog is upstream of Gemini to observe local caller turn boundaries. The
++response observer is downstream so model-emitted frames cannot bypass it.
++Neither timer is allowed to end a call.
++"""
+ 
+ from __future__ import annotations
+ 
+@@ -9,6 +14,7 @@
+ from pipecat.frames.frames import (
+     InterruptionFrame,
+     LLMContextFrame,
++    LLMFullResponseEndFrame,
+     LLMFullResponseStartFrame,
+     LLMRunFrame,
+     OutputAudioRawFrame,
+@@ -26,7 +32,7 @@
+ 
+ 
+ class GeminiConversationWatchdog(FrameProcessor):
+-    """Observe local VAD and model output; recover one silent Gemini turn."""
++    """Monitor completed caller turns; issue bounded, non-terminating recovery."""
+ 
+     def __init__(
+         self,
+@@ -36,6 +42,8 @@
+         *,
+         response_timeout_seconds: float | None = None,
+         recovery_grace_seconds: float | None = None,
++        caller_inactivity_seconds: float | None = None,
++        max_recovery_attempts: int = 2,
+     ) -> None:
+         super().__init__()
+         self._session = session
+@@ -43,146 +51,305 @@
+         self._diagnostics = diagnostics
+         self._response_timeout = (
+             settings.gemini_response_watchdog_seconds
+-            if response_timeout_seconds is None
+-            else response_timeout_seconds
++            if response_timeout_seconds is None else response_timeout_seconds
+         )
+         self._recovery_grace = (
+             settings.gemini_recovery_grace_seconds
+-            if recovery_grace_seconds is None
+-            else recovery_grace_seconds
+-        )
++            if recovery_grace_seconds is None else recovery_grace_seconds
++        )
++        self._inactivity_timeout = (
++            settings.gemini_caller_inactivity_seconds
++            if caller_inactivity_seconds is None else caller_inactivity_seconds
++        )
++        self._max_recovery_attempts = max(1, max_recovery_attempts)
+         self._turn = 0
++        self._caller_speaking = False
++        self._caller_turn_had_speech = False
++        self._gemini_generating = False
++        self._response_started = False
+         self._response_audio_seen = False
+-        self._response_started = False
++        self._awaiting_response = False
++        self._initial_request_seen = False
+         self._watch_task: asyncio.Task | None = None
++        self._inactivity_task: asyncio.Task | None = None
++        self._recovery_lock = asyncio.Lock()
+         self._closed = False
+ 
+-    async def process_frame(self, frame, direction: FrameDirection) -> None:
++    async def process_frame(self, frame: Any, direction: FrameDirection) -> None:
+         await super().process_frame(frame, direction)
+ 
+-        if isinstance(frame, UserStartedSpeakingFrame) and direction is FrameDirection.DOWNSTREAM:
+-            self._diagnostics.record_conversation_event("caller_speech_started")
+-            logger.info(
+-                "caller_speech_detected_by_local_vad",
+-                extra={"session_id": self._session.session_id, "provider": self._session.provider},
+-            )
+-        elif isinstance(frame, UserStoppedSpeakingFrame) and direction is FrameDirection.DOWNSTREAM:
+-            self._diagnostics.record_conversation_event("caller_speech_stopped")
+-            logger.info(
+-                "caller_speech_stopped_by_local_vad",
+-                extra={"session_id": self._session.session_id, "provider": self._session.provider},
+-            )
+-        elif isinstance(frame, InterruptionFrame):
++        if direction is FrameDirection.DOWNSTREAM:
++            if isinstance(frame, UserStartedSpeakingFrame):
++                self._on_caller_started()
++            elif isinstance(frame, UserStoppedSpeakingFrame):
++                self._on_caller_stopped()
++            elif isinstance(frame, (LLMContextFrame, LLMRunFrame)):
++                # The initial greeting is a requested model turn, not a caller
++                # turn. Do not re-arm on later context updates or transcripts.
++                if not self._initial_request_seen:
++                    self._initial_request_seen = True
++                    self._arm_watchdog("initial_greeting")
++        elif direction is FrameDirection.UPSTREAM and isinstance(frame, TranscriptionFrame):
++            # Transcription can arrive mid-utterance. It is *never* an end-of-
++            # turn signal, so it must not arm the response watchdog.
++            pass
++
++        if isinstance(frame, InterruptionFrame):
++            # A barge-in can cancel the previous model response without an
++            # LLMFullResponseEndFrame. Clear that generation state so the
++            # next completed caller turn can be monitored independently.
++            self._gemini_generating = False
++            self._response_started = False
++            self._cancel_inactivity("conversation_interrupted")
+             logger.info(
+                 "conversation_interruption_frame",
+-                extra={
+-                    "session_id": self._session.session_id,
+-                    "provider": self._session.provider,
+-                    "direction": direction.name.lower(),
+-                },
+-            )
+-
+-        if (
+-            direction is FrameDirection.DOWNSTREAM
+-            and isinstance(frame, (LLMContextFrame, LLMRunFrame))
+-            and not self._response_audio_seen
+-        ):
+-            # The initial greeting is a model turn too; this timer catches a
+-            # connected call where Gemini never speaks before the caller does.
+-            self._arm_watchdog("initial_or_requested_turn")
+-        elif direction is FrameDirection.UPSTREAM and isinstance(frame, TranscriptionFrame):
+-            if frame.text.strip():
+-                self._arm_watchdog("caller_turn")
+-        elif direction is FrameDirection.DOWNSTREAM and isinstance(
+-            frame, LLMFullResponseStartFrame
+-        ):
+-            self._response_started = True
+-        elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, OutputAudioRawFrame):
+-            self._response_audio_seen = True
+-            self._cancel_watchdog()
++                extra={**self._log_fields(), "direction": direction.name.lower()},
++            )
+         await self.push_frame(frame, direction)
+ 
++    def _log_fields(self) -> dict[str, Any]:
++        return {
++            "session_id": self._session.session_id,
++            "provider": self._session.provider,
++            "turn": self._turn,
++            "caller_speaking": self._caller_speaking,
++            "gemini_generating": self._gemini_generating,
++        }
++
++    def _on_caller_started(self) -> None:
++        if self._closed:
++            return
++        self._caller_speaking = True
++        self._caller_turn_had_speech = True
++        self._awaiting_response = False
++        self._turn += 1  # Invalidate even a task already past its sleep.
++        self._cancel_watchdog("caller_speech_started")
++        self._cancel_inactivity("caller_speech_started")
++        self._diagnostics.record_conversation_event("caller_speech_started")
++        logger.info("caller_speech_detected_by_local_vad", extra=self._log_fields())
++
++    def _on_caller_stopped(self) -> None:
++        if self._closed:
++            return
++        self._caller_speaking = False
++        self._diagnostics.record_conversation_event("caller_speech_stopped")
++        logger.info("caller_turn_completed_by_local_vad", extra=self._log_fields())
++        if self._caller_turn_had_speech:
++            self._caller_turn_had_speech = False
++            self._arm_watchdog("caller_turn_complete")
++
++    def on_gemini_response_started(self) -> None:
++        """Called by the downstream observer when model generation begins."""
++        if self._closed:
++            return
++        self._gemini_generating = True
++        self._response_started = True
++        self._awaiting_response = False
++        self._turn += 1
++        self._cancel_watchdog("gemini_response_started")
++        self._cancel_inactivity("gemini_response_started")
++        logger.info("gemini_response_started", extra=self._log_fields())
++
++    def on_gemini_audio(self) -> None:
++        """Audio can arrive without a response-start frame."""
++        if self._closed:
++            return
++        if not self._response_started:
++            self.on_gemini_response_started()
++        self._response_audio_seen = True
++        self._cancel_watchdog("gemini_audio_received")
++
++    def on_gemini_response_finished(self) -> None:
++        if self._closed:
++            return
++        self._gemini_generating = False
++        self._response_started = False
++        if not self._caller_speaking and not self._awaiting_response:
++            self._arm_inactivity()
++        logger.info("gemini_response_finished", extra=self._log_fields())
++
+     def _arm_watchdog(self, trigger: str) -> None:
+-        if self._closed:
++        if self._closed or self._caller_speaking or self._gemini_generating:
++            logger.debug(
++                "gemini_watchdog_not_armed",
++                extra={**self._log_fields(), "trigger": trigger},
++            )
+             return
+         self._turn += 1
++        self._awaiting_response = True
++        self._response_started = False
++        self._response_audio_seen = False
++        self._cancel_watchdog("rearmed")
++        self._cancel_inactivity("response_expected")
+         turn = self._turn
+-        self._response_audio_seen = False
+-        self._response_started = False
+-        self._cancel_watchdog()
+         self._watch_task = self.create_task(
+             self._watch_turn(turn, trigger), name="gemini_response_watchdog"
+         )
+-
+-    def _cancel_watchdog(self) -> None:
++        logger.info(
++            "gemini_response_watchdog_armed",
++            extra={**self._log_fields(), "trigger": trigger},
++        )
++
++    def _cancel_watchdog(self, reason: str) -> None:
+         task = self._watch_task
+         self._watch_task = None
+         if task is not None and not task.done():
+-            task.cancel()
++            if task is not asyncio.current_task():
++                task.cancel()
++            self._diagnostics.record_conversation_event("response_watchdog_cancelled")
++            logger.info(
++                "gemini_response_watchdog_cancelled",
++                extra={**self._log_fields(), "reason": reason},
++            )
++
++    def _cancel_inactivity(self, reason: str) -> None:
++        task = self._inactivity_task
++        self._inactivity_task = None
++        if task is not None and not task.done():
++            if task is not asyncio.current_task():
++                task.cancel()
++            logger.debug(
++                "caller_inactivity_cancelled",
++                extra={**self._log_fields(), "reason": reason},
++            )
++
++    def _arm_inactivity(self) -> None:
++        if (
++            self._closed or self._inactivity_timeout <= 0 or self._caller_speaking
++            or self._gemini_generating or self._awaiting_response
++        ):
++            return
++        self._cancel_inactivity("rearmed")
++        turn = self._turn
++        self._inactivity_task = self.create_task(
++            self._watch_inactivity(turn), name="gemini_caller_inactivity"
++        )
++
++    async def _watch_inactivity(self, turn: int) -> None:
++        try:
++            await asyncio.sleep(self._inactivity_timeout)
++            if (
++                self._closed or turn != self._turn or self._caller_speaking
++                or self._gemini_generating or self._awaiting_response
++                or getattr(self._service, "_bot_is_responding", False)
++            ):
++                return
++            self._diagnostics.record_conversation_event("caller_inactivity_detected")
++            logger.info(
++                "caller_inactivity_detected",
++                extra={**self._log_fields(), "timeout_seconds": self._inactivity_timeout},
++            )
++            # Inactivity only emits diagnostics. It does not touch Gemini,
++            # recover a response, play fallback audio, or disconnect the call.
++        except asyncio.CancelledError:
++            raise
++
++    def _turn_waiting(self, turn: int) -> bool:
++        return bool(
++            not self._closed
++            and turn == self._turn
++            and self._awaiting_response
++            and not self._caller_speaking
++            and not self._gemini_generating
++            and not self._response_started
++            and not self._response_audio_seen
++            and not getattr(self._service, "_bot_is_responding", False)
++        )
++
++    def _gemini_ready(self) -> bool:
++        return bool(
++            getattr(self._service, "_session", None)
++            and getattr(self._service, "_ready_for_realtime_input", False)
++            and not getattr(self._service, "_disconnecting", False)
++        )
+ 
+     async def _watch_turn(self, turn: int, trigger: str) -> None:
+         try:
+             await asyncio.sleep(self._response_timeout)
+-            if self._closed or turn != self._turn or self._response_audio_seen:
++            if not self._turn_waiting(turn):
+                 return
+-
+-            service_ready = bool(
+-                getattr(self._service, "_session", None)
+-                and getattr(self._service, "_ready_for_realtime_input", False)
+-            )
+-            generation_active = bool(getattr(self._service, "_bot_is_responding", False))
+             self._diagnostics.record_conversation_event("response_watchdog_fired")
+-            logger.error(
++            logger.warning(
+                 "gemini_response_watchdog_fired",
+-                extra={
+-                    "session_id": self._session.session_id,
+-                    "provider": self._session.provider,
+-                    "trigger": trigger,
+-                    "connection_ready": service_ready,
+-                    "generation_active": generation_active,
+-                    "response_started": self._response_started,
+-                    "timeout_seconds": self._response_timeout,
+-                },
+-            )
+-
+-            recovered = await self._service.recover_unanswered_turn()
+-            if recovered:
+-                await asyncio.sleep(self._recovery_grace)
+-            if self._closed or turn != self._turn or self._response_audio_seen:
+-                return
+-
+-            logger.error(
+-                "gemini_response_watchdog_exhausted",
+-                extra={
+-                    "session_id": self._session.session_id,
+-                    "provider": self._session.provider,
+-                    "recovery_succeeded": recovered,
+-                    "connection_ready": bool(
+-                        getattr(self._service, "_session", None)
+-                        and getattr(self._service, "_ready_for_realtime_input", False)
+-                    ),
+-                    "generation_active": bool(
+-                        getattr(self._service, "_bot_is_responding", False)
+-                    ),
+-                },
+-            )
+-            await self._service.play_fallback_and_hangup()
++                extra={**self._log_fields(), "trigger": trigger,
++                       "connection_ready": self._gemini_ready(),
++                       "timeout_seconds": self._response_timeout},
++            )
++            for attempt in range(1, self._max_recovery_attempts + 1):
++                if not self._turn_waiting(turn):
++                    return
++                if not self._gemini_ready():
++                    logger.warning(
++                        "gemini_watchdog_recovery_skipped_not_ready",
++                        extra={**self._log_fields(), "attempt": attempt},
++                    )
++                    self._diagnostics.record_conversation_event("response_watchdog_not_ready")
++                    return
++                # A lock also protects against future additions which may
++                # schedule recovery independently of the response timer.
++                async with self._recovery_lock:
++                    if not self._turn_waiting(turn) or not self._gemini_ready():
++                        return
++                    logger.warning(
++                        "gemini_watchdog_recovery_started",
++                        extra={**self._log_fields(), "attempt": attempt},
++                    )
++                    recovered = await self._service.recover_unanswered_turn()
++                    if not self._turn_waiting(turn):
++                        return
++                    logger.log(
++                        logging.INFO if recovered else logging.WARNING,
++                        "gemini_watchdog_recovery_outcome",
++                        extra={**self._log_fields(), "attempt": attempt,
++                               "recovered": recovered},
++                    )
++                    self._diagnostics.record_conversation_event(
++                        "response_watchdog_recovery_requested" if recovered
++                        else "response_watchdog_recovery_failed"
++                    )
++                if attempt < self._max_recovery_attempts or recovered:
++                    await asyncio.sleep(self._recovery_grace)
++            if self._turn_waiting(turn):
++                self._diagnostics.record_conversation_event("response_watchdog_exhausted")
++                logger.error(
++                    "gemini_response_watchdog_exhausted_without_hangup",
++                    extra={**self._log_fields(), "attempts": self._max_recovery_attempts},
++                )
++                # Never call play_fallback_and_hangup or any telephony callback.
+         except asyncio.CancelledError:
+             raise
+         except Exception as error:
+             logger.exception(
+                 "gemini_response_watchdog_failed",
+-                extra={
+-                    "session_id": self._session.session_id,
+-                    "provider": self._session.provider,
+-                    "error_type": type(error).__name__,
+-                },
++                extra={**self._log_fields(), "error_type": type(error).__name__},
+             )
+ 
+     async def cleanup(self) -> None:
+         self._closed = True
+-        task = self._watch_task
+-        self._watch_task = None
+-        if task is not None and not task.done():
+-            await self.cancel_task(task, timeout=1.0)
++        self._turn += 1
++        tasks = (self._watch_task, self._inactivity_task)
++        self._cancel_watchdog("cleanup")
++        self._cancel_inactivity("cleanup")
++        for task in tasks:
++            if task is not None and not task.done():
++                await self.cancel_task(task, timeout=1.0)
+         await super().cleanup()
++
++
++class GeminiResponseObserver(FrameProcessor):
++    """Observe Gemini output downstream of the model and update its watchdog."""
++
++    def __init__(self, watchdog: GeminiConversationWatchdog) -> None:
++        super().__init__()
++        self._watchdog = watchdog
++
++    async def process_frame(self, frame: Any, direction: FrameDirection) -> None:
++        await super().process_frame(frame, direction)
++        if direction is FrameDirection.DOWNSTREAM:
++            if isinstance(frame, LLMFullResponseStartFrame):
++                self._watchdog.on_gemini_response_started()
++            elif isinstance(frame, OutputAudioRawFrame):
++                self._watchdog.on_gemini_audio()
++            elif isinstance(frame, LLMFullResponseEndFrame):
++                self._watchdog.on_gemini_response_finished()
++        await self.push_frame(frame, direction)
+--- a/src/chiefvoice/agents/call/pipeline.py
++++ b/src/chiefvoice/agents/call/pipeline.py
+@@ -23,7 +23,10 @@
+     CallAudioDiagnostics,
+     GeminiInputResampler,
+ )
+-from chiefvoice.agents.call.conversation_reliability import GeminiConversationWatchdog
++from chiefvoice.agents.call.conversation_reliability import (
++    GeminiConversationWatchdog,
++    GeminiResponseObserver,
++)
+ from chiefvoice.agents.post_call.transcript import TranscriptCollector
+ from chiefvoice.sessions import AcceptedSession
+ 
+@@ -111,13 +114,18 @@
+             processor
+             for processor in conversation_processors
+             if callable(getattr(processor, "recover_unanswered_turn", None))
+-            and callable(getattr(processor, "play_fallback_and_hangup", None))
+         ),
+         None,
+     )
++    watchdog = None
+     if session is not None and model_service is not None and audio_diagnostics is not None:
+-        processors.append(GeminiConversationWatchdog(session, model_service, audio_diagnostics))
++        watchdog = GeminiConversationWatchdog(session, model_service, audio_diagnostics)
++        processors.append(watchdog)
+     processors.extend(conversation_processors)
++    # Model output is downstream of the service. The upstream watchdog does
++    # not observe Gemini response-start or audio frames without this tap.
++    if watchdog is not None:
++        processors.append(GeminiResponseObserver(watchdog))
+     if assistant_transcript_processor is not None:
+         processors.append(assistant_transcript_processor)
+     if audio_diagnostics is not None:
+--- /dev/null
++++ b/tests/test_watchdog_lifecycle.py
+@@ -0,0 +1,243 @@
++"""Regression tests for Gemini response watchdog and caller idle separation."""
++
++from __future__ import annotations
++
++import asyncio
++from types import SimpleNamespace
++
++import pytest
++from pipecat.frames.frames import (
++    LLMFullResponseEndFrame,
++    LLMFullResponseStartFrame,
++    OutputAudioRawFrame,
++    TranscriptionFrame,
++    UserStartedSpeakingFrame,
++    UserStoppedSpeakingFrame,
++)
++from pipecat.processors.frame_processor import FrameDirection
++
++from chiefvoice.agents.call.conversation_reliability import (
++    GeminiConversationWatchdog,
++    GeminiResponseObserver,
++)
++
++
++class Diagnostics:
++    def __init__(self):
++        self.events: dict[str, int] = {}
++
++    def record_conversation_event(self, key):
++        self.events[key] = self.events.get(key, 0) + 1
++
++
++class Service:
++    def __init__(self):
++        self._session = object()
++        self._ready_for_realtime_input = True
++        self._bot_is_responding = False
++        self._disconnecting = False
++        self.recoveries = 0
++        self.hangups = 0
++        self.on_recovery = None
++
++    async def recover_unanswered_turn(self):
++        self.recoveries += 1
++        if self.on_recovery is not None:
++            await self.on_recovery()
++        return True
++
++    async def play_fallback_and_hangup(self):
++        self.hangups += 1
++        raise AssertionError("Response watchdog must never end calls")
++
++
++async def make_watchdog(*, response_timeout=0.01, recovery_grace=0.01, inactivity=0.01):
++    service = Service()
++    diagnostics = Diagnostics()
++    watchdog = GeminiConversationWatchdog(
++        SimpleNamespace(session_id="call-id", provider="vobiz"),
++        service,
++        diagnostics,
++        response_timeout_seconds=response_timeout,
++        recovery_grace_seconds=recovery_grace,
++        caller_inactivity_seconds=inactivity,
++        max_recovery_attempts=2,
++    )
++
++    async def discard(*_args):
++        return None
++
++    watchdog.push_frame = discard
++    observer = GeminiResponseObserver(watchdog)
++    observer.push_frame = discard
++    return watchdog, observer, service, diagnostics
++
++
++@pytest.mark.asyncio
++async def test_watchdog_does_not_arm_during_speech_or_on_partial_transcription():
++    watchdog, _, service, diagnostics = await make_watchdog()
++    try:
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(
++            TranscriptionFrame(text="still speaking", user_id="caller"),
++            FrameDirection.UPSTREAM,
++        )
++        await asyncio.sleep(0.025)
++        assert service.recoveries == 0
++        assert watchdog._watch_task is None
++        assert diagnostics.events["caller_speech_started"] == 1
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.025)
++        assert diagnostics.events["response_watchdog_fired"] == 1
++        assert service.recoveries >= 1
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_response_start_cancels_pending_watchdog_from_other_side_of_model():
++    watchdog, observer, service, diagnostics = await make_watchdog(response_timeout=0.025)
++    try:
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        assert watchdog._watch_task is not None
++        await observer.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.04)
++        assert service.recoveries == 0
++        assert watchdog._gemini_generating is True
++        assert diagnostics.events["response_watchdog_cancelled"] >= 1
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_audio_without_start_frame_also_cancels_watchdog():
++    watchdog, observer, service, _ = await make_watchdog(response_timeout=0.025)
++    try:
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await observer.process_frame(
++            OutputAudioRawFrame(audio=b"ab", sample_rate=24000, num_channels=1),
++            FrameDirection.DOWNSTREAM,
++        )
++        await asyncio.sleep(0.04)
++        assert service.recoveries == 0
++        assert watchdog._response_audio_seen is True
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_stale_turn_and_new_caller_speech_never_recover():
++    watchdog, _, service, _ = await make_watchdog(response_timeout=0.03)
++    try:
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        expired_turn = watchdog._turn
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog._watch_turn(expired_turn, "old_caller_turn")
++        await asyncio.sleep(0.04)
++        assert service.recoveries == 0
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_unready_or_generating_service_never_recovers():
++    watchdog, _, service, diagnostics = await make_watchdog()
++    try:
++        service._ready_for_realtime_input = False
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.025)
++        assert diagnostics.events["response_watchdog_not_ready"] == 1
++        assert service.recoveries == 0
++        service._bot_is_responding = True
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.025)
++        assert service.recoveries == 0
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_recovery_is_bounded_and_exhaustion_never_hangs_up():
++    watchdog, _, service, diagnostics = await make_watchdog(response_timeout=0.005)
++    try:
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.055)
++        assert service.recoveries == 2
++        assert service.hangups == 0
++        assert diagnostics.events["response_watchdog_exhausted"] == 1
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_new_speech_cancels_recovery_in_flight():
++    watchdog, _, service, _ = await make_watchdog(response_timeout=0.001)
++    entered = asyncio.Event()
++
++    async def suspended_recovery():
++        entered.set()
++        await asyncio.sleep(10)
++
++    service.on_recovery = suspended_recovery
++    try:
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.wait_for(entered.wait(), timeout=1)
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.02)
++        assert service.recoveries == 1
++        assert service.hangups == 0
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_inactivity_timer_is_independent_and_does_not_recover():
++    watchdog, observer, service, diagnostics = await make_watchdog(inactivity=0.01)
++    try:
++        await observer.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.02)
++        assert diagnostics.events.get("caller_inactivity_detected", 0) == 0
++        await observer.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.025)
++        assert diagnostics.events["caller_inactivity_detected"] == 1
++        assert service.recoveries == 0
++        assert service.hangups == 0
++    finally:
++        await watchdog.cleanup()
++
++
++@pytest.mark.asyncio
++async def test_speech_cancels_inactivity_timer_and_cleanup_cancels_both():
++    watchdog, observer, _, diagnostics = await make_watchdog(inactivity=0.04)
++    await observer.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
++    await observer.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
++    await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++    await asyncio.sleep(0.05)
++    assert diagnostics.events.get("caller_inactivity_detected", 0) == 0
++    await watchdog.cleanup()
++    assert watchdog._watch_task is None
++    assert watchdog._inactivity_task is None
++
++@pytest.mark.asyncio
++async def test_barge_in_clears_interrupted_generation_before_next_caller_turn():
++    from pipecat.frames.frames import InterruptionFrame
++
++    watchdog, observer, service, _ = await make_watchdog(response_timeout=0.005)
++    try:
++        await observer.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
++        assert watchdog._gemini_generating is True
++        await watchdog.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
++        assert watchdog._gemini_generating is False
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.03)
++        assert service.recoveries >= 1
++    finally:
++        await watchdog.cleanup()
+--- a/src/chiefvoice/core/config.py
++++ b/src/chiefvoice/core/config.py
+@@ -69,4 +69,7 @@
+     gemini_recovery_grace_seconds: float = float(
+         os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "8")
+     )
++    gemini_caller_inactivity_seconds: float = float(
++        os.getenv("GEMINI_CALLER_INACTIVITY_SECONDS", "60")
++    )
+     gemini_fallback_audio_path: Path | None = (
+--- a/src/chiefvoice/agents/call/gemini_reliability.py
++++ b/src/chiefvoice/agents/call/gemini_reliability.py
+@@ -461,7 +461,11 @@
+                 if self._bot_is_responding:
+-                    # A response-start frame without any audio must not block
+-                    # the recovery nudge indefinitely.
+-                    await self._handle_interruption()
++                    # Gemini may begin responding between watchdog readiness
++                    # checks and this coroutine. Never interrupt that answer.
++                    logger.info(
++                        "gemini_unanswered_turn_recovery_skipped_active_response",
++                        extra={"session_id": session_id, "provider": "vertex"},
++                    )
++                    return False
+                 await self._session.send_realtime_input(
+                     text="Please respond briefly to the caller's most recent statement."
+                 )
+--- a/tests/test_gemini_reliability.py
++++ b/tests/test_gemini_reliability.py
+@@ -245,6 +245,7 @@
+ @pytest.mark.asyncio
+-async def test_watchdog_counts_local_vad_and_recovers_then_falls_back(monkeypatch):
+-    import chiefvoice.agents.call.conversation_reliability as reliability
++async def test_watchdog_counts_local_vad_and_recovers_without_hangup():
++    import asyncio
++    from pipecat.frames.frames import UserStoppedSpeakingFrame
+ 
+     diagnostics = CallAudioDiagnostics(SimpleNamespace(session_id="watchdog-session"))
+     calls = []
+@@ -253,6 +254,7 @@
+         _session = object()
+         _ready_for_realtime_input = True
+         _bot_is_responding = False
++        _disconnecting = False
+ 
+         async def recover_unanswered_turn(self):
+             calls.append("recover")
+@@ -262,26 +264,43 @@
+             calls.append("fallback")
+             return True
+ 
+-    async def no_wait(_seconds):
+-        return None
+-
+     async def discard_frame(_frame, _direction=FrameDirection.DOWNSTREAM):
+         return None
+ 
+-    monkeypatch.setattr(reliability.asyncio, "sleep", no_wait)
+     watchdog = GeminiConversationWatchdog(
+         SimpleNamespace(session_id="watchdog-session", provider="vobiz"),
+         WatchdogService(),
+         diagnostics,
+-        response_timeout_seconds=0,
+-        recovery_grace_seconds=0,
++        response_timeout_seconds=0.001,
++        recovery_grace_seconds=0.001,
+     )
+     watchdog.push_frame = discard_frame
+-    await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+-    await watchdog._watch_turn(0, "test")
+-
+-    assert diagnostics._vad_events["caller_speech_started"] == 1
+-    assert diagnostics._vad_events["response_watchdog_fired"] == 1
+-    assert calls == ["recover", "fallback"]
++    try:
++        await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
++        await asyncio.sleep(0.02)
++        assert diagnostics._vad_events["caller_speech_started"] == 1
++        assert diagnostics._vad_events["response_watchdog_fired"] == 1
++        assert calls == ["recover", "recover"]
++    finally:
++        await watchdog.cleanup()
+ 
+ 
++@pytest.mark.asyncio
++async def test_unanswered_turn_recovery_does_not_interrupt_active_gemini():
++    diagnostics = CallAudioDiagnostics(SimpleNamespace(session_id="active-gemini"))
++    service_class = reliable_vertex_service_class(
++        FakeGeminiService,
++        session_id="active-gemini",
++        diagnostics=diagnostics,
++    )
++    service = service_class()
++    service._session = FakeSession()
++    service._ready_for_realtime_input = True
++    service._bot_is_responding = True
++
++    assert await service.recover_unanswered_turn() is False
++    assert service.interruptions == 0
++    assert service._session.audio == []
++
++
+--- a/.env.example
++++ b/.env.example
+@@ -39,3 +39,4 @@
+ GEMINI_RESPONSE_WATCHDOG_SECONDS=10
+ GEMINI_RECOVERY_GRACE_SECONDS=8
++GEMINI_CALLER_INACTIVITY_SECONDS=60
+ # Optional localized clip: mono, 24 kHz, 16-bit PCM WAV. Defaults to the bundled English clip.

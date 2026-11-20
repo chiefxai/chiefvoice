@@ -71,6 +71,18 @@ variable "post_call_function_service_account" {
   default = "chiefvoice-post-call"
 }
 
+variable "post_call_transcription_location" {
+  type        = string
+  default     = "asia-southeast1"
+  description = "Cloud Speech-to-Text region used for post-call transcript review."
+}
+
+variable "post_call_transcription_model" {
+  type        = string
+  default     = "chirp_2"
+  description = "Cloud Speech-to-Text model used for post-call transcript review."
+}
+
 variable "labels" {
   type = map(string)
   default = {

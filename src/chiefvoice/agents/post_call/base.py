@@ -12,6 +12,7 @@ class CompletedCall:
     provider: str
     channel: str
     direction: str
+    live_agent_language: str | None = None
     api_key_id: str | None = None
     started_at: str | None = None
     ended_at: str | None = None
@@ -25,6 +26,8 @@ class CompletedCall:
     time_zone: str = "UTC"
     time_format: str = "%Y-%m-%dT%H:%M:%S%z"
     live_agent_context: dict[str, Any] | None = None
+    audio_review_transcript: str | None = None
+    audio_review_attempted: bool = False
     failure_webhook_url: str | None = None
     failure_webhook_payload: dict[str, Any] | None = None
 

@@ -41,6 +41,9 @@ output "cloud_build_substitutions" {
     _RUNTIME_SERVICE_ACCOUNT            = google_service_account.api.email
     _MIGRATION_SERVICE_ACCOUNT          = google_service_account.migrations.email
     _POST_CALL_FUNCTION_SERVICE_ACCOUNT = google_service_account.post_call.email
+    _POST_CALL_TRANSCRIPTION_PROJECT_ID = var.project_id
+    _POST_CALL_TRANSCRIPTION_LOCATION   = var.post_call_transcription_location
+    _POST_CALL_TRANSCRIPTION_MODEL      = var.post_call_transcription_model
     _DATABASE_URL_SECRET                = google_secret_manager_secret.runtime["chiefvoice-database-url"].secret_id
     _CREDENTIALS_ENCRYPTION_KEY_SECRET  = google_secret_manager_secret.runtime["chiefvoice-credentials-encryption-key"].secret_id
     _POST_CALL_ENCRYPTION_KEY_SECRET    = google_secret_manager_secret.runtime["chiefvoice-post-call-encryption-key"].secret_id

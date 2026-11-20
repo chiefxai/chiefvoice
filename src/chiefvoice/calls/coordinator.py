@@ -689,6 +689,7 @@ class CallCoordinator:
             provider=session.provider,
             channel=session.channel,
             direction=session.direction.value,
+            live_agent_language=session.live_agent_language,
             started_at=session.started_at.isoformat(),
             ended_at=ended_at.isoformat(),
             transcript=transcript,

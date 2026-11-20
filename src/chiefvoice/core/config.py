@@ -120,6 +120,15 @@ class Settings:
     gcp_vertex_monthly_spend_cap: str | None = os.getenv("GCP_VERTEX_MONTHLY_SPEND_CAP") or None
     post_call_agent_provider: str = os.getenv("POST_CALL_AGENT_PROVIDER", "langchain_vertex").strip().lower()
     post_call_model: str = os.getenv("POST_CALL_MODEL", "gemini-3.5-flash-lite")
+    post_call_transcription_project_id: str | None = (
+        os.getenv("POST_CALL_TRANSCRIPTION_PROJECT_ID") or None
+    )
+    post_call_transcription_location: str = os.getenv(
+        "POST_CALL_TRANSCRIPTION_LOCATION", "asia-southeast1"
+    ).strip().lower()
+    post_call_transcription_model: str = os.getenv(
+        "POST_CALL_TRANSCRIPTION_MODEL", "chirp_2"
+    ).strip().lower()
     post_call_location: str = os.getenv("POST_CALL_LOCATION", "global")
     post_call_encryption_key: str | None = os.getenv("POST_CALL_ENCRYPTION_KEY") or None
     post_call_execution_backend: str = os.getenv("POST_CALL_EXECUTION_BACKEND", "in_process").strip().lower()

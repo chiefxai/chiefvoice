@@ -25,6 +25,21 @@ variable "public_domain" {
   type        = string
   description = "DNS name pointed at the static backend_external_ip; Caddy manages HTTPS certificates."
 }
+variable "oidc_authority" {
+  type        = string
+  default     = ""
+  description = "OIDC authority used by the console build, usually the issuer URL."
+}
+variable "oidc_client_id" {
+  type        = string
+  default     = ""
+  description = "OIDC single-page application client ID used by the console build."
+}
+variable "oidc_scope" {
+  type        = string
+  default     = "openid profile email platform:customers:read platform:customers:write"
+  description = "Space-separated OIDC scopes requested by the console."
+}
 variable "oidc_issuer" {
   type        = string
   default     = ""
@@ -65,6 +80,16 @@ variable "post_call_model" {
 variable "post_call_location" {
   type    = string
   default = "global"
+}
+variable "post_call_transcription_location" {
+  type        = string
+  default     = "asia-southeast1"
+  description = "Cloud Speech-to-Text region used for low-confidence post-call transcript review."
+}
+variable "post_call_transcription_model" {
+  type        = string
+  default     = "chirp_2"
+  description = "Cloud Speech-to-Text model used for post-call transcript review."
 }
 variable "labels" {
   type    = map(string)

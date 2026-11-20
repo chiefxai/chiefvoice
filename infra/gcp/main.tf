@@ -4,7 +4,7 @@ locals {
     "aiplatform.googleapis.com", "artifactregistry.googleapis.com", "cloudbuild.googleapis.com",
     "cloudresourcemanager.googleapis.com", "cloudtasks.googleapis.com", "compute.googleapis.com",
     "cloudfunctions.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com",
-    "run.googleapis.com", "secretmanager.googleapis.com", "serviceusage.googleapis.com", "sts.googleapis.com",
+    "run.googleapis.com", "secretmanager.googleapis.com", "serviceusage.googleapis.com", "speech.googleapis.com", "sts.googleapis.com",
     "storage.googleapis.com", "vpcaccess.googleapis.com",
   ])
 }
@@ -304,6 +304,12 @@ resource "google_project_iam_member" "backend_vertex_user" {
 resource "google_project_iam_member" "function_vertex_user" {
   project    = var.project_id
   role       = "roles/aiplatform.user"
+  member     = "serviceAccount:${google_service_account.post_call_function.email}"
+  depends_on = [google_project_service.apis]
+}
+resource "google_project_iam_member" "function_speech_client" {
+  project    = var.project_id
+  role       = "roles/speech.client"
   member     = "serviceAccount:${google_service_account.post_call_function.email}"
   depends_on = [google_project_service.apis]
 }

@@ -12,6 +12,7 @@ locals {
     "secretmanager.googleapis.com",
     "serviceusage.googleapis.com",
     "aiplatform.googleapis.com",
+    "speech.googleapis.com",
     "storage.googleapis.com",
   ])
   secret_ids = toset([
@@ -181,6 +182,13 @@ resource "google_project_iam_member" "vertex" {
   project = var.project_id
   role    = "roles/aiplatform.user"
   member  = "serviceAccount:${each.value}"
+}
+
+resource "google_project_iam_member" "post_call_speech_client" {
+  project    = var.project_id
+  role       = "roles/speech.client"
+  member     = "serviceAccount:${google_service_account.post_call.email}"
+  depends_on = [google_project_service.required]
 }
 
 resource "google_storage_bucket_iam_member" "runtime" {

@@ -1,4 +1,3 @@
-import base64
 import json
 import logging
 from dataclasses import replace
@@ -10,6 +9,7 @@ from pydantic import BaseModel, Field, create_model
 from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent, PostCallResult
 from chiefvoice.agents.post_call.output_schema import build_output_model, validate_output_schema
 from chiefvoice.agents.post_call.tools import build_post_call_tools
+from chiefvoice.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,14 @@ class LangChainPostCallAgent(PostCallAgent):
         context += (
             "\nTranscript:\n" f"{call.transcript}"
         )
+        if call.audio_review_transcript:
+            context += (
+                "\n\nIndependent recording transcript (speaker labels are unavailable):\n"
+                f"{call.audio_review_transcript}\n"
+                "Compare this independent transcription with the labeled live transcript. "
+                "Use it to clarify words only when the evidence agrees; keep speaker attribution "
+                "from the labeled transcript and mark conflicting or still-unclear facts unknown.\n"
+            )
         system_prompt = (
             "Analyze the completed call transcript. Return structured_output following the "
             "provided output schema and needs_audio_review. Use only facts supported by the "
@@ -155,7 +163,8 @@ class LangChainPostCallAgent(PostCallAgent):
                 action_items=tuple(parsed.action_items),
             )
 
-        if not parsed.needs_audio_review:
+        is_tamil_call = (call.live_agent_language or "").split("-", 1)[0].lower() == "ta"
+        if call.audio_review_attempted or not (parsed.needs_audio_review or is_tamil_call):
             return analysis
         if not call.recording_audio and call.recording_loader is not None:
             try:
@@ -174,10 +183,25 @@ class LangChainPostCallAgent(PostCallAgent):
         if not call.recording_audio:
             logger.info(
                 "post_call_audio_review_unavailable",
-                extra={"session_id": call.session_id, "tenant_id": call.tenant_id},
+                extra={
+                    "session_id": call.session_id,
+                    "tenant_id": call.tenant_id,
+                    "reason": "recording_unavailable",
+                    "automatic_tamil_review": is_tamil_call,
+                },
             )
             return analysis
         try:
+            logger.info(
+                "post_call_recording_transcription_started",
+                extra={
+                    "session_id": call.session_id,
+                    "tenant_id": call.tenant_id,
+                    "language": call.live_agent_language or "auto",
+                    "automatic_tamil_review": is_tamil_call,
+                    "transcription_provider": f"google_cloud_speech_{settings.post_call_transcription_model}",
+                },
+            )
             audio_transcript = await self._transcribe_recording(call)
             if not audio_transcript:
                 return analysis
@@ -187,12 +211,16 @@ class LangChainPostCallAgent(PostCallAgent):
                     "session_id": call.session_id,
                     "tenant_id": call.tenant_id,
                     "transcript_characters": len(audio_transcript),
+                    "language": call.live_agent_language or "auto",
+                    "automatic_tamil_review": is_tamil_call,
+                    "transcription_provider": f"google_cloud_speech_{settings.post_call_transcription_model}",
                 },
             )
             return await self.process(
                 replace(
                     call,
-                    transcript=audio_transcript,
+                    audio_review_transcript=audio_transcript,
+                    audio_review_attempted=True,
                     recording_audio=None,
                     recording_loader=None,
                 )
@@ -212,47 +240,17 @@ class LangChainPostCallAgent(PostCallAgent):
         audio = call.recording_audio
         if not audio:
             return ""
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "file",
-                    "source_type": "base64",
-                    "data": base64.b64encode(audio).decode("ascii"),
-                    "mime_type": "audio/wav",
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        "Transcribe this phone-call recording verbatim in its original language, "
-                        "preserving code-switching and spoken names/numbers. Label each utterance "
-                        "Caller or Assistant based on the voices. Do not summarize, translate, "
-                        "infer missing words, or add commentary. Return only the transcript."
-                    ),
-                },
-            ]
+        from chiefvoice.agents.post_call.speech_to_text import transcribe_recording
+
+        return await transcribe_recording(
+            audio,
+            language=call.live_agent_language,
+            project_id=(
+                settings.post_call_transcription_project_id or settings.vertex_project_id
+            ),
+            location=settings.post_call_transcription_location,
+            model=settings.post_call_transcription_model,
         )
-        result = await self._chat_model.ainvoke(
-            [message],
-            config={
-                "run_name": "post_call_recording_transcription",
-                "tags": ["post-call", "transcription", call.provider, call.channel],
-                "metadata": {
-                    "session_id": call.session_id,
-                    "tenant_id": call.tenant_id,
-                    "agent_type": "post_call_transcription",
-                },
-            },
-        )
-        content = getattr(result, "content", result)
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            return "\n".join(
-                str(item.get("text", "")).strip()
-                for item in content
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
-            ).strip()
-        return ""
 
     async def _run_enabled_tools(
         self, call: CompletedCall, context: str, system_prompt: str
