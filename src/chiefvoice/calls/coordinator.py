@@ -119,6 +119,13 @@ class CallCoordinator:
             isinstance(command.live_agent_context, dict)
             and command.live_agent_context.get("mandatory_fields")
         )
+        # Context-driven calling workflows provide their completion contract as
+        # mandatory_fields. Expose the validated end-call tool for those calls
+        # even when no reusable calling template supplied an explicit end_call
+        # tool. Otherwise the prompt can instruct the model to end the call,
+        # while the provider never registers that tool and only inactivity can
+        # eventually terminate the call.
+        auto_hangup_when_complete = auto_hangup_when_complete or has_legacy_requirements
         if (
             auto_hangup_when_complete
             and not command.live_agent_completion_requirements
