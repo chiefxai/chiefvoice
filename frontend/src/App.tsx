@@ -972,23 +972,25 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
 
   return <Fragment>
     <TableRow hover>
-      <TableCell className="table-cell">{new Date(call.started_at).toLocaleString()}</TableCell>
+      <TableCell className="table-cell"><Stack spacing={0.15}><Typography variant="body2" sx={{ fontWeight: 750 }}>{new Date(call.started_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Typography><Typography variant="caption" color="text.secondary">{new Date(call.started_at).toLocaleDateString()}</Typography></Stack></TableCell>
       <TableCell className="table-cell" sx={{ textTransform: 'capitalize' }}>{call.direction || '—'}</TableCell>
       <TableCell className="table-cell"><Typography variant="body2">{call.caller || '—'} → {call.callee || '—'}</Typography><Typography variant="caption" color="text.secondary">{call.provider || 'unknown provider'} · <code>{call.session_id}</code></Typography></TableCell>
       <TableCell className="table-cell">{call.duration_seconds == null ? '—' : `${call.duration_seconds}s`}</TableCell>
       <TableCell className="table-cell"><StatusChip enabled={call.status === 'completed'} label={call.status} /></TableCell>
       <TableCell className="table-cell">{call.post_call_status ? <StatusChip enabled={call.post_call_status === 'completed'} label={call.post_call_status} /> : '—'}</TableCell>
-      <TableCell className="table-cell"><Button size="small" onClick={() => setExpanded(value => !value)}>{expanded ? 'Hide' : 'Details'}</Button></TableCell>
+      <TableCell className="table-cell"><Button size="small" onClick={() => setExpanded(true)}>Details</Button></TableCell>
     </TableRow>
-    {expanded && <TableRow><TableCell colSpan={7} sx={{ p: { xs: 1.5, md: 2.5 }, backgroundColor: 'action.hover' }}>
-      {detail.isLoading ? <CircularProgress size={20} /> : detail.error ? <Alert severity="error">{errorText(detail.error)}</Alert> : detail.data && <Stack gap={1.5}>
+    <Dialog open={expanded} onClose={() => setExpanded(false)} maxWidth="md" fullWidth>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}><Stack><span>Call details</span><Typography variant="body2" color="text.secondary">{new Date(call.started_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {new Date(call.started_at).toLocaleDateString()} · {call.session_id}</Typography></Stack><IconButton aria-label="Close call details" onClick={() => setExpanded(false)}><CloseRoundedIcon /></IconButton></DialogTitle>
+      <DialogContent dividers>{detail.isLoading ? <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={22} /></Stack> : detail.error ? <Alert severity="error">{errorText(detail.error)}</Alert> : detail.data && <Stack gap={1.5}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
           <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Recording</Typography>{detail.data.recording_available ? <Stack gap={1}>{recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)}>{recording.isFetching ? 'Loading recording…' : 'Load recording'}</Button>}{recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}</Stack> : <Typography variant="body2" color="text.secondary">{detail.data.recording_allowed ? 'No saved recording is available.' : 'Recording was disabled for this call.'}</Typography>}</Card>
           <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Post-call result</Typography>{detail.data.post_call_error && <Alert severity="error" sx={{ mb: 1 }}>{detail.data.post_call_error}</Alert>}{detail.data.post_call_result ? <pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 280, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre> : <Typography variant="body2" color="text.secondary">Result appears after post-call processing completes.</Typography>}</Card>
         </Stack>
         <Card variant="outlined" sx={{ p: 1.5 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Transcript</Typography>{detail.data.transcript ? <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflowY: 'auto', margin: 0, fontFamily: 'inherit' }}>{detail.data.transcript}</pre> : <Typography variant="body2" color="text.secondary">{detail.data.status === 'completed' ? 'Transcript is unavailable.' : 'Transcript is not ready yet.'}</Typography>}</Card>
-      </Stack>}
-    </TableCell></TableRow>}
+      </Stack>}</DialogContent>
+      <DialogActions><Button onClick={() => setExpanded(false)}>Close</Button></DialogActions>
+    </Dialog>
   </Fragment>
 }
 
