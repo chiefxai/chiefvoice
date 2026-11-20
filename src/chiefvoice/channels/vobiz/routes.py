@@ -56,13 +56,12 @@ async def hangup_callback(request: Request):
     if coordinator is None:
         raise HTTPException(status_code=503, detail="Call services are not configured")
     session = await adapter.hangup_callback(request)
+    # Let an already-starting WebSocket consume or unwind its prepared model
+    # session before removing any unclaimed preflight state.
+    media_session_closed = await adapter.close_active_media_session(session.session_id)
     prepared_sessions = getattr(request.app.state, "prepared_realtime_sessions", None)
     if prepared_sessions is not None:
         await prepared_sessions.discard(session.session_id, "provider_hangup_before_media")
-    # If media is still active, let its WebSocket finalizer flush the Pipecat
-    # audio buffer and persist recording/transcript state before ending the call.
-    # Only calls without an active media session are finalized directly here.
-    media_session_closed = await adapter.close_active_media_session(session.session_id)
     if not media_session_closed:
         await coordinator.end_session(session, "completed")
     return Response(

@@ -14,7 +14,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import HTTPException, Request, Response, WebSocket
+from fastapi import HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pipecat.frames.frames import LLMRunFrame
@@ -78,6 +78,7 @@ class _ActiveMediaSession:
     pipeline_task: Any = None
     runner_task: asyncio.Task[None] | None = None
     pipeline_ready: asyncio.Event | None = None
+    provider_hangup_received: bool = False
 
 
 class VobizAdapter:
@@ -355,16 +356,47 @@ class VobizAdapter:
         form = await request.form()
         provider_call_id = _string_value(form.get("CallUUID") or form.get("RequestUUID"))
         if provider_call_id:
-            session.provider_call_id = provider_call_id[:256]
+            provider_call_id = provider_call_id[:256]
+            if session.provider_call_id and session.provider_call_id != provider_call_id:
+                # The signed state is the authoritative internal-session correlation.
+                # Preserve the known provider ID so a mismatched callback cannot make
+                # a later cleanup DELETE target a different call.
+                logger.error(
+                    "vobiz_callback_call_id_mismatch",
+                    extra={
+                        "session_id": session.session_id,
+                        "stored_provider_call_id": session.provider_call_id,
+                        "callback_provider_call_id": provider_call_id,
+                    },
+                )
+            else:
+                session.provider_call_id = provider_call_id
         callback_diagnostics = {
             key: _string_value(form.get(key))[:128]
-            for key in ("HangupCauseCode", "HangupSource", "CallStatus")
+            for key in (
+                "CallStatus",
+                "HangupCauseCode",
+                "HangupSource",
+                "StartTime",
+                "AnswerTime",
+                "EndTime",
+                "Duration",
+                "BillDuration",
+            )
             if _string_value(form.get(key))
         }
         logger.info(
             "vobiz_hangup_callback_received",
-            extra={"session_id": session.session_id, **callback_diagnostics},
+            extra={
+                "session_id": session.session_id,
+                "provider_call_id": provider_call_id or session.provider_call_id,
+                **callback_diagnostics,
+            },
         )
+        session.metadata["vobiz_hangup_callback"] = callback_diagnostics
+        active = self._active_media_sessions.get(session.session_id)
+        if active is not None:
+            active.provider_hangup_received = True
         return session
 
     async def close_active_media_session(self, session_id: str) -> bool:
@@ -837,6 +869,41 @@ class VobizAdapter:
                 if timeout_task is not None:
                     timeout_task.cancel()
                     await asyncio.gather(timeout_task, return_exceptions=True)
+        except WebSocketDisconnect as exc:
+            if active_media.provider_hangup_received:
+                # Vobiz closes the media socket as part of a reported terminal
+                # hangup. Treat that teardown as normal instead of manufacturing
+                # a provider_error and call.failed event.
+                end_reason = "completed"
+                logger.info(
+                    "vobiz_media_disconnected_after_hangup",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            else:
+                end_reason = "provider_error"
+                logger.error(
+                    "vobiz_media_session_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                try:
+                    await self.hangup(session, "live media WebSocket disconnected")
+                except Exception as hangup_exc:
+                    logger.error(
+                        "vobiz_media_failure_hangup_failed",
+                        extra={
+                            "session_id": session.session_id,
+                            "provider": self.provider,
+                            "error_type": type(hangup_exc).__name__,
+                        },
+                    )
         except Exception as exc:
             end_reason = "provider_error"
             logger.error(
