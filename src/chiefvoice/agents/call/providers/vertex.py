@@ -358,10 +358,13 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 "If a conditional completion outcome does not match one of the configured "
                 "branches, ask a clarifying question or use an appropriate early-exit reason; "
                 "do not treat it as completed. "
-                "The platform will request hangup after this final audio has drained. Also call "
-                "hang_up_call with reason completed and the collected data when possible. If the "
+                "After you have collected the required information and the caller has confirmed "
+                "the summary, call the end_call tool immediately with reason completed and all "
+                "collected data. Do not wait for an inactivity timeout. The hang_up_call tool "
+                "is an equivalent compatibility alias. The platform will request hangup after "
+                "the final audio has drained. If the "
                 "caller clearly declines, cannot provide a requested item, or asks to end the "
-                "call, use hang_up_call with the appropriate early-exit reason. Do not merely "
+                "call, use end_call with the appropriate early-exit reason. Do not merely "
                 "say that you will hang up, and never claim the call ended unless the platform "
                 "disconnects it."
             )
@@ -497,37 +500,51 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 logger.info("call_agent_hangup_requested", extra={"session_id": session.session_id})
                 await params.result_callback({"success": True})
 
-            tools = ToolsSchema(standard_tools=[FunctionSchema(
-                name="hang_up_call",
-                description=(
-                    "End the current phone call after all requested mandatory information has been "
-                    "collected and the caller has been thanked, or if the caller clearly declines "
-                    "or requests to end the call."
-                ),
-                properties={
-                    "reason": {
-                        "type": "string",
-                        "description": (
-                            "Reason for ending the call: 'completed' (all requested fields collected), "
-                            "'caller_declined', 'caller_requested', 'cannot_provide', or 'inactivity'."
-                        ),
-                    },
-                    "collected_data": {
-                        "type": "object",
-                        "description": (
-                            "Key-value dictionary of all required values collected during the call. "
-                            "Required when the server has a completion contract; include the field "
-                            "names and caller-provided values exactly, without guessing."
-                        ),
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "Brief summary of the outcome before ending the call.",
-                    },
+            hangup_properties = {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Reason for ending the call: 'completed' (all requested fields collected), "
+                        "'caller_declined', 'caller_requested', 'cannot_provide', or 'inactivity'."
+                    ),
                 },
-                required=[],
-                handler=hang_up_call,
-            )])
+                "collected_data": {
+                    "type": "object",
+                    "description": (
+                        "Key-value dictionary of all required values collected during the call. "
+                        "Required when the server has a completion contract; include the field "
+                        "names and caller-provided values exactly, without guessing."
+                    ),
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Brief summary of the outcome before ending the call.",
+                },
+            }
+            hangup_description = (
+                "End the current phone call after all requested mandatory information has been "
+                "collected and the caller has confirmed the summary, or if the caller clearly "
+                "declines or requests to end the call."
+            )
+            tools = ToolsSchema(standard_tools=[
+                FunctionSchema(
+                    name="end_call",
+                    description=hangup_description,
+                    properties=hangup_properties,
+                    required=[],
+                    handler=hang_up_call,
+                ),
+                FunctionSchema(
+                    name="hang_up_call",
+                    description=(
+                        "Compatibility alias for end_call. Use the same reasons and collected "
+                        "data as the end_call tool."
+                    ),
+                    properties=hangup_properties,
+                    required=[],
+                    handler=hang_up_call,
+                ),
+            ])
         if service_type == "google_ai":
             reliable_service = reliable_vertex_service_class(
                 GeminiLiveLLMService,
