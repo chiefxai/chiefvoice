@@ -54,6 +54,16 @@ class JsonFormatter(logging.Formatter):
             "error_origin_file",
             "error_origin_function",
             "error_origin_line",
+            "playback_result",
+            "missing_fields",
+            "timeout_seconds",
+            "window_seconds",
+            "turn_id",
+            "call_state",
+            "turn_state",
+            "caller_is_speaking",
+            "gemini_is_generating",
+            "bot_audio_playing",
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)

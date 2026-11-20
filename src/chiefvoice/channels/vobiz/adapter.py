@@ -598,6 +598,12 @@ class VobizAdapter:
         session.metadata["bot_speech_drain_event"] = bot_speech_drained
         session.metadata["agent_hangup_cancel_event"] = agent_hangup_cancel
 
+        def reset_agent_hangup_state() -> None:
+            session.metadata.pop("agent_hangup_pending", None)
+            session.metadata.pop("auto_hangup_completion_phrase_detected", None)
+            session.metadata.pop("call_terminating", None)
+            agent_hangup_request.clear()
+
         async def hang_up_from_agent() -> None:
             agent_hangup_cancel.clear()
             session.metadata["agent_hangup_pending"] = True
@@ -624,9 +630,7 @@ class VobizAdapter:
             try:
                 while True:
                     if agent_hangup_cancel.is_set():
-                        session.metadata.pop("agent_hangup_pending", None)
-                        session.metadata.pop("auto_hangup_completion_phrase_detected", None)
-                        agent_hangup_request.clear()
+                        reset_agent_hangup_state()
                         logger.info(
                             "vobiz_agent_hangup_cancelled_by_caller",
                             extra={"session_id": session.session_id, "provider": self.provider},
@@ -682,9 +686,7 @@ class VobizAdapter:
                     agent_hangup_cancel,
                 )
                 if playback_result == "caller_activity":
-                    session.metadata.pop("agent_hangup_pending", None)
-                    session.metadata.pop("auto_hangup_completion_phrase_detected", None)
-                    agent_hangup_request.clear()
+                    reset_agent_hangup_state()
                     logger.info(
                         "vobiz_agent_hangup_cancelled_by_caller",
                         extra={"session_id": session.session_id, "provider": self.provider},
@@ -693,9 +695,7 @@ class VobizAdapter:
                 if playback_result in {"no_checkpoint", "timeout", "interrupted", "send_failed"}:
                     # Keep the call live so the caller can hear a retry instead
                     # of disconnecting after audio that was never confirmed.
-                    session.metadata.pop("agent_hangup_pending", None)
-                    session.metadata.pop("auto_hangup_completion_phrase_detected", None)
-                    agent_hangup_request.clear()
+                    reset_agent_hangup_state()
                     prompt = session.metadata.get("prompt_caller_inactivity")
                     if callable(prompt):
                         try:
@@ -733,9 +733,7 @@ class VobizAdapter:
             )
             while asyncio.get_running_loop().time() < listen_deadline:
                 if agent_hangup_cancel.is_set():
-                    session.metadata.pop("agent_hangup_pending", None)
-                    session.metadata.pop("auto_hangup_completion_phrase_detected", None)
-                    agent_hangup_request.clear()
+                    reset_agent_hangup_state()
                     logger.info(
                         "vobiz_agent_hangup_cancelled_by_caller",
                         extra={"session_id": session.session_id, "provider": self.provider},
@@ -743,9 +741,7 @@ class VobizAdapter:
                     return
                 await asyncio.sleep(0.1)
             if agent_hangup_cancel.is_set():
-                session.metadata.pop("agent_hangup_pending", None)
-                session.metadata.pop("auto_hangup_completion_phrase_detected", None)
-                agent_hangup_request.clear()
+                reset_agent_hangup_state()
                 logger.info(
                     "vobiz_agent_hangup_cancelled_by_caller",
                     extra={"session_id": session.session_id, "provider": self.provider},
@@ -756,6 +752,7 @@ class VobizAdapter:
             try:
                 await self.hangup(session, "agent_completed")
             except Exception as exc:
+                session.metadata.pop("call_terminating", None)
                 logger.error(
                     "vobiz_agent_hangup_failed",
                     extra={
@@ -948,7 +945,9 @@ class VobizAdapter:
                     self._active_media_sessions.pop(session.session_id, None)
 
     async def hangup(self, session: AcceptedSession, reason: str | None = None) -> None:
-        if session.metadata.get("provider_call_terminated"):
+        if session.metadata.get("call_terminated") or session.metadata.get(
+            "provider_hangup_in_progress"
+        ):
             logger.info(
                 "vobiz_call_hangup_already_completed",
                 extra={
@@ -958,50 +957,56 @@ class VobizAdapter:
                 },
             )
             return
-        session.metadata["provider_call_terminated"] = True
+        session.metadata["provider_hangup_in_progress"] = True
         session.metadata["call_terminating"] = True
-        if not session.provider_call_id:
-            logger.error(
-                "vobiz_hangup_missing_call_id",
-                extra={"session_id": session.session_id, "provider": self.provider},
+        try:
+            if not session.provider_call_id:
+                logger.error(
+                    "vobiz_hangup_missing_call_id",
+                    extra={"session_id": session.session_id, "provider": self.provider},
+                )
+                raise RuntimeError("Vobiz call ID is unavailable; cannot end the call")
+            self._require_configured()
+            integration = await self._integration_for_caller(session.caller)
+            if integration is None:
+                logger.error(
+                    "vobiz_hangup_integration_missing",
+                    extra={"session_id": session.session_id, "provider": self.provider},
+                )
+                raise RuntimeError("Vobiz integration is unavailable; cannot end the call")
+            auth_id = integration.credentials.get("auth_id", "")
+            auth_token = integration.credentials.get("auth_token", "")
+            if not auth_id or not auth_token:
+                logger.error(
+                    "vobiz_hangup_credentials_missing",
+                    extra={"session_id": session.session_id, "provider": self.provider},
+                )
+                raise RuntimeError("Vobiz credentials are unavailable; cannot end the call")
+            endpoint = (
+                f"{VOBIZ_API}/api/v1/Account/{auth_id}/Call/"
+                f"{urllib.parse.quote(session.provider_call_id, safe='')}/"
             )
-            raise RuntimeError("Vobiz call ID is unavailable; cannot end the call")
-        self._require_configured()
-        integration = await self._integration_for_caller(session.caller)
-        if integration is None:
-            logger.error(
-                "vobiz_hangup_integration_missing",
-                extra={"session_id": session.session_id, "provider": self.provider},
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.delete(
+                    endpoint, headers=self._auth_headers(auth_id, auth_token)
+                )
+                # Idempotent deletion: 404/410 means call was already hung up on the provider
+                if response.status_code not in (200, 202, 204, 404, 410):
+                    response.raise_for_status()
+            session.metadata["call_terminated"] = True
+            logger.info(
+                "vobiz_call_hangup_completed",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "reason": reason,
+                },
             )
-            raise RuntimeError("Vobiz integration is unavailable; cannot end the call")
-        auth_id = integration.credentials.get("auth_id", "")
-        auth_token = integration.credentials.get("auth_token", "")
-        if not auth_id or not auth_token:
-            logger.error(
-                "vobiz_hangup_credentials_missing",
-                extra={"session_id": session.session_id, "provider": self.provider},
-            )
-            raise RuntimeError("Vobiz credentials are unavailable; cannot end the call")
-        endpoint = (
-            f"{VOBIZ_API}/api/v1/Account/{auth_id}/Call/"
-            f"{urllib.parse.quote(session.provider_call_id, safe='')}/"
-        )
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.delete(
-                endpoint, headers=self._auth_headers(auth_id, auth_token)
-            )
-            # Idempotent deletion: 404/410 means call was already hung up on the provider
-            if response.status_code not in (200, 202, 204, 404, 410):
-                response.raise_for_status()
-        session.metadata["call_terminated"] = True
-        logger.info(
-            "vobiz_call_hangup_completed",
-            extra={
-                "session_id": session.session_id,
-                "provider": self.provider,
-                "reason": reason,
-            },
-        )
+        finally:
+            session.metadata.pop("provider_hangup_in_progress", None)
+            if not session.metadata.get("call_terminated"):
+                session.metadata.pop("provider_call_terminated", None)
+                session.metadata.pop("call_terminating", None)
 
     async def transfer(self, session: AcceptedSession, destination: str) -> None:
         raise HTTPException(status_code=501, detail="Vobiz transfer is not implemented yet")
