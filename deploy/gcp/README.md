@@ -21,7 +21,7 @@ For the Cloud Functions post-call backend, create a separate function service ac
 
 When project isolation is disabled, grant the function service account `roles/aiplatform.user` on the configured `VERTEX_PROJECT_ID` yourself. The function is a separate runtime identity from the API and must be allowed to access Vertex AI directly.
 
-The Terraform root in [`infra/gcp`](../../infra/gcp) creates the Cloud SQL database URL, app encryption secrets, Vobiz secrets, Cloud Storage HMAC credentials, service accounts, and base IAM. If managing these manually, create these secrets and grant the appropriate runtime identities access:
+The active GCP Terraform root is maintained in the separate [chiefvoice-infra repository](https://github.com/chiefxai/chiefvoice-infra/tree/main/gcp). It provisions the production VM, PostgreSQL, post-call function, storage, secrets, service accounts, and IAM. The application repository keeps the Cloud Build deployment pipeline and app-specific configuration. If managing secrets manually, create them and grant the appropriate runtime identities access:
 
 | Secret ID (default) | Contents |
 | --- | --- |

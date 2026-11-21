@@ -6,13 +6,19 @@ substitutions:
   _ZONE: asia-south1-a
   _PUBLIC_DOMAIN: chiefvoice.elvoryx.in
   _FUNCTION_NAME: chiefvoice-post-call
+  _FUNCTION_REGION: us-central1
   _FUNCTION_VPC_CONNECTOR: chiefvoice-functions
   _FUNCTION_SERVICE_ACCOUNT: chiefvoice-post-call@chief-502717.iam.gserviceaccount.com
   _FUNCTION_BUILD_SERVICE_ACCOUNT: projects/chief-502717/serviceAccounts/chiefvoice-function-build@chief-502717.iam.gserviceaccount.com
   _TASK_INVOKER_SERVICE_ACCOUNT: chiefvoice-task-invoker@chief-502717.iam.gserviceaccount.com
   _POST_CALL_FUNCTION_MAX_INSTANCES: "10"
   _DATABASE_URL_SECRET: chiefvoice-function-database-url
+  _CREDENTIALS_ENCRYPTION_KEY_SECRET: chiefvoice-credentials
   _POST_CALL_ENCRYPTION_KEY_SECRET: chiefvoice-post-call-encryption-key
+  _RECORDINGS_ENCRYPTION_KEY_SECRET: chiefvoice-recordings
+  _OBJECT_STORAGE_ACCESS_KEY_ID_SECRET: chiefvoice-object-access-id
+  _OBJECT_STORAGE_SECRET_ACCESS_KEY_SECRET: chiefvoice-object-secret
+  _OBJECT_STORAGE_BUCKET: chiefvoice-297803100712-recordings
   _VERTEX_LOCATION: us-central1
   _POST_CALL_LOCATION: global
   _POST_CALL_MODEL: gemini-3.5-flash-lite
@@ -91,7 +97,7 @@ steps:
       - |
         bash deploy/gcp/post-call-function/prepare_source.sh /workspace/.post-call-function-source
         gcloud functions deploy ${_FUNCTION_NAME} \
-          --gen2 --runtime=python312 --region=${_REGION} \
+          --gen2 --runtime=python312 --region=${_FUNCTION_REGION} \
           --source=/workspace/.post-call-function-source --entry-point=handler \
           --trigger-http --no-allow-unauthenticated \
           --service-account=${_FUNCTION_SERVICE_ACCOUNT} \
@@ -100,14 +106,14 @@ steps:
           --egress-settings=private-ranges-only \
           --timeout=240s --memory=1Gi \
           --max-instances=${_POST_CALL_FUNCTION_MAX_INSTANCES} \
-          --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=false,VERTEX_PROJECT_ID=${PROJECT_ID},VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_LOCATION=${_POST_CALL_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL},POST_CALL_TRANSCRIPTION_PROJECT_ID=${PROJECT_ID},POST_CALL_TRANSCRIPTION_LOCATION=${_POST_CALL_TRANSCRIPTION_LOCATION},POST_CALL_TRANSCRIPTION_MODEL=${_POST_CALL_TRANSCRIPTION_MODEL} \
-          --set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,POST_CALL_ENCRYPTION_KEY=${_POST_CALL_ENCRYPTION_KEY_SECRET}:latest \
+          --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=false,VERTEX_PROJECT_ID=${PROJECT_ID},VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_LOCATION=${_POST_CALL_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL},POST_CALL_TRANSCRIPTION_PROJECT_ID=${PROJECT_ID},POST_CALL_TRANSCRIPTION_LOCATION=${_POST_CALL_TRANSCRIPTION_LOCATION},POST_CALL_TRANSCRIPTION_MODEL=${_POST_CALL_TRANSCRIPTION_MODEL},RECORDINGS_ENABLED=true,RECORDINGS_STORAGE_BACKEND=s3,OBJECT_STORAGE_BUCKET=${_OBJECT_STORAGE_BUCKET},OBJECT_STORAGE_REGION=auto,OBJECT_STORAGE_ENDPOINT_URL=https://storage.googleapis.com,OBJECT_STORAGE_ADDRESSING_STYLE=path,OBJECT_STORAGE_PREFIX=chiefvoice \
+          --set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,CREDENTIALS_ENCRYPTION_KEY=${_CREDENTIALS_ENCRYPTION_KEY_SECRET}:latest,POST_CALL_ENCRYPTION_KEY=${_POST_CALL_ENCRYPTION_KEY_SECRET}:latest,RECORDINGS_ENCRYPTION_KEY=${_RECORDINGS_ENCRYPTION_KEY_SECRET}:latest,OBJECT_STORAGE_ACCESS_KEY_ID=${_OBJECT_STORAGE_ACCESS_KEY_ID_SECRET}:latest,OBJECT_STORAGE_SECRET_ACCESS_KEY=${_OBJECT_STORAGE_SECRET_ACCESS_KEY_SECRET}:latest \
           --quiet
         gcloud run services add-iam-policy-binding ${_FUNCTION_NAME} \
-          --region=${_REGION} \
+          --region=${_FUNCTION_REGION} \
           --member=serviceAccount:${_TASK_INVOKER_SERVICE_ACCOUNT} \
           --role=roles/run.invoker --quiet
-        gcloud functions describe ${_FUNCTION_NAME} --gen2 --region=${_REGION} \
+        gcloud functions describe ${_FUNCTION_NAME} --gen2 --region=${_FUNCTION_REGION} \
           --format='value(serviceConfig.uri)' > /workspace/post-call-function-url
 
   - id: deploy-vm-and-migrate
