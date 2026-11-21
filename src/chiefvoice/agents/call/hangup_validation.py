@@ -199,10 +199,12 @@ def validate_hangup_request(
                 reason="mandatory_fields_missing",
                 missing_fields=missing,
                 message=(
-                    f"Cannot end call yet: mandatory information has not been collected. "
-                    f"Missing fields: {', '.join(missing)}. "
-                    "Please ask the caller for this information before ending the call. "
-                    "Include the collected values in the collected_data argument when retrying."
+                    f"Hangup was rejected. The only missing required field(s) are: {', '.join(missing)}. "
+                    "Do not repeat the closing, thank-you, or goodbye. Ask one short, direct question "
+                    "to obtain or confirm only these missing item(s). If the caller already stated "
+                    "the information, use that answer without asking again. Then retry end_call once, "
+                    "including every required value in collected_data. If the caller cannot or will "
+                    "not provide it, use the appropriate early-exit reason."
                 ),
             )
 
