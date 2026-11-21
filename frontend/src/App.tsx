@@ -19,7 +19,6 @@ import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded'
 import ScienceRoundedIcon from '@mui/icons-material/ScienceRounded'
 import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded'
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
-import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import DescriptionRoundedIcon from '@mui/icons-material/DescriptionRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
@@ -251,6 +250,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   const [apiCallsPage, setApiCallsPage] = useState(0)
   const [apiCallsPageSize, setApiCallsPageSize] = useState(10)
   const [apiConfigurationOpen, setApiConfigurationOpen] = useState(false)
+  const [promptTemplatesOpen, setPromptTemplatesOpen] = useState(false)
   const [token, setToken] = useState(sessionStorage.getItem('chiefvoice.token') || '')
   const [authReady, setAuthReady] = useState(false)
   const [signingIn, setSigningIn] = useState(false)
@@ -335,6 +335,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
   useEffect(() => {
     setApiCallsPage(0)
     setApiConfigurationOpen(false)
+    setPromptTemplatesOpen(false)
   }, [apiDetailId])
 
   useEffect(() => {
@@ -690,7 +691,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
           {page === 'Agents' && <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openCreateAgentConfig}>Add agent</Button>}
           {page === 'Simulation' && <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={() => window.dispatchEvent(new Event('chiefvoice-open-call-setup'))}>Call setup</Button>}
           {page === 'API' && !apiDetailId && <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openCreateApi}>Create API</Button>}
-          {page === 'API' && apiDetailId && <><Tooltip title="Call history"><IconButton aria-label="Call history" onClick={() => navigate(`/api/${encodeURIComponent(apiDetailId)}/calls`)}><HistoryRoundedIcon /></IconButton></Tooltip>{!isApiHistory && <Tooltip title="API configuration"><IconButton aria-label="API configuration" onClick={() => setApiConfigurationOpen(true)}><InfoOutlinedIcon /></IconButton></Tooltip>}<Tooltip title={isApiHistory ? 'Back to API overview' : 'Back to APIs'}><IconButton aria-label={isApiHistory ? 'Back to API overview' : 'Back to APIs'} onClick={() => navigate(isApiHistory ? `/api/${encodeURIComponent(apiDetailId)}` : pagePaths.API)}><ArrowBackRoundedIcon /></IconButton></Tooltip>{!isApiHistory && apiDetailKey && !apiDetailKey.revoked_at && <Button variant="contained" onClick={() => openEditApi(apiDetailKey)}>Edit API</Button>}</>}
+          {page === 'API' && apiDetailId && <><Button variant="outlined" startIcon={<DescriptionRoundedIcon />} onClick={() => setPromptTemplatesOpen(true)}>Prompt templates</Button>{!isApiHistory && <Tooltip title="API configuration"><IconButton aria-label="API configuration" onClick={() => setApiConfigurationOpen(true)}><InfoOutlinedIcon /></IconButton></Tooltip>}<Tooltip title={isApiHistory ? 'Back to API overview' : 'Back to APIs'}><IconButton aria-label={isApiHistory ? 'Back to API overview' : 'Back to APIs'} onClick={() => navigate(isApiHistory ? `/api/${encodeURIComponent(apiDetailId)}` : pagePaths.API)}><ArrowBackRoundedIcon /></IconButton></Tooltip>{!isApiHistory && apiDetailKey && !apiDetailKey.revoked_at && <Button variant="contained" onClick={() => openEditApi(apiDetailKey)}>Edit API</Button>}</>}
           {page === 'Docs' && <Button component="a" href={`${API_BASE}/docs`} target="_blank" rel="noreferrer" variant="contained">API reference</Button>}
         </div>
       </header>
@@ -705,6 +706,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
         {page === 'Simulation' && <SimulationPage keys={keysQuery.data || []} loading={keysQuery.isLoading} error={keysQuery.error} selectedApiId={simulationApiId} onSelectApi={selectSimulationApi} destination={simulationDestination} onDestinationChange={setSimulationDestination} callerId={simulationCallerId} onCallerIdChange={setSimulationCallerId} profiles={simulationProfilesQuery.data || []} profilesLoading={simulationProfilesQuery.isLoading} profileId={simulationProfileId} onProfileChange={setSimulationProfileId} liveInstructions={simulationLiveInstructions} onLiveInstructionsChange={setSimulationLiveInstructions} liveContext={simulationLiveContext} onLiveContextChange={setSimulationLiveContext} postCallContext={simulationPostCallContext} onPostCallContextChange={setSimulationPostCallContext} outputSchema={simulationOutputSchema} onOutputSchemaChange={setSimulationOutputSchema} tools={simulationTools} onToolsChange={setSimulationTools} timeZone={simulationTimeZone} onTimeZoneChange={setSimulationTimeZone} timeFormat={simulationTimeFormat} onTimeFormatChange={setSimulationTimeFormat} includeLiveContext={simulationIncludeLiveContext} onIncludeLiveContextChange={setSimulationIncludeLiveContext} recording={simulationRecording} onRecordingChange={setSimulationRecording} call={simulationCall} callLoading={simulationCallsQuery.isFetching} onStart={startSimulation} onApplyTemplate={applySimulationTemplate} submitting={simulateCallMutation.isPending} templates={simulationAgentTemplatesQuery.data} templatesLoading={simulationAgentTemplatesQuery.isLoading} callingTemplateId={simulationCallingTemplateId} onCallingTemplateChange={setSimulationCallingTemplateId} postCallTemplateId={simulationPostCallTemplateId} onPostCallTemplateChange={setSimulationPostCallTemplateId} />}
         {page === 'Docs' && <DocsPage />}
       </div>
+      {apiDetailId && <ApiTemplatesSection apiId={apiDetailId} templatesOpen={promptTemplatesOpen} onCloseTemplates={() => setPromptTemplatesOpen(false)} />}
     </main>
 
     <Menu anchorEl={addNumberAnchor} open={Boolean(addNumberAnchor)} onClose={() => setAddNumberAnchor(null)}>
@@ -931,7 +933,6 @@ function ApiDetailsPage({ api: apiKey, agents, loading, error, calls, callsTotal
           <TablePagination component="div" count={callsTotal} page={callsPage} onPageChange={(_, page) => onCallsPageChange(page)} rowsPerPage={callsPageSize} onRowsPerPageChange={event => onCallsPageSizeChange(Number(event.target.value))} rowsPerPageOptions={[10, 25, 50]} labelRowsPerPage="Calls per page" showFirstButton showLastButton />
         </> : <Stack alignItems="center" sx={{ py: 4 }}><Typography variant="body2" color="text.secondary">No calls yet</Typography></Stack>}
       </Card>
-      <ApiTemplatesSection apiId={apiKey.id} />
     </Stack>}
     {apiKey && <Dialog open={configurationOpen} onClose={onCloseConfiguration} maxWidth="md" fullWidth>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}><Stack><span>API configuration</span><Typography variant="body2" color="text.secondary">Phone numbers, agents, and runtime settings</Typography></Stack><Stack direction="row" alignItems="center" gap={1}><Chip size="small" variant="outlined" label={`Key · ${apiKey.key_prefix}`} /><IconButton aria-label="Close API configuration" onClick={onCloseConfiguration}><CloseRoundedIcon /></IconButton></Stack></DialogTitle>
@@ -995,10 +996,11 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
     <Dialog open={expanded} onClose={() => setExpanded(false)} maxWidth="md" fullWidth>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}><Stack><span>Call details</span><Stack direction="row" alignItems="center" gap={0.25}><Typography variant="body2" color="text.secondary">{new Date(call.started_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {new Date(call.started_at).toLocaleDateString()} · {call.session_id}</Typography><Tooltip title={sessionIdCopyFailed ? 'Copy failed' : sessionIdCopied ? 'Copied' : 'Copy session ID'}><IconButton aria-label="Copy session ID" size="small" onClick={copySessionId} color={sessionIdCopyFailed ? 'error' : 'default'}>{sessionIdCopied ? <CheckCircleRoundedIcon fontSize="small" /> : <ContentCopyRoundedIcon fontSize="small" />}</IconButton></Tooltip></Stack></Stack><IconButton aria-label="Close call details" onClick={() => setExpanded(false)}><CloseRoundedIcon /></IconButton></DialogTitle>
       <DialogContent dividers>{detail.isLoading ? <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={22} /></Stack> : detail.error ? <Alert severity="error">{errorText(detail.error)}</Alert> : detail.data && <Stack gap={1.5}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Recording</Typography>{detail.data.recording_available ? <Stack gap={1}>{recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)}>{recording.isFetching ? 'Loading recording…' : 'Load recording'}</Button>}{recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}</Stack> : <Typography variant="body2" color="text.secondary">{detail.data.recording_allowed ? 'No saved recording is available.' : 'Recording was disabled for this call.'}</Typography>}</Card>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Post-call result</Typography><CopyIconButton value={detail.data.post_call_result ? JSON.stringify(detail.data.post_call_result, null, 2) : ''} label="Copy post-call result" disabled={!detail.data.post_call_result} /></Stack>{detail.data.post_call_error && <Alert severity="error" sx={{ mb: 1 }}>{detail.data.post_call_error}</Alert>}{detail.data.post_call_result ? <><Alert severity={typeof detail.data.post_call_result.needs_audio_review !== 'boolean' ? 'info' : detail.data.post_call_result.needs_audio_review ? 'warning' : 'success'} sx={{ mb: 1 }}>{typeof detail.data.post_call_result.needs_audio_review !== 'boolean' ? 'Audio review status unavailable' : detail.data.post_call_result.needs_audio_review ? 'Audio review needed' : 'No audio review needed'}</Alert><pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 280, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre></> : <Typography variant="body2" color="text.secondary">Result appears after post-call processing completes.</Typography>}</Card>
+        <Stack gap={0.75}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Recording</Typography>
+          {detail.data.recording_available ? <Stack gap={1}>{recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)} sx={{ alignSelf: 'flex-start' }}>{recording.isFetching ? 'Loading recording…' : 'Load recording'}</Button>}{recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}</Stack> : <Typography variant="body2" color="text.secondary">{detail.data.recording_allowed ? 'No saved recording is available.' : 'Recording was disabled for this call.'}</Typography>}
         </Stack>
+        <Card variant="outlined" sx={{ p: 1.5 }}><Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Post-call result</Typography><CopyIconButton value={detail.data.post_call_result ? JSON.stringify(detail.data.post_call_result, null, 2) : ''} label="Copy post-call result" disabled={!detail.data.post_call_result} /></Stack>{detail.data.post_call_error && <Alert severity="error" sx={{ mb: 1 }}>{detail.data.post_call_error}</Alert>}{detail.data.post_call_result ? <><Alert severity={typeof detail.data.post_call_result.needs_audio_review !== 'boolean' ? 'info' : detail.data.post_call_result.needs_audio_review ? 'warning' : 'success'} sx={{ mb: 1 }}>{typeof detail.data.post_call_result.needs_audio_review !== 'boolean' ? 'Audio review status unavailable' : detail.data.post_call_result.needs_audio_review ? 'Audio review needed' : 'No audio review needed'}</Alert><pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 280, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre></> : <Typography variant="body2" color="text.secondary">Result appears after post-call processing completes.</Typography>}</Card>
         <Card variant="outlined" sx={{ p: 1.5 }}><Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Transcript</Typography><CopyIconButton value={detail.data.transcript || ''} label="Copy transcript" disabled={!detail.data.transcript} /></Stack>{detail.data.transcript ? <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflowY: 'auto', margin: 0, fontFamily: 'inherit' }}>{detail.data.transcript}</pre> : <Typography variant="body2" color="text.secondary">{detail.data.status === 'completed' ? 'Transcript is unavailable.' : 'Transcript is not ready yet.'}</Typography>}</Card>
       </Stack>}</DialogContent>
       <DialogActions><Button onClick={() => setExpanded(false)}>Close</Button></DialogActions>
@@ -1018,12 +1020,12 @@ function AgentsPage({ agents, loading, error, onEdit, onDelete }: { agents: Agen
   </>
 }
 
-function ApiTemplatesSection({ apiId }: { apiId: string }) {
+function ApiTemplatesSection({ apiId, templatesOpen, onCloseTemplates }: { apiId: string; templatesOpen: boolean; onCloseTemplates: () => void }) {
   const queryClient = useQueryClient()
   const { data, isLoading, error } = useQuery({
     queryKey: ['api-agent-templates', apiId],
     queryFn: () => api.apiAgentTemplates(apiId),
-    enabled: Boolean(apiId),
+    enabled: Boolean(apiId) && templatesOpen,
   })
 
   const [editing, setEditing] = useState<AgentPromptTemplate | null>(null)
@@ -1147,6 +1149,9 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
 
   return (
     <>
+      <Dialog open={templatesOpen} onClose={onCloseTemplates} maxWidth="md" fullWidth>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}>Prompt templates<IconButton aria-label="Close prompt templates" onClick={onCloseTemplates}><CloseRoundedIcon /></IconButton></DialogTitle>
+        <DialogContent dividers>
       <Card className="surface-card" sx={{ p: { xs: 2, md: 3 } }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1.5} sx={{ mb: 2 }}>
           <div>
@@ -1177,6 +1182,8 @@ function ApiTemplatesSection({ apiId }: { apiId: string }) {
           <TablePagination component="div" count={allTemplates.length} page={templatePage} onPageChange={(_, page) => setTemplatePage(page)} rowsPerPage={templatesPerPage} onRowsPerPageChange={event => { setTemplatesPerPage(Number(event.target.value)); setTemplatePage(0) }} rowsPerPageOptions={[6, 12, 24]} labelRowsPerPage="Templates per page" />
         </> : <Stack alignItems="center" textAlign="center" gap={0.75} sx={{ px: 3, py: 4 }}><Typography sx={{ fontWeight: 700 }}>No templates owned by this API</Typography><Typography variant="body2" color="text.secondary">Create a calling or post-call prompt template for this API to get started.</Typography><Button variant="outlined" startIcon={<AddRoundedIcon />} onClick={openNew} sx={{ mt: 1 }}>Create template</Button></Stack>}
       </Card>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(templateDetails)} onClose={() => setTemplateDetails(null)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1 }}><Stack><span>{templateDetails?.name}</span><Typography variant="body2" color="text.secondary">{templateDetails?.kind === 'calling' ? 'Calling' : 'Post-call'} template · revision {templateDetails?.revision}</Typography></Stack><IconButton aria-label="Close template details" onClick={() => setTemplateDetails(null)}><CloseRoundedIcon /></IconButton></DialogTitle>
