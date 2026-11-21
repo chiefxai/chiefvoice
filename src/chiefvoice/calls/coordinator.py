@@ -119,6 +119,14 @@ class CallCoordinator:
             isinstance(command.live_agent_context, dict)
             and command.live_agent_context.get("mandatory_fields")
         )
+        # Per-call requirements are generated for the active attendance stage
+        # (for example, check-out). A reusable template's static completion
+        # contract may belong to another stage, so never combine both contracts.
+        effective_completion_requirements = (
+            None
+            if has_legacy_requirements
+            else command.live_agent_completion_requirements
+        )
         # Context-driven calling workflows provide their completion contract as
         # mandatory_fields. Expose the validated end-call tool for those calls
         # even when no reusable calling template supplied an explicit end_call
@@ -128,7 +136,7 @@ class CallCoordinator:
         auto_hangup_when_complete = auto_hangup_when_complete or has_legacy_requirements
         if (
             auto_hangup_when_complete
-            and not command.live_agent_completion_requirements
+            and not effective_completion_requirements
             and not has_legacy_requirements
         ):
             raise HTTPException(
@@ -175,7 +183,7 @@ class CallCoordinator:
             live_agent_template_revision=command.live_agent_template_revision,
             live_agent_context=command.live_agent_context,
             live_agent_language=command.live_agent_language,
-            live_agent_completion_requirements=command.live_agent_completion_requirements,
+            live_agent_completion_requirements=effective_completion_requirements,
             post_call_context=command.post_call_context,
             post_call_template_id=command.post_call_template_id,
             post_call_template_revision=command.post_call_template_revision,
@@ -202,7 +210,7 @@ class CallCoordinator:
                 "live_agent_template_revision": command.live_agent_template_revision,
                 "live_agent_context": command.live_agent_context,
                 "live_agent_language": command.live_agent_language,
-                "live_agent_completion_requirements": command.live_agent_completion_requirements,
+                "live_agent_completion_requirements": effective_completion_requirements,
                 "post_call_context": command.post_call_context,
                 "post_call_template_id": command.post_call_template_id,
                 "post_call_template_revision": command.post_call_template_revision,
