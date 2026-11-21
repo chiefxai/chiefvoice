@@ -493,6 +493,9 @@ def create_app(
         if settings.database_url and settings.credentials_encryption_key
         else None
     )
+    if isinstance(post_call_dispatcher, SqlPostCallQueue) and call_session_store is not None:
+        # Legacy job recovery requires an authoritative tenant-scoped config read.
+        post_call_dispatcher.workflow_config_resolver = call_session_store.get_session
     vobiz_callback_nonce_store = (
         SqlVobizCallbackNonceStore(settings.database_url)
         if settings.database_url

@@ -22,6 +22,18 @@ class TenantVertexPostCallAgent:
         self.model = model
         self.credentials_json = credentials_json
         self.credentials_path = credentials_path
+        self._agents_by_result_id: dict[int, PostCallAgent] = {}
+
+    def compatibility_fields(self, result: PostCallResult) -> dict:
+        """Forward the attendance legacy projection for this built-in provider."""
+        producer = self._agents_by_result_id.get(id(result))
+        projector = getattr(producer, "compatibility_fields", None)
+        return projector(result) if callable(projector) else {}
+
+    def legacy_compatibility_fields(self, result: PostCallResult, legacy_payload: dict) -> dict:
+        producer = self._agents_by_result_id.pop(id(result), None)
+        projector = getattr(producer, "legacy_compatibility_fields", None)
+        return projector(result, legacy_payload) if callable(projector) else {}
 
     async def process(self, call: CompletedCall) -> PostCallResult:
         project_id = await self.directory.get_ready_project_id(call.tenant_id)
@@ -34,4 +46,6 @@ class TenantVertexPostCallAgent:
             credentials_json=self.credentials_json,
             credentials_path=self.credentials_path,
         )
-        return await agent.process(call)
+        result = await agent.process(call)
+        self._agents_by_result_id[id(result)] = agent
+        return result

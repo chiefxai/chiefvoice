@@ -13,7 +13,8 @@ import traceback
 import urllib.parse
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 from cryptography.fernet import Fernet
 import httpx
@@ -292,6 +293,7 @@ class SqlPostCallQueue:
         max_attempts: int = 4,
         max_delivery_attempts: int = 5,
         recording_store: object | None = None,
+        workflow_config_resolver: Callable[[str, str], Awaitable[Any | None]] | None = None,
     ):
         self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
@@ -301,6 +303,7 @@ class SqlPostCallQueue:
         self.max_attempts = max_attempts
         self.max_delivery_attempts = max_delivery_attempts
         self.recording_store = recording_store
+        self.workflow_config_resolver = workflow_config_resolver
         self._last_metrics_refresh = 0.0
 
     async def initialize(self) -> None:
@@ -825,6 +828,36 @@ class SqlPostCallQueue:
                 failure_webhook_url=payload.get("failure_webhook_url"),
                 failure_webhook_payload=payload.get("failure_webhook_payload"),
             )
+            # Legacy job payloads may predate workflow_id. Recover it only from
+            # the tenant-scoped, encrypted call-session configuration. Context
+            # values in the queue payload are never used to select a workflow.
+            workflow_config_resolver = getattr(self, "workflow_config_resolver", None)
+            if completed_call.workflow_id is None and callable(workflow_config_resolver):
+                try:
+                    stored_session = await workflow_config_resolver(
+                        job["tenant_id"], job["session_id"]
+                    )
+                except Exception as exc:
+                    stored_session = None
+                    logger.warning(
+                        "post_call_workflow_config_recovery_failed",
+                        extra={
+                            "session_id": job["session_id"],
+                            "tenant_id": job["tenant_id"],
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                if (
+                    stored_session is not None
+                    and stored_session.tenant_id == job["tenant_id"]
+                    and stored_session.session_id == job["session_id"]
+                    and stored_session.post_call_workflow_id
+                ):
+                    completed_call = replace(
+                        completed_call,
+                        workflow_id=stored_session.post_call_workflow_id,
+                        workflow_context=stored_session.post_call_workflow_context,
+                    )
             if completed_call.recording_uri and self.recording_store is not None:
                 read_wav = getattr(self.recording_store, "read_wav", None)
                 if callable(read_wav):
@@ -905,6 +938,22 @@ class SqlPostCallQueue:
                     # result, transcript status, or workflow extension persisting.
                     logger.warning(
                         "post_call_compatibility_projection_failed",
+                        extra={
+                            "session_id": completed_call.session_id,
+                            "tenant_id": completed_call.tenant_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+            legacy_projection = getattr(agent, "legacy_compatibility_fields", None)
+            if not completed_call.workflow_id and callable(legacy_projection):
+                try:
+                    legacy_fields = legacy_projection(result, payload)
+                    if isinstance(legacy_fields, dict):
+                        for key, value in legacy_fields.items():
+                            result_payload.setdefault(key, value)
+                except Exception as exc:
+                    logger.warning(
+                        "post_call_legacy_projection_failed",
                         extra={
                             "session_id": completed_call.session_id,
                             "tenant_id": completed_call.tenant_id,

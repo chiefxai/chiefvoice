@@ -40,6 +40,25 @@ class AttendanceWorkflow:
             return {"attendance_validation": failed_attendance_validation()}
         return {}
 
+    def legacy_manual_review_fields(self, _result: PostCallResult) -> dict[str, Any]:
+        """Flag recognized legacy attendance jobs without authoritative workflow config."""
+        validation = failed_attendance_validation()
+        validation["validation_errors"] = ["workflow_identity_unverified"]
+        validation["outcome"] = "unclear"
+        return {"attendance_validation": validation}
+
+    def recover_legacy_compatibility_fields(
+        self, result: PostCallResult, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Recognize only the historical attendance job payload signature."""
+        if (
+            "workflow_id" in payload
+            or "workflow_context" in payload
+            or not isinstance(payload.get("expected_assignment"), dict)
+        ):
+            return {}
+        return self.legacy_manual_review_fields(result)
+
     async def process(self, call: CompletedCall, result: PostCallResult) -> dict[str, Any]:
         if result.transcript_status == "no_data" or not (call.transcript or "").strip():
             validation = validate_attendance(

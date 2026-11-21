@@ -14,6 +14,7 @@ from chiefvoice.agents.post_call.base import PostCallAgent
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
 from chiefvoice.agents.post_call.providers.api_key_vertex import ApiKeyVertexPostCallAgent
 from chiefvoice.agents.post_call.queue import SqlPostCallQueue
+from chiefvoice.calls.store import SqlCallSessionStore
 from chiefvoice.identity.api_keys import SqlApiKeyDirectory
 from chiefvoice.cloud_projects.post_call import TenantVertexPostCallAgent
 from chiefvoice.cloud_projects.store import SqlTenantVertexProjectDirectory
@@ -68,6 +69,13 @@ async def _process(event: Mapping[str, object]) -> dict[str, object]:
         post_call_key,
         recording_store=create_recording_store(),
     )
+    call_session_store = (
+        SqlCallSessionStore(database_url, settings.credentials_encryption_key)
+        if settings.credentials_encryption_key
+        else None
+    )
+    if call_session_store is not None:
+        queue.workflow_config_resolver = call_session_store.get_session
     await queue.initialize()
     directory: SqlTenantVertexProjectDirectory | None = None
     api_key_directory: SqlApiKeyDirectory | None = None
@@ -109,6 +117,8 @@ async def _process(event: Mapping[str, object]) -> dict[str, object]:
             await directory.close()
         if api_key_directory is not None:
             await api_key_directory.close()
+        if call_session_store is not None:
+            await call_session_store.close()
         await queue.close()
 
 

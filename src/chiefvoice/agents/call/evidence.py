@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from chiefvoice.sessions import AcceptedSession
@@ -17,7 +18,9 @@ def capture_tool_execution(
     events.append(
         {
             "tool_name": tool_name,
-            "arguments": dict(arguments),
+            # Preserve the event as it was observed even if a provider reuses
+            # and later mutates nested tool argument objects.
+            "arguments": deepcopy(arguments),
             "caller_transcript_at_execution": session.metadata.get("post_call_transcript", ""),
         }
     )

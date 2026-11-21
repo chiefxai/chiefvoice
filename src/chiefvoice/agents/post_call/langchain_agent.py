@@ -530,6 +530,19 @@ class LangChainPostCallAgent(PostCallAgent):
             raise TypeError("workflow compatibility fields must be an object")
         return projected
 
+    def legacy_compatibility_fields(
+        self, result: PostCallResult, legacy_payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Allow registered integrations to safely project recognized legacy jobs."""
+        for workflow_id in self.workflow_registry.ids():
+            workflow = self.workflow_registry.get(workflow_id)
+            projector = getattr(workflow, "recover_legacy_compatibility_fields", None)
+            if callable(projector):
+                projected = projector(result, legacy_payload)
+                if isinstance(projected, dict) and projected:
+                    return projected
+        return {}
+
     async def _run_workflow(
         self, call: CompletedCall, result: PostCallResult
     ) -> dict[str, Any] | None:
@@ -560,7 +573,9 @@ class LangChainPostCallAgent(PostCallAgent):
                 raise ValueError("workflow result exceeds its size limit")
             return workflow_result_envelope(workflow_id, status="completed", data=data)
         except Exception as exc:
-            logger.exception(
+            # Provider exceptions may contain prompt/transcript fragments,
+            # credentials, or request bodies. Log only controlled metadata.
+            logger.error(
                 "post_call_workflow_failed",
                 extra={
                     "session_id": call.session_id,

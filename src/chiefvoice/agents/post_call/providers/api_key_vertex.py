@@ -17,6 +17,24 @@ class ApiKeyVertexPostCallAgent:
         self.directory = directory
         self.model = model
         self.fallback = fallback
+        self._agents_by_result_id: dict[int, PostCallAgent] = {}
+
+    def compatibility_fields(self, result: PostCallResult) -> dict:
+        """Forward registered workflow compatibility projections."""
+        producer = self._agents_by_result_id.get(id(result), self.fallback)
+        projector = getattr(producer, "compatibility_fields", None)
+        if callable(projector):
+            return projector(result)
+        return {}
+
+    def legacy_compatibility_fields(
+        self, result: PostCallResult, legacy_payload: dict
+    ) -> dict:
+        producer = self._agents_by_result_id.pop(id(result), self.fallback)
+        projector = getattr(producer, "legacy_compatibility_fields", None)
+        if callable(projector):
+            return projector(result, legacy_payload)
+        return {}
 
     async def process(self, call: CompletedCall) -> PostCallResult:
         if call.api_key_id is None:
@@ -38,7 +56,9 @@ class ApiKeyVertexPostCallAgent:
                 model=model,
                 credentials_json=config.post_call_credentials_json or config.credentials_json,
             )
-            return await agent.process(call)
+            result = await agent.process(call)
+            self._agents_by_result_id[id(result)] = agent
+            return result
         except Exception as exc:
             status = getattr(exc, "status_code", None)
             if status is None:
