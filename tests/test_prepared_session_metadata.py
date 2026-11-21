@@ -11,7 +11,11 @@ def test_prepared_and_live_sessions_share_runtime_metadata():
         channel="phone",
         provider="vobiz",
         direction=Direction.OUTBOUND,
-        metadata={"voice_language": "ta-IN", "caller_turn_count": 0},
+        metadata={
+            "voice_language": "ta-IN",
+            "caller_turn_count": 0,
+            "collected_data": {"caregiver_identity": "குமார்"},
+        },
     )
     live_session = AcceptedSession(
         channel="phone",
@@ -33,3 +37,5 @@ def test_prepared_and_live_sessions_share_runtime_metadata():
     assert preflight_session.metadata["caller_turn_count"] == 3
     assert preflight_session.metadata["hang_up_call"] is hangup_callback
     assert preflight_session.metadata["voice_language"] == "ta-IN"
+    live_session.metadata["collected_data"]["patient_identity"] = "மீனா"
+    assert preflight_session.metadata["collected_data"]["patient_identity"] == "மீனா"

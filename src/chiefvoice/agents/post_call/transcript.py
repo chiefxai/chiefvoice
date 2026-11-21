@@ -71,6 +71,14 @@ class TranscriptCollector(FrameProcessor):
             remaining = MAX_TRANSCRIPT_CHARACTERS - self._buffer.characters
             text = text.strip()[:remaining]
             if text:
+                if speaker == "Caller":
+                    logger.info(
+                        "caller_response_received",
+                        extra={
+                            "session_id": self._session.session_id,
+                            "characters": len(text),
+                        },
+                    )
                 self._buffer.segments.append(f"{speaker}: {text}")
                 self._buffer.characters += len(text)
                 if len(self._buffer.segments) == 1:

@@ -1,6 +1,6 @@
+import asyncio
 import json
 import logging
-import asyncio
 import time
 from collections.abc import Sequence
 from types import SimpleNamespace
@@ -17,6 +17,14 @@ from chiefvoice.agents.call.completion import (
     completion_phrase_for_language,
 )
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
+from chiefvoice.agents.call.identity_state import (
+    IDENTITY_CONFIDENCE_THRESHOLD,
+    IDENTITY_FIELDS,
+    collected_data_lock,
+    initialize_collected_data,
+    required_identity_fields,
+    save_caller_identity,
+)
 from chiefvoice.agents.call.prepared_session import PreparedRealtimeSessionDirectory
 from chiefvoice.agents.call.providers.base import RealtimeAgentProvider
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
@@ -191,7 +199,10 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
         from chiefvoice.agents.call.audio_diagnostics import diagnostics_for_session
         from chiefvoice.agents.call.gemini_reliability import reliable_vertex_service_class
-        from chiefvoice.agents.call.hangup_validation import validate_hangup_request
+        from chiefvoice.agents.call.hangup_validation import validate_hangup_request_async
+
+        initialize_collected_data(session)
+        collected_data_lock(session)
 
         service_type = "vertex"
         model = self.model
@@ -326,6 +337,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
         tools = None
         if session.auto_hangup_when_complete:
+            identity_requirements = sorted(required_identity_fields(session))
             effective_language = language_tag or session.metadata.get("voice_language")
             completion_phrase = completion_phrase_for_language(effective_language)
             completion_marker = completion_marker_for_language(effective_language)
@@ -365,12 +377,62 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 "the final audio has drained. If an end_call request is rejected for missing fields, "
                 "follow the tool response: do not repeat the closing, thank-you, or goodbye; ask only "
                 "for the missing information, then retry once with all values in collected_data. "
-                "If the caller already supplied a missing value, include it without asking again. If the "
+                "If the caller already supplied a missing value, include it without asking again. "
+                "If the "
                 "caller clearly declines, cannot provide a requested item, or asks to end the "
                 "call, use end_call with the appropriate early-exit reason. Do not merely "
                 "say that you will hang up, and never claim the call ended unless the platform "
                 "disconnects it."
             )
+            if identity_requirements:
+                system_instruction += (
+                    " Identity collection is available through the record_caller_identity tool. "
+                    "Whenever the caller explicitly provides a caregiver or patient name in any "
+                    "configured language, call that tool with the correct role, the name in the "
+                    "original script, explicitly_stated=true, and confidence at least 0.8 only "
+                    "when the role and name are clear. Do not translate or transliterate names. "
+                    "Never copy a caregiver name to the patient field or the reverse without "
+                    "explicit evidence. Treat the tool response as the authoritative list of "
+                    "saved and missing identity fields. Reuse saved identities; ask only for a "
+                    "required identity listed as missing. If the caller repeats a saved name, "
+                    "acknowledge it without asking again. A correction explicitly stated by the "
+                    "caller may update that same role's value."
+                )
+
+            async def record_caller_identity(params: FunctionCallParams) -> None:
+                arguments = params.arguments if isinstance(params.arguments, dict) else {}
+                identity_type = arguments.get("identity_type")
+                name = arguments.get("name")
+                confidence = arguments.get("confidence")
+                explicitly_stated = arguments.get("explicitly_stated") is True
+                try:
+                    result = await save_caller_identity(
+                        session,
+                        identity_type=identity_type if isinstance(identity_type, str) else "",
+                        name=name if isinstance(name, str) else "",
+                        confidence=(
+                            confidence
+                            if isinstance(confidence, (int, float))
+                            and not isinstance(confidence, bool)
+                            else 0.0
+                        ),
+                        explicitly_stated=explicitly_stated,
+                    )
+                    await params.result_callback(result)
+                except Exception as exc:
+                    logger.exception(
+                        "caller_identity_session_data_update_failed",
+                        extra={
+                            "session_id": session.session_id,
+                            "identity_field": identity_type
+                            if isinstance(identity_type, str) and identity_type in IDENTITY_FIELDS
+                            else "invalid",
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    await params.result_callback(
+                        {"status": "error", "message": "Identity could not be saved."}
+                    )
 
             async def hang_up_call(params: FunctionCallParams) -> None:
                 arguments = params.arguments if isinstance(params.arguments, dict) else {}
@@ -439,7 +501,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                         ),
                     })
                     return
-                validation = validate_hangup_request(
+                validation = await validate_hangup_request_async(
                     session, arguments, diagnostics=diagnostics_for_session(session)
                 )
                 if not validation.allowed:
@@ -457,7 +519,8 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                         "error": validation.error or "validation_failed",
                         "reason": validation.reason or "rejected",
                         "missing_fields": validation.missing_fields or [],
-                        "message": validation.message or "Hangup request rejected by server validation.",
+                        "message": validation.message
+                        or "Hangup request rejected by server validation.",
                     })
                     return
 
@@ -529,7 +592,45 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 "collected and the caller has confirmed the summary, or if the caller clearly "
                 "declines or requests to end the call."
             )
-            tools = ToolsSchema(standard_tools=[
+            standard_tools = [
+                FunctionSchema(
+                    name="record_caller_identity",
+                    description=(
+                        "Save a caller-provided caregiver or patient name as soon as its role "
+                        "and wording are clear. Supports natural speech in Tamil, English, and "
+                        "other configured languages. Preserve the name exactly in its original "
+                        "script. Do not call for guesses or unclear role/name associations."
+                    ),
+                    properties={
+                        "identity_type": {
+                            "type": "string",
+                            "enum": ["caregiver_identity", "patient_identity"],
+                            "description": "Which person's name the caller explicitly stated.",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "The caller-provided name, preserving original script.",
+                        },
+                        "explicitly_stated": {
+                            "type": "boolean",
+                            "description": (
+                                "True only when caller explicitly provided this name and role."
+                            ),
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": IDENTITY_CONFIDENCE_THRESHOLD,
+                            "maximum": 1,
+                            "description": (
+                                "Confidence that both the name and its identity role are correct."
+                            ),
+                        },
+                    },
+                    required=["identity_type", "name", "explicitly_stated", "confidence"],
+                    handler=record_caller_identity,
+                )
+            ]
+            standard_tools.extend([
                 FunctionSchema(
                     name="end_call",
                     description=hangup_description,
@@ -548,6 +649,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     handler=hang_up_call,
                 ),
             ])
+            tools = ToolsSchema(standard_tools=standard_tools)
         if service_type == "google_ai":
             reliable_service = reliable_vertex_service_class(
                 GeminiLiveLLMService,

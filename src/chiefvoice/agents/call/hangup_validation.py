@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from chiefvoice.agents.call.audio_diagnostics import CallAudioDiagnostics
+from chiefvoice.agents.call.identity_state import IDENTITY_FIELDS, collected_data_lock
 from chiefvoice.sessions import AcceptedSession
 
 logger = logging.getLogger(__name__)
@@ -159,26 +160,29 @@ def validate_hangup_request(
     # 3. Check mandatory information if this is a completion exit
     mandatory_fields = extract_mandatory_fields(session)
     completion_requirements = session.live_agent_completion_requirements
-    if (mandatory_fields or completion_requirements) and not is_early_exit:
-        collected: dict[str, Any] = {}
-        # Merge existing session-collected data
-        if isinstance(session.metadata.get("collected_data"), dict):
-            collected.update(session.metadata["collected_data"])
-        # Merge tool call collected data
-        tool_collected = args.get("collected_data")
-        if isinstance(tool_collected, dict):
-            collected.update(tool_collected)
-        # Also check top-level arguments
-        for k, v in args.items():
-            if k not in {"reason", "summary", "notes", "collected_data"}:
-                collected[k] = v
+    collected: dict[str, Any] = {}
+    if isinstance(session.metadata.get("collected_data"), dict):
+        collected.update(session.metadata["collected_data"])
+    tool_collected = args.get("collected_data")
+    if isinstance(tool_collected, dict):
+        _merge_collected_values(collected, tool_collected)
+    for k, v in args.items():
+        if k not in {"reason", "summary", "notes", "collected_data"}:
+            _merge_collected_values(collected, {k: v})
+    if collected:
+        state = session.metadata.get("collected_data")
+        if not isinstance(state, dict):
+            state = {}
+            session.metadata["collected_data"] = state
+        state.update(collected)
 
+    if (mandatory_fields or completion_requirements) and not is_early_exit:
         completion_fields, unmatched_outcomes = _required_completion_fields(session, collected)
         required_fields = mandatory_fields | completion_fields
         missing = [
             field
             for field in sorted(required_fields)
-            if field not in collected or collected[field] is None or collected[field] == ""
+            if not _is_valid_field_value(field, collected.get(field))
         ]
         if missing:
             if diagnostics is not None:
@@ -232,9 +236,6 @@ def validate_hangup_request(
                 ),
             )
 
-        # Update verified collected data back into metadata
-        session.metadata.setdefault("collected_data", {}).update(collected)
-
     # 4. Custom completion validator callback
     validator_cb = session.metadata.get("conversation_completion_validator")
     if callable(validator_cb):
@@ -259,9 +260,52 @@ def validate_hangup_request(
     # Validation passed
     if diagnostics is not None:
         diagnostics.record_conversation_event("hangup_validation_passed")
+    logger.info(
+        "call_agent_hangup_validation_passed",
+        extra={
+            "session_id": session.session_id,
+            "provider": session.provider,
+            "collected_fields": sorted(session.metadata.get("collected_data", {}).keys())
+            if isinstance(session.metadata.get("collected_data"), dict)
+            else [],
+        },
+    )
     session.metadata["call_terminating"] = True
     return HangupValidationResult(
         allowed=True,
         status="approved",
         message="Conversation completion validated successfully.",
     )
+
+
+def _is_nonempty(value: Any) -> bool:
+    return value is not None and not (isinstance(value, str) and not value.strip())
+
+
+def _is_valid_field_value(field: str, value: Any) -> bool:
+    if field in IDENTITY_FIELDS:
+        return isinstance(value, str) and bool(value.strip())
+    return _is_nonempty(value)
+
+
+def _merge_collected_values(target: dict[str, Any], values: dict[str, Any]) -> None:
+    for key, value in values.items():
+        if not _is_valid_field_value(key, value):
+            continue
+        # End-call arguments are model-generated and have no extraction
+        # confidence marker. A saved identity may only be changed through the
+        # explicit, confidence-gated identity-capture tool.
+        if key in IDENTITY_FIELDS and _is_valid_field_value(key, target.get(key)):
+            continue
+        target[key] = value
+
+
+async def validate_hangup_request_async(
+    session: AcceptedSession,
+    arguments: dict[str, Any] | None = None,
+    *,
+    diagnostics: CallAudioDiagnostics | None = None,
+) -> HangupValidationResult:
+    """Serialize validation with live extraction against the shared session data."""
+    async with collected_data_lock(session):
+        return validate_hangup_request(session, arguments, diagnostics=diagnostics)

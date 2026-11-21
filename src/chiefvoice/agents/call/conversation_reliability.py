@@ -26,7 +26,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from chiefvoice.agents.call.audio_diagnostics import CallAudioDiagnostics
-from chiefvoice.agents.call.hangup_validation import validate_hangup_request
+from chiefvoice.agents.call.hangup_validation import validate_hangup_request_async
 from chiefvoice.core.config import settings
 from chiefvoice.sessions import AcceptedSession
 
@@ -319,9 +319,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             return
 
         if canonicalize(marker) in response_text:
-            self._diagnostics.record_conversation_event(
-                "auto_hangup_completion_phrase_rejected"
-            )
+            self._diagnostics.record_conversation_event("auto_hangup_completion_phrase_rejected")
             logger.info(
                 "call_auto_hangup_completion_phrase_ignored",
                 extra={**self._log_context(), "reason": "goodbye_not_final_text"},
@@ -338,7 +336,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             return
         self._metadata["auto_hangup_completion_phrase_detected"] = True
         self._diagnostics.record_conversation_event("auto_hangup_completion_phrase_detected")
-        validation = validate_hangup_request(
+        validation = await validate_hangup_request_async(
             self._session,
             {
                 "reason": "completed",
@@ -347,9 +345,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             diagnostics=self._diagnostics,
         )
         if not validation.allowed:
-            self._diagnostics.record_conversation_event(
-                "auto_hangup_completion_phrase_rejected"
-            )
+            self._diagnostics.record_conversation_event("auto_hangup_completion_phrase_rejected")
             logger.warning(
                 "call_auto_hangup_completion_phrase_rejected",
                 extra={
@@ -479,7 +475,9 @@ class GeminiConversationWatchdog(FrameProcessor):
             and not self._gemini_is_generating
             and not self._bot_audio_playing
         ):
-            self._arm_caller_inactivity_timer()
+            self._turn_state = ConversationTurnState.AWAITING_CALLER
+            if self._watch_task is None:
+                self._arm_caller_inactivity_timer()
 
     def _timeout_for_stage(self, stage: int) -> float:
         if stage == 0:
@@ -498,6 +496,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             or self._caller_is_speaking
             or self._gemini_is_generating
             or self._bot_audio_playing
+            or self._watch_task is not None
         ):
             return
         stage = self._inactivity_stage
@@ -620,10 +619,7 @@ class GeminiConversationWatchdog(FrameProcessor):
                 or self._caller_is_speaking
                 or self._bot_audio_playing
                 or self._response_audio_seen
-                or (
-                    self._gemini_is_generating
-                    and trigger != "generation_started_without_audio"
-                )
+                or (self._gemini_is_generating and trigger != "generation_started_without_audio")
             ):
                 return
 
@@ -656,8 +652,7 @@ class GeminiConversationWatchdog(FrameProcessor):
                     or self._bot_audio_playing
                     or self._recovery_attempted_turn == turn_id
                     or (
-                        self._gemini_is_generating
-                        and trigger != "generation_started_without_audio"
+                        self._gemini_is_generating and trigger != "generation_started_without_audio"
                     )
                 ):
                     return
@@ -684,9 +679,7 @@ class GeminiConversationWatchdog(FrameProcessor):
                 try:
                     recovered = await self._service.recover_unanswered_turn()
                     if recovered:
-                        logger.info(
-                            "gemini_watchdog_recovery_requested", extra=self._log_context()
-                        )
+                        logger.info("gemini_watchdog_recovery_requested", extra=self._log_context())
                         await asyncio.sleep(self._recovery_grace)
                 finally:
                     self._metadata.pop("gemini_watchdog_recovery_active", None)
@@ -715,9 +708,7 @@ class GeminiConversationWatchdog(FrameProcessor):
                 # the watchdog while it is performing the fallback itself.
                 if self._watch_task is asyncio.current_task():
                     self._watch_task = None
-                logger.warning(
-                    "gemini_watchdog_fallback_started", extra=self._log_context()
-                )
+                logger.warning("gemini_watchdog_fallback_started", extra=self._log_context())
                 fallback_completed = await fallback()
                 logger.info(
                     "gemini_watchdog_fallback_finished",
@@ -727,9 +718,7 @@ class GeminiConversationWatchdog(FrameProcessor):
                     },
                 )
             else:
-                logger.error(
-                    "gemini_watchdog_fallback_unavailable", extra=self._log_context()
-                )
+                logger.error("gemini_watchdog_fallback_unavailable", extra=self._log_context())
         except asyncio.CancelledError:
             logger.info("gemini_response_watchdog_task_cancelled", extra=self._log_context())
             raise

@@ -132,7 +132,7 @@ def test_extract_mandatory_fields():
         metadata={"mandatory_fields": ["phone_verified"]},
     )
     fields = extract_mandatory_fields(session)
-    assert fields == {"booking_id", "email", "phone_verified"}
+    assert fields == {"phone_verified"}
 
 
 def test_hangup_rejected_when_no_caller_interaction():
@@ -182,10 +182,7 @@ def test_hangup_rejected_when_mandatory_information_missing():
         channel="phone",
         provider="vobiz",
         direction=Direction.OUTBOUND,
-        post_call_output_schema={
-            "type": "object",
-            "required": ["full_name", "account_number"],
-        },
+        live_agent_completion_requirements={"always": ["full_name", "account_number"]},
         metadata={"caller_turn_count": 1},
     )
     diagnostics = CallAudioDiagnostics(session)
@@ -207,10 +204,7 @@ def test_hangup_approved_when_all_mandatory_information_collected():
         channel="phone",
         provider="vobiz",
         direction=Direction.OUTBOUND,
-        post_call_output_schema={
-            "type": "object",
-            "required": ["full_name", "account_number"],
-        },
+        live_agent_completion_requirements={"always": ["full_name", "account_number"]},
         metadata={"caller_turn_count": 1},
     )
     diagnostics = CallAudioDiagnostics(session)
@@ -279,7 +273,7 @@ async def test_vertex_provider_hangup_tool_registration_and_execution(monkeypatc
     # Verify tool schema definition
     tools_schema = service._service_tools()
     assert tools_schema is not None
-    tool = tools_schema.standard_tools[0]
+    tool = next(tool for tool in tools_schema.standard_tools if tool.name == "hang_up_call")
     assert tool.name == "hang_up_call"
     assert "reason" in tool.properties
     assert "collected_data" in tool.properties
@@ -314,7 +308,7 @@ async def test_vertex_provider_hangup_tool_rejects_premature_call(monkeypatch):
         provider="vobiz",
         direction=Direction.OUTBOUND,
         auto_hangup_when_complete=True,
-        post_call_output_schema={"required": ["mandatory_info"]},
+        live_agent_context={"mandatory_fields": ["mandatory_info"]},
         metadata={"caller_turn_count": 1},
     )
     hangups = []
@@ -329,7 +323,11 @@ async def test_vertex_provider_hangup_tool_rejects_premature_call(monkeypatch):
     )
     processors = await provider.create_processors(session)
     service = processors[0]
-    tool = service._service_tools().standard_tools[0]
+    tool = next(
+        tool
+        for tool in service._service_tools().standard_tools
+        if tool.name == "hang_up_call"
+    )
 
     params = FunctionCallParams(
         function_name="hang_up_call",
@@ -490,15 +488,16 @@ async def test_watchdog_and_inactivity_mutual_exclusion():
     # 2. Bot starts generating -> cancels watchdog
     await watchdog.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
     assert watchdog._turn_state == ConversationTurnState.BOT_GENERATING
-    assert watchdog._watch_task is None
+    assert watchdog._watch_task is not None
+    assert "generation_watchdog" in watchdog._watch_task.get_name()
     assert watchdog._caller_inactivity_task is None
 
     # 3. Bot finishes generation and playback -> waiting for caller
     await watchdog.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
     await watchdog.process_frame(BotStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     assert watchdog._turn_state == ConversationTurnState.AWAITING_CALLER
-    assert watchdog._watch_task is None
-    assert watchdog._caller_inactivity_task is not None
+    assert watchdog._watch_task is not None
+    assert watchdog._caller_inactivity_task is None
 
     await watchdog.cleanup()
 

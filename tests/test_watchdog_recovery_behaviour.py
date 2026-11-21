@@ -225,8 +225,8 @@ async def test_gemini_delayed_response_triggers_recovery():
 
 
 @pytest.mark.asyncio
-async def test_gemini_recovery_never_terminates_active_call():
-    """Recovery failure or completion must NEVER terminate or hang up the telephone call."""
+async def test_gemini_recovery_failure_plays_fallback_and_requests_normal_hangup():
+    """A silent failed recovery uses the audio-drain fallback hangup path."""
     svc = MockGeminiReliableService(recovery_outcome=False)
     hangups = []
 
@@ -251,9 +251,10 @@ async def test_gemini_recovery_never_terminates_active_call():
     await asyncio.sleep(0.04)
 
     assert svc.recoveries == 1
-    # Recovery must NEVER terminate the call
+    # The fallback is responsible for delivering its notice before the normal
+    # provider hangup path; it must not call the test's direct hangup callback.
     assert len(hangups) == 0
-    assert svc.hangups == 0
+    assert svc.hangups == 1
     assert watchdog._call_state == CallLifecycleState.ACTIVE
     assert not session.metadata.get("call_terminating")
     assert not session.metadata.get("call_terminated")
@@ -272,9 +273,8 @@ def test_premature_gemini_hangup_rejected_with_descriptive_error():
         channel="phone",
         provider="vobiz",
         direction=Direction.OUTBOUND,
-        post_call_output_schema={
-            "type": "object",
-            "required": ["checkout_time", "employee_id"],
+        live_agent_completion_requirements={
+            "always": ["checkout_time", "employee_id"]
         },
         metadata={"caller_turn_count": 1},
     )
@@ -299,9 +299,8 @@ def test_completed_conversation_terminates_normally():
         channel="phone",
         provider="vobiz",
         direction=Direction.OUTBOUND,
-        post_call_output_schema={
-            "type": "object",
-            "required": ["checkout_time", "employee_id"],
+        live_agent_completion_requirements={
+            "always": ["checkout_time", "employee_id"]
         },
         metadata={"caller_turn_count": 2},
     )
