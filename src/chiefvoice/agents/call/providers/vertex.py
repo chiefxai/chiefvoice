@@ -401,6 +401,14 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             async def record_caller_identity(params: FunctionCallParams) -> None:
                 arguments = params.arguments if isinstance(params.arguments, dict) else {}
+                evidence = session.metadata.setdefault("identity_tool_events", [])
+                if isinstance(evidence, list):
+                    evidence.append({
+                        "arguments": dict(arguments),
+                        "caller_transcript_at_execution": session.metadata.get(
+                            "post_call_transcript", ""
+                        ),
+                    })
                 identity_type = arguments.get("identity_type")
                 name = arguments.get("name")
                 confidence = arguments.get("confidence")
@@ -436,6 +444,11 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             async def hang_up_call(params: FunctionCallParams) -> None:
                 arguments = params.arguments if isinstance(params.arguments, dict) else {}
+                session.metadata["live_call_claim"] = {
+                    "reason": arguments.get("reason"),
+                    "summary": arguments.get("summary"),
+                    "collected_data": arguments.get("collected_data"),
+                }
                 reason = str(arguments.get("reason", "completed")).strip().lower()
                 early_exit_reasons = {
                     "caller_declined",

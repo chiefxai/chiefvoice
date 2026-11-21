@@ -15,6 +15,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from chiefvoice.accounts.store import Base
 from chiefvoice.agents.post_call.base import CompletedCall
+from chiefvoice.agents.post_call.attendance_validation import expected_attendance_assignment
 from chiefvoice.agents.post_call.queue import PostCallJobRow
 from chiefvoice.core.db_schema import verify_schema_revision
 from chiefvoice.data_lifecycle.retention import RetentionClass
@@ -406,7 +407,13 @@ class SqlCallSessionStore:
                 )
                 recording_uri = session.metadata.get("recording_uri")
                 has_recording = isinstance(recording_uri, str) and bool(recording_uri.strip())
-                if not transcript.strip() and not has_recording:
+                expected_assignment = expected_attendance_assignment(session.live_agent_context)
+                attendance_context = f"{session.post_call_context or ''} {session.live_agent_context or ''}".casefold()
+                attendance_task = bool(expected_assignment) or any(
+                    term in attendance_context
+                    for term in ("check-in", "check in", "check-out", "check out", "caregiver", "patient address")
+                )
+                if not transcript.strip() and not has_recording and not attendance_task:
                     # This is the crash-recovery path for calls that ended without
                     # either transcript text or a recording. There is no safe work
                     # item to enqueue, so terminalize the reconciliation marker to
@@ -435,6 +442,11 @@ class SqlCallSessionStore:
                             if session.include_live_agent_context
                             else None
                         ),
+                        live_call_claim=session.metadata.get("live_call_claim"),
+                        identity_tool_events=tuple(
+                            session.metadata.get("identity_tool_events", ())
+                        ),
+                        expected_assignment=expected_attendance_assignment(session.live_agent_context),
                         failure_webhook_url=session.post_call_failure_webhook_url,
                         failure_webhook_payload=session.post_call_failure_webhook_payload,
                         recording_uri=recording_uri if has_recording else None,
@@ -685,6 +697,8 @@ class SqlCallSessionStore:
             "max_call_seconds": session.max_call_seconds,
             "recording_allowed": session.recording_allowed,
             "recording_uri": session.metadata.get("recording_uri"),
+            "live_call_claim": session.metadata.get("live_call_claim"),
+            "identity_tool_events": session.metadata.get("identity_tool_events", []),
             "started_at": session.started_at.isoformat(),
         }
         encrypted = self._fernet.encrypt(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -727,4 +741,8 @@ class SqlCallSessionStore:
         )
         if payload.get("recording_uri"):
             session.metadata["recording_uri"] = payload["recording_uri"]
+        if payload.get("live_call_claim") is not None:
+            session.metadata["live_call_claim"] = payload["live_call_claim"]
+        if isinstance(payload.get("identity_tool_events"), list):
+            session.metadata["identity_tool_events"] = payload["identity_tool_events"]
         return session

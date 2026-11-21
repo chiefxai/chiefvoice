@@ -25,16 +25,15 @@ def collected_data_lock(session: AcceptedSession) -> asyncio.Lock:
 
 
 def initialize_collected_data(session: AcceptedSession) -> dict[str, Any]:
-    """Ensure one mutable state dictionary and seed explicitly supplied identities."""
+    """Ensure one mutable dictionary for values actually captured during the call.
+
+    Assignment context is an expectation, not caller evidence, so it must never
+    initialize caller-collected identity fields.
+    """
     collected = session.metadata.get("collected_data")
     if not isinstance(collected, dict):
         collected = {}
         session.metadata["collected_data"] = collected
-    if isinstance(session.live_agent_context, dict):
-        for field in IDENTITY_FIELDS:
-            value = session.live_agent_context.get(field)
-            if _valid_value(value) and not _valid_value(collected.get(field)):
-                collected[field] = value.strip() if isinstance(value, str) else value
     return collected
 
 

@@ -11,6 +11,7 @@ from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.post_call.base import CompletedCall
+from chiefvoice.agents.post_call.attendance_validation import expected_attendance_assignment
 from chiefvoice.agents.post_call.fallback_spool import PostCallFallbackSpool
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
 from chiefvoice.billing import SubscriptionAuthorizer
@@ -686,7 +687,13 @@ class CallCoordinator:
         transcript = transcript if isinstance(transcript, str) else ""
         recording_uri = session.metadata.get("recording_uri")
         has_recording = isinstance(recording_uri, str) and bool(recording_uri.strip())
-        if not transcript.strip() and not has_recording:
+        expected_assignment = expected_attendance_assignment(session.live_agent_context)
+        attendance_context = f"{session.post_call_context or ''} {session.live_agent_context or ''}".casefold()
+        is_attendance_context = bool(expected_assignment) or any(
+            term in attendance_context
+            for term in ("check-in", "check in", "check-out", "check out", "caregiver", "patient address")
+        )
+        if not transcript.strip() and not has_recording and not is_attendance_context:
             post_call_missing_transcript(session.channel, session.provider)
             session.metadata["post_call_status"] = "skipped_no_data"
             session.metadata["transcript_status"] = "no_data"
@@ -751,6 +758,9 @@ class CallCoordinator:
             live_agent_context=(
                 session.live_agent_context if session.include_live_agent_context else None
             ),
+            live_call_claim=session.metadata.get("live_call_claim"),
+            identity_tool_events=tuple(session.metadata.get("identity_tool_events", ())),
+            expected_assignment=expected_assignment,
             failure_webhook_url=session.post_call_failure_webhook_url,
             failure_webhook_payload=session.post_call_failure_webhook_payload,
             recording_uri=recording_uri if has_recording else None,

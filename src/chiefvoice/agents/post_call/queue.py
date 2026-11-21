@@ -338,7 +338,11 @@ class SqlPostCallQueue:
         self._last_metrics_refresh = now_monotonic
 
     async def enqueue(self, call: CompletedCall) -> bool:
-        if not (call.transcript and call.transcript.strip()) and not call.recording_uri:
+        attendance_task = bool(call.expected_assignment) or any(
+            term in (call.post_call_context or "").casefold()
+            for term in ("check-in", "check in", "check-out", "check out", "caregiver", "patient address")
+        )
+        if not (call.transcript and call.transcript.strip()) and not call.recording_uri and not attendance_task:
             return False
         created_at = datetime.now(UTC)
         payload = {
@@ -350,6 +354,9 @@ class SqlPostCallQueue:
             "time_zone": call.time_zone,
             "time_format": call.time_format,
             "live_agent_context": call.live_agent_context,
+            "live_call_claim": call.live_call_claim,
+            "identity_tool_events": call.identity_tool_events,
+            "expected_assignment": call.expected_assignment,
             "live_agent_language": call.live_agent_language,
             "api_key_id": call.api_key_id,
             "failure_webhook_url": call.failure_webhook_url,
@@ -810,6 +817,9 @@ class SqlPostCallQueue:
                 time_zone=payload.get("time_zone", "UTC"),
                 time_format=payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
                 live_agent_context=payload.get("live_agent_context"),
+                live_call_claim=payload.get("live_call_claim"),
+                identity_tool_events=tuple(payload.get("identity_tool_events", ())),
+                expected_assignment=payload.get("expected_assignment"),
                 failure_webhook_url=payload.get("failure_webhook_url"),
                 failure_webhook_payload=payload.get("failure_webhook_payload"),
             )
@@ -879,6 +889,8 @@ class SqlPostCallQueue:
             )
             failure_stage = "result_encryption"
             result_payload = asdict(result)
+            if result_payload.get("attendance_validation") is None:
+                result_payload.pop("attendance_validation", None)
             transcript_status = result_payload.get("transcript_status")
             # Pipeline assessment is returned by the status endpoint separately;
             # preserve the existing analysis webhook result shape.

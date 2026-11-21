@@ -8,6 +8,7 @@ from pipecat.services.llm_service import FunctionCallParams
 
 from chiefvoice.agents.call.hangup_validation import validate_hangup_request_async
 from chiefvoice.agents.call.identity_state import save_caller_identity
+from chiefvoice.agents.call.identity_state import initialize_collected_data
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.sessions import AcceptedSession, Direction
 
@@ -20,6 +21,20 @@ def _session() -> AcceptedSession:
         live_agent_context={"mandatory_fields": ["caregiver_identity", "patient_identity"]},
         metadata={"caller_interaction_seen": True},
     )
+
+
+def test_assignment_identity_is_not_caller_collected_evidence():
+    session = AcceptedSession(
+        channel="phone",
+        provider="vobiz",
+        direction=Direction.OUTBOUND,
+        live_agent_context={
+            "caregiver_identity": "Expected caregiver",
+            "patient_identity": "Expected patient",
+        },
+    )
+
+    assert initialize_collected_data(session) == {}
 
 
 @pytest.mark.asyncio
