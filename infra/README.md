@@ -1,11 +1,8 @@
 # Infrastructure
 
-The active GCP Terraform stack is maintained in the separate [chiefvoice-infra repository](https://github.com/chiefxai/chiefvoice-infra). Its `gcp/` root provisions the production VM and PostgreSQL, Cloud Tasks, post-call Cloud Function, Cloud Storage, secrets, and IAM. Keep its Terraform state in the existing private GCS state bucket; never commit state, plan files, backend config, or production `terraform.tfvars`.
+Terraform roots are maintained in the separate [chiefvoice-infra repository](https://github.com/chiefxai/chiefvoice-infra). Its `gcp/` root provisions active production infrastructure. Its `aws/` root is a future alternative only; it creates a separate environment and does not migrate GCP data. Do not apply AWS until a migration and cutover plan is ready. GCP uses the existing private GCS state bucket; AWS must use a separate private S3 backend. Never commit state, plan files, backend config, or production `terraform.tfvars`.
 
-The infrastructure retained in this application repository is:
-
-- `infra/aws`: EC2 + local PostgreSQL, Lambda + SQS, and S3.
-- `infra/scalable-infra/aws` and `infra/scalable-infra/gcp`: earlier ECS/Cloud Run + managed PostgreSQL designs for future scaling options.
+The earlier `infra/scalable-infra/aws` and `infra/scalable-infra/gcp` designs remain here for reference. The AWS EC2/SQS/Lambda root has moved to `chiefvoice-infra/aws`.
 
 The AWS VM template creates a VPC, public backend subnet, private Lambda subnet, and NAT gateway for Lambda egress to Vertex. NAT gateways incur ongoing charges. PostgreSQL is on the VM's EBS volume; take and test backups before production.
 

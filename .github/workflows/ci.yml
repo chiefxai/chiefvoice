@@ -56,7 +56,4 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.8
-      - name: Validate AWS template
-        working-directory: infra/aws
-        run: terraform fmt -recursive && terraform init -backend=false -input=false && terraform validate
 
