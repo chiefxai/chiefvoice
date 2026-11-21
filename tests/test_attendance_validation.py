@@ -1,8 +1,10 @@
 import pytest
 
-from chiefvoice.agents.post_call.attendance_validation import validate_attendance
+from chiefvoice.agents.post_call.workflows.attendance.validation import validate_attendance
 from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.langchain_agent import LangChainPostCallAgent
+from chiefvoice.agents.post_call.workflows import PostCallWorkflowRegistry
+from chiefvoice.agents.post_call.workflows.attendance import AttendanceWorkflow
 
 
 def _field(value, utterance, *, confidence=0.95):
@@ -276,17 +278,20 @@ async def test_post_call_agent_runs_python_validation_after_attendance_extractio
         channel="phone",
         direction="outbound",
         transcript=_transcript(),
-        expected_assignment={
+        workflow_id="attendance",
+        workflow_context={
             "caregiver_identity": "Kumar",
             "patient_identity": "Meena",
             "patient_address": "Anna Nagar",
         },
     )
-    result = await LangChainPostCallAgent(model).process(call)
-    assert result.attendance_validation["outcome"] == "verified"
-    assert result.summary
-    assert result.disposition == "verified"
-    assert "hallucinated" not in result.extracted_data
+    registry = PostCallWorkflowRegistry()
+    registry.register(AttendanceWorkflow(model))
+    result = await LangChainPostCallAgent(model, workflow_registry=registry).process(call)
+    assert result.workflow_result["version"] == 1
+    assert result.workflow_result["workflow_id"] == "attendance"
+    assert result.workflow_result["data"]["outcome"] == "verified"
+    assert "hallucinated" not in result.workflow_result["data"]
 
 
 def test_missing_transcript_is_unclear():

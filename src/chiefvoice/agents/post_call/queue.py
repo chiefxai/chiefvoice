@@ -338,11 +338,11 @@ class SqlPostCallQueue:
         self._last_metrics_refresh = now_monotonic
 
     async def enqueue(self, call: CompletedCall) -> bool:
-        attendance_task = bool(call.expected_assignment) or any(
-            term in (call.post_call_context or "").casefold()
-            for term in ("check-in", "check in", "check-out", "check out", "caregiver", "patient address")
-        )
-        if not (call.transcript and call.transcript.strip()) and not call.recording_uri and not attendance_task:
+        if (
+            not (call.transcript and call.transcript.strip())
+            and not call.recording_uri
+            and not call.workflow_id
+        ):
             return False
         created_at = datetime.now(UTC)
         payload = {
@@ -354,9 +354,10 @@ class SqlPostCallQueue:
             "time_zone": call.time_zone,
             "time_format": call.time_format,
             "live_agent_context": call.live_agent_context,
-            "live_call_claim": call.live_call_claim,
-            "identity_tool_events": call.identity_tool_events,
-            "expected_assignment": call.expected_assignment,
+            "workflow_id": call.workflow_id,
+            "workflow_context": call.workflow_context,
+            "end_call_claim": call.end_call_claim,
+            "tool_events": call.tool_events,
             "live_agent_language": call.live_agent_language,
             "api_key_id": call.api_key_id,
             "failure_webhook_url": call.failure_webhook_url,
@@ -817,9 +818,10 @@ class SqlPostCallQueue:
                 time_zone=payload.get("time_zone", "UTC"),
                 time_format=payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
                 live_agent_context=payload.get("live_agent_context"),
-                live_call_claim=payload.get("live_call_claim"),
-                identity_tool_events=tuple(payload.get("identity_tool_events", ())),
-                expected_assignment=payload.get("expected_assignment"),
+                workflow_id=payload.get("workflow_id"),
+                workflow_context=payload.get("workflow_context"),
+                end_call_claim=payload.get("end_call_claim", payload.get("live_call_claim")),
+                tool_events=tuple(payload.get("tool_events", payload.get("identity_tool_events", ()))),
                 failure_webhook_url=payload.get("failure_webhook_url"),
                 failure_webhook_payload=payload.get("failure_webhook_payload"),
             )
@@ -889,8 +891,26 @@ class SqlPostCallQueue:
             )
             failure_stage = "result_encryption"
             result_payload = asdict(result)
-            if result_payload.get("attendance_validation") is None:
-                result_payload.pop("attendance_validation", None)
+            if result_payload.get("workflow_result") is None:
+                result_payload.pop("workflow_result", None)
+            compatibility_projection = getattr(agent, "compatibility_fields", None)
+            if callable(compatibility_projection):
+                try:
+                    legacy_fields = compatibility_projection(result)
+                    if isinstance(legacy_fields, dict):
+                        for key, value in legacy_fields.items():
+                            result_payload.setdefault(key, value)
+                except Exception as exc:
+                    # Compatibility aliases must never prevent the canonical
+                    # result, transcript status, or workflow extension persisting.
+                    logger.warning(
+                        "post_call_compatibility_projection_failed",
+                        extra={
+                            "session_id": completed_call.session_id,
+                            "tenant_id": completed_call.tenant_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
             transcript_status = result_payload.get("transcript_status")
             # Pipeline assessment is returned by the status endpoint separately;
             # preserve the existing analysis webhook result shape.

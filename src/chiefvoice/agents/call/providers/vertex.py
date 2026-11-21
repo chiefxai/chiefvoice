@@ -16,6 +16,7 @@ from chiefvoice.agents.call.completion import (
     completion_marker_for_language,
     completion_phrase_for_language,
 )
+from chiefvoice.agents.call.evidence import capture_tool_execution
 from chiefvoice.agents.call.configs.profiles import AgentProfileDirectory
 from chiefvoice.agents.call.identity_state import (
     IDENTITY_CONFIDENCE_THRESHOLD,
@@ -401,14 +402,9 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             async def record_caller_identity(params: FunctionCallParams) -> None:
                 arguments = params.arguments if isinstance(params.arguments, dict) else {}
-                evidence = session.metadata.setdefault("identity_tool_events", [])
-                if isinstance(evidence, list):
-                    evidence.append({
-                        "arguments": dict(arguments),
-                        "caller_transcript_at_execution": session.metadata.get(
-                            "post_call_transcript", ""
-                        ),
-                    })
+                capture_tool_execution(
+                    session, tool_name="record_caller_identity", arguments=arguments
+                )
                 identity_type = arguments.get("identity_type")
                 name = arguments.get("name")
                 confidence = arguments.get("confidence")
@@ -444,7 +440,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
 
             async def hang_up_call(params: FunctionCallParams) -> None:
                 arguments = params.arguments if isinstance(params.arguments, dict) else {}
-                session.metadata["live_call_claim"] = {
+                capture_tool_execution(
+                    session,
+                    tool_name=getattr(params, "function_name", "end_call"),
+                    arguments=arguments,
+                )
+                session.metadata["end_call_claim"] = {
                     "reason": arguments.get("reason"),
                     "summary": arguments.get("summary"),
                     "collected_data": arguments.get("collected_data"),

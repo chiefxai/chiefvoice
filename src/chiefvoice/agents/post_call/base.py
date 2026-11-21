@@ -26,9 +26,10 @@ class CompletedCall:
     time_zone: str = "UTC"
     time_format: str = "%Y-%m-%dT%H:%M:%S%z"
     live_agent_context: dict[str, Any] | None = None
-    live_call_claim: dict[str, Any] | None = None
-    identity_tool_events: tuple[dict[str, Any], ...] = ()
-    expected_assignment: dict[str, Any] | None = None
+    workflow_id: str | None = None
+    workflow_context: dict[str, Any] | None = None
+    end_call_claim: dict[str, Any] | None = None
+    tool_events: tuple[dict[str, Any], ...] = ()
     audio_review_transcript: str | None = None
     audio_review_attempted: bool = False
     failure_webhook_url: str | None = None
@@ -46,7 +47,7 @@ class PostCallResult:
     structured_output: dict[str, Any] | None = None
     transcript_status: Literal["clear", "unclear", "no_data"] = "clear"
     needs_audio_review: bool = False
-    attendance_validation: dict[str, Any] | None = None
+    workflow_result: dict[str, Any] | None = None
 
 
 class PostCallAgent(Protocol):

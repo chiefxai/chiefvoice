@@ -36,6 +36,8 @@ class AcceptedSession:
     post_call_tools: list[str] | None = None
     post_call_time_zone: str | None = None
     post_call_time_format: str | None = None
+    post_call_workflow_id: str | None = None
+    post_call_workflow_context: dict[str, Any] | None = None
     include_live_agent_context: bool = False
     post_call_agent_enabled: bool = True
     max_call_seconds: int | None = None

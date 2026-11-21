@@ -20,6 +20,27 @@ _FIELDS = (
     "attendance_time",
     "caregiver_confirmation",
 )
+
+
+def failed_attendance_validation() -> dict[str, Any]:
+    """Return the legacy validation shape when attendance execution itself fails."""
+    return {
+        "outcome": "unclear",
+        "fields": {
+            name: {
+                "value": None,
+                "source": None,
+                "original_utterance": None,
+                "confidence": 0.0,
+                "verification_status": "unverified",
+            }
+            for name in _FIELDS
+        },
+        "is_consistent": False,
+        "mismatched_fields": [],
+        "validation_errors": ["attendance_workflow_failed"],
+        "requires_manual_review": True,
+    }
 _EXPECTED_KEYS = {
     "caregiver_identity": ("caregiver_identity", "caregiver_name", "expected_caregiver"),
     "patient_identity": ("patient_identity", "patient_name", "expected_patient"),

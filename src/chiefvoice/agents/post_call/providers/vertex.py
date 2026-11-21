@@ -1,6 +1,8 @@
 import json
 
 from chiefvoice.agents.post_call.langchain_agent import LangChainPostCallAgent
+from chiefvoice.agents.post_call.workflows.builtins import build_builtin_workflow_registry
+from chiefvoice.agents.post_call.workflows import PostCallWorkflowRegistry
 
 
 def create_vertex_post_call_agent(
@@ -10,6 +12,7 @@ def create_vertex_post_call_agent(
     model: str,
     credentials_json: str | None = None,
     credentials_path: str | None = None,
+    workflow_registry: PostCallWorkflowRegistry | None = None,
 ) -> LangChainPostCallAgent:
     """Build a LangChain Gemini chat model backed by Vertex AI and wrap it as an agent."""
     from langchain_google_genai import ChatGoogleGenerativeAI
@@ -37,4 +40,5 @@ def create_vertex_post_call_agent(
         credentials=credentials,
         temperature=0,
     )
-    return LangChainPostCallAgent(model_instance)
+    registry = workflow_registry or build_builtin_workflow_registry(model_instance)
+    return LangChainPostCallAgent(model_instance, workflow_registry=registry)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -80,7 +81,7 @@ def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None):
 
 def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None):
     if body is None:
-        return None, None, None, None, None, False
+        return None, None, None, None, None, False, None, None
     context_values = body.context
     try:
         instructions = render_template(template, context_values) if template else ""
@@ -97,6 +98,8 @@ def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None)
     schema = body.output_schema.model_dump(exclude_none=True) if body.output_schema else settings_values.get("output_schema")
     time_zone = body.time_zone or settings_values.get("time_zone") or "UTC"
     time_format = body.time_format or settings_values.get("time_format") or "%Y-%m-%dT%H:%M:%S%z"
+    workflow_id = body.workflow_id or settings_values.get("workflow_id")
+    workflow_context = body.workflow_context if body.workflow_context is not None else context_values
     if not schema:
         raise HTTPException(status_code=422, detail="post_call.output_schema is required unless the selected template defines a default")
     try:
@@ -105,7 +108,10 @@ def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None)
         raise HTTPException(status_code=422, detail="post_call output schema is invalid") from exc
     if not instructions.strip():
         raise HTTPException(status_code=422, detail="Assign a post-call template with instructions to this API")
-    return instructions, validated_schema, tools, time_zone, time_format, body.include_live_agent_context
+    return (
+        instructions, validated_schema, tools, time_zone, time_format,
+        body.include_live_agent_context, workflow_id, workflow_context,
+    )
 
 
 async def _resolve_call_templates(
@@ -192,6 +198,15 @@ class PostCallBody(BaseModel):
     time_zone: str | None = Field(default=None, min_length=1, max_length=100)
     time_format: str | None = Field(default=None, min_length=1, max_length=100)
     include_live_agent_context: bool = False
+    workflow_id: str | None = Field(default=None, min_length=1, max_length=80)
+    workflow_context: dict[str, Any] | None = None
+
+    @field_validator("workflow_id")
+    @classmethod
+    def validate_workflow_id(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", value):
+            raise ValueError("workflow_id must be a valid registered workflow identifier")
+        return value
 
     @field_validator("add_tools")
     @classmethod
@@ -271,6 +286,9 @@ class OutboundCallBody(BaseModel):
         context_payload = {
             "live_agent_context": live_context,
             "post_call_context": self.post_call.context if self.post_call else None,
+            "post_call_workflow_id": (
+                self.post_call.workflow_id if self.post_call else None
+            ),
             "post_call_output_schema": (
                 self.post_call.output_schema.model_dump(exclude_none=True)
                 if self.post_call and self.post_call.output_schema
@@ -281,6 +299,11 @@ class OutboundCallBody(BaseModel):
             "post_call_time_format": self.post_call.time_format if self.post_call else None,
             "include_live_agent_context": (
                 self.post_call.include_live_agent_context if self.post_call else False
+            ),
+            "workflow_context": (
+                self.post_call.workflow_context
+                if self.post_call and self.post_call.workflow_context is not None
+                else self.post_call.context if self.post_call else None
             ),
         }
         if len(json.dumps(context_payload, ensure_ascii=False, default=str).encode("utf-8")) > 12_000:
@@ -394,7 +417,10 @@ async def start_outbound_call(
         live_language,
         completion_requirements,
     ) = _render_live(live_template, body.live_agent)
-    post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
+    (
+        post_context, post_schema, post_tools, post_time_zone, post_time_format,
+        include_live_context, workflow_id, workflow_context,
+    ) = _render_post_call(post_call_template, body.post_call)
     try:
         session = await coordinator.start_outbound(
             OutboundCallCommand(
@@ -428,6 +454,8 @@ async def start_outbound_call(
                 post_call_tools=post_tools,
                 post_call_time_zone=post_time_zone,
                 post_call_time_format=post_time_format,
+                post_call_workflow_id=workflow_id,
+                post_call_workflow_context=workflow_context,
                 include_live_agent_context=include_live_context,
                 recording_allowed=body.recording_allowed,
                 auto_hangup_when_complete=template_hangup,

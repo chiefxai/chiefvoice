@@ -38,6 +38,10 @@ def _call() -> CompletedCall:
         post_call_context="extract appointment confirmation",
         tools=("time",),
         live_agent_context={"name": "Patient"},
+        workflow_id="example.workflow",
+        workflow_context={"session_marker": "recovery-context"},
+        end_call_claim={"reason": "caller-confirmed"},
+        tool_events=({"tool": "capture", "value": "verified event"},),
     )
 
 
@@ -57,6 +61,9 @@ async def test_s3_fallback_spool_encrypts_payload_and_round_trips_call():
     assert "private patient transcript" not in encrypted.decode("latin1")
     recovered = await spool.list_pending()
     assert recovered == [call]
+    assert recovered[0].workflow_context == {"session_marker": "recovery-context"}
+    assert recovered[0].end_call_claim == {"reason": "caller-confirmed"}
+    assert recovered[0].tool_events == ({"tool": "capture", "value": "verified event"},)
 
     await spool.delete(call.session_id)
     assert client.objects == {}

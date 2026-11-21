@@ -8,6 +8,7 @@ import pytest
 from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.errors import NoTranscriptDataError
 from chiefvoice.agents.post_call.langchain_agent import LangChainPostCallAgent
+from chiefvoice.agents.post_call.workflows import PostCallWorkflowRegistry
 from chiefvoice.calls.coordinator import CallCoordinator
 from chiefvoice.calls.routes import _post_call_pipeline_fields
 from chiefvoice.sessions import AcceptedSession, Direction
@@ -47,14 +48,16 @@ class _FakeChatModel:
         return _FakeStructuredInvoker(self)
 
 
-def _call(*, transcript="Caller: I have completed the duty.", recording=b"wav"):
+def _call(
+    *, transcript="Caller: I have completed the duty.", recording=b"wav", language="en-IN"
+):
     return CompletedCall(
         session_id="session-1",
         tenant_id="tenant-1",
         provider="vobiz",
         channel="phone",
         direction="outbound",
-        live_agent_language="en-IN",
+        live_agent_language=language,
         transcript=transcript,
         recording_audio=recording,
         output_schema=_OUTPUT_SCHEMA,
@@ -79,7 +82,15 @@ async def test_client_unclear_outcome_does_not_trigger_stt_when_platform_transcr
     model = _FakeChatModel(
         _custom_result(outcome="unclear", transcript_status="clear")
     )
-    agent = LangChainPostCallAgent(model)
+    class _UnrelatedWorkflow:
+        workflow_id = "test.unrelated"
+
+        async def process(self, _call, _result):
+            raise AssertionError("no workflow ID was configured for this call")
+
+    registry = PostCallWorkflowRegistry()
+    registry.register(_UnrelatedWorkflow())
+    agent = LangChainPostCallAgent(model, workflow_registry=registry)
     stt_calls = []
 
     async def transcribe(_call):
@@ -171,6 +182,40 @@ async def test_audio_review_request_triggers_fallback_even_when_status_is_clear(
 
     assert stt_calls == [True]
     assert len(model.messages) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["ta-IN", "ml-IN", "te-IN"])
+async def test_regional_languages_trigger_automatic_review_without_workflow_dispatch(
+    monkeypatch, language
+):
+    model = _FakeChatModel(
+        _custom_result(transcript_status="clear"),
+        _custom_result(transcript_status="clear"),
+    )
+    class _UnrelatedWorkflow:
+        workflow_id = "test.unrelated"
+
+        async def process(self, _call, _result):
+            raise AssertionError("no workflow ID was configured for this call")
+
+    registry = PostCallWorkflowRegistry()
+    registry.register(_UnrelatedWorkflow())
+    agent = LangChainPostCallAgent(model, workflow_registry=registry)
+    transcribed = []
+
+    async def transcribe(_call):
+        transcribed.append(True)
+        return "Caller: independent transcript"
+
+    monkeypatch.setattr(agent, "_transcribe_recording", transcribe)
+
+    result = await agent.process(_call(language=language))
+
+    assert transcribed == [True]
+    assert model.events == ["analysis", "analysis"]
+    assert result.stt_status == "completed"
+    assert result.workflow_result is None
 
 
 @pytest.mark.asyncio
