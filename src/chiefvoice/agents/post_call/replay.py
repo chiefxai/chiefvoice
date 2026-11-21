@@ -64,6 +64,9 @@ class SqlPostCallReplayService:
             row.last_error_type = None
             row.last_dispatch_error_type = None
             row.last_dispatched_at = None
+            row.transcript_status = "pending"
+            row.stt_status = "pending"
+            row.decision_reason = "retry_queued"
             row.updated_at = now
         return {"session_id": session_id, "status": "queued"}
 

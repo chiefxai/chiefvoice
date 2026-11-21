@@ -311,6 +311,57 @@ def get_call_coordinator(request: Request) -> CallCoordinator:
     return coordinator
 
 
+def _post_call_pipeline_fields(
+    detail: dict[str, Any], post_call: dict | None
+) -> dict[str, Any]:
+    """Expose platform processing state separately from the client analysis result."""
+    if post_call is not None:
+        return {
+            "post_call_status": post_call.get("status"),
+            "post_call_transcript_status": post_call.get("transcript_status"),
+            "post_call_stt_status": post_call.get("stt_status"),
+            "post_call_decision_reason": post_call.get("decision_reason"),
+        }
+    if detail.get("post_call_agent_enabled") is False:
+        return {
+            "post_call_status": "disabled",
+            "post_call_transcript_status": None,
+            "post_call_stt_status": None,
+            "post_call_decision_reason": None,
+        }
+    if detail.get("post_call_agent_enabled") is None:
+        return {
+            "post_call_status": None,
+            "post_call_transcript_status": None,
+            "post_call_stt_status": None,
+            "post_call_decision_reason": None,
+        }
+    if detail.get("status") != "completed":
+        return {
+            "post_call_status": None,
+            "post_call_transcript_status": None,
+            "post_call_stt_status": None,
+            "post_call_decision_reason": None,
+        }
+    if not detail.get("transcript_available") and not detail.get("recording_available"):
+        return {
+            "post_call_status": "skipped_no_data",
+            "post_call_transcript_status": "no_data",
+            "post_call_stt_status": "unavailable",
+            "post_call_decision_reason": "missing_transcript_and_recording",
+        }
+    return {
+        "post_call_status": "queued",
+        "post_call_transcript_status": "pending",
+        "post_call_stt_status": (
+            "pending" if not detail.get("transcript_available") else None
+        ),
+        "post_call_decision_reason": (
+            "missing_live_transcript" if not detail.get("transcript_available") else None
+        ),
+    }
+
+
 @router.post("/v1/calls/outbound", status_code=status.HTTP_202_ACCEPTED, tags=["calls"])
 async def start_outbound_call(
     body: OutboundCallBody,
@@ -415,6 +466,11 @@ async def get_call_status(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
     await _enforce_number_binding(store, principal, session_id)
+    dispatcher = getattr(request.app.state, "post_call_dispatcher", None)
+    post_call = None
+    if dispatcher is not None and hasattr(dispatcher, "get_status"):
+        post_call = await dispatcher.get_status(principal.tenant_id, session_id)
+    result.update(_post_call_pipeline_fields(result, post_call))
     return result
 
 
@@ -558,31 +614,38 @@ async def get_platform_api_call_detail(
     detail = await call_store.get_api_call_detail(key.tenant_id, key_id, session_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Call not found")
-    if not detail["post_call_agent_enabled"]:
+    if detail["post_call_agent_enabled"] is False:
         detail.update(post_call_status="disabled", post_call_result=None, post_call_error=None)
+        detail.update(_post_call_pipeline_fields(detail, None))
         return detail
     dispatcher = getattr(request.app.state, "post_call_dispatcher", None)
     if dispatcher is not None and hasattr(dispatcher, "get_status"):
         post_call = await dispatcher.get_status(key.tenant_id, session_id)
         detail.update(
-            post_call_status=post_call["status"] if post_call else (
-                "failed" if detail["status"] == "completed" and not detail["transcript_available"]
-                else "queued" if detail["status"] == "completed" else None
-            ),
             post_call_result=post_call.get("result") if post_call else None,
             post_call_time_zone=post_call.get("time_zone") if post_call else None,
             post_call_time_format=post_call.get("time_format") if post_call else None,
             post_call_error=(
-                post_call.get("last_error_type") if post_call else
-                "transcript_missing" if detail["status"] == "completed" and not detail["transcript_available"] else None
+                post_call.get("last_error_type")
+                if post_call
+                else "transcript_missing"
+                if detail["status"] == "completed"
+                and not detail["transcript_available"]
+                and not detail.get("recording_available")
+                else None
             ),
         )
+        detail.update(_post_call_pipeline_fields(detail, post_call))
     elif detail["status"] == "completed":
         detail.update(
-            post_call_status="failed" if not detail["transcript_available"] else "queued",
             post_call_result=None,
-            post_call_error="transcript_missing" if not detail["transcript_available"] else "dispatcher_unavailable",
+            post_call_error=(
+                "transcript_missing"
+                if not detail["transcript_available"] and not detail.get("recording_available")
+                else "dispatcher_unavailable"
+            ),
         )
+        detail.update(_post_call_pipeline_fields(detail, None))
     return detail
 
 

@@ -683,8 +683,13 @@ class CallCoordinator:
             session.metadata["post_call_enqueued"] = True
             return
         transcript = session.metadata.get("post_call_transcript")
-        if not isinstance(transcript, str) or not transcript.strip():
+        transcript = transcript if isinstance(transcript, str) else ""
+        recording_uri = session.metadata.get("recording_uri")
+        has_recording = isinstance(recording_uri, str) and bool(recording_uri.strip())
+        if not transcript.strip() and not has_recording:
             post_call_missing_transcript(session.channel, session.provider)
+            session.metadata["post_call_status"] = "skipped_no_data"
+            session.metadata["transcript_status"] = "no_data"
             logger.warning(
                 "post_call_missing_transcript",
                 extra={
@@ -692,6 +697,8 @@ class CallCoordinator:
                     "tenant_id": session.tenant_id,
                     "channel": session.channel,
                     "provider": session.provider,
+                    "post_call_status": "skipped_no_data",
+                    "transcript_status": "no_data",
                 },
             )
             if session.metadata.get("call_end_reason") != "provider_error":
@@ -706,7 +713,25 @@ class CallCoordinator:
                     ended_at=ended_at,
                     transcript_status="no_data",
                 )
+            if self.call_session_store is not None:
+                await self.call_session_store.mark_post_call_enqueued(
+                    session.tenant_id, session.session_id
+                )
+            session.metadata["post_call_enqueued"] = True
             return
+        if not transcript.strip():
+            # A finalized recording is enough to start the post-call pipeline: the
+            # worker can transcribe it first, then run analysis on that transcript.
+            logger.info(
+                "post_call_recording_transcription_required",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "channel": session.channel,
+                    "reason": "live_transcript_unavailable",
+                },
+            )
         call = CompletedCall(
             session_id=session.session_id,
             tenant_id=session.tenant_id,
@@ -728,7 +753,7 @@ class CallCoordinator:
             ),
             failure_webhook_url=session.post_call_failure_webhook_url,
             failure_webhook_payload=session.post_call_failure_webhook_payload,
-            recording_uri=session.metadata.get("recording_uri"),
+            recording_uri=recording_uri if has_recording else None,
         )
         try:
             # This writes a durable queue record only; model work happens in the worker.

@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent
+from chiefvoice.agents.post_call.errors import NoTranscriptDataError
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
 from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.observability.setup import (
@@ -71,6 +72,9 @@ class PostCallJobRow(Base):
     last_dispatch_error_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_error_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
     encrypted_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transcript_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    stt_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -334,7 +338,7 @@ class SqlPostCallQueue:
         self._last_metrics_refresh = now_monotonic
 
     async def enqueue(self, call: CompletedCall) -> bool:
-        if not call.transcript or not call.transcript.strip():
+        if not (call.transcript and call.transcript.strip()) and not call.recording_uri:
             return False
         created_at = datetime.now(UTC)
         payload = {
@@ -354,6 +358,11 @@ class SqlPostCallQueue:
         encrypted_payload = self._fernet.encrypt(
             json.dumps(payload, ensure_ascii=False).encode("utf-8")
         ).decode("ascii")
+        initial_decision_reason = (
+            "awaiting_transcript_assessment"
+            if call.transcript and call.transcript.strip()
+            else "missing_live_transcript"
+        )
         stmt = (
             insert(PostCallJobRow)
             .values(
@@ -371,6 +380,9 @@ class SqlPostCallQueue:
                 lease_expires_at=None,
                 last_error_type=None,
                 encrypted_result=None,
+                transcript_status="pending",
+                stt_status="pending",
+                decision_reason=initial_decision_reason,
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -390,6 +402,9 @@ class SqlPostCallQueue:
                     "lease_expires_at": None,
                     "last_error_type": None,
                     "encrypted_result": None,
+                    "transcript_status": "pending",
+                    "stt_status": "pending",
+                    "decision_reason": initial_decision_reason,
                     "updated_at": created_at,
                 },
                 where=or_(PostCallJobRow.status.is_(None), PostCallJobRow.status == ""),
@@ -518,6 +533,9 @@ class SqlPostCallQueue:
                 "attempts": row.attempts,
                 "last_error_type": row.last_error_type,
                 "result": result,
+                "transcript_status": row.transcript_status,
+                "stt_status": row.stt_status,
+                "decision_reason": row.decision_reason,
                 "time_zone": payload.get("time_zone", "UTC"),
                 "time_format": payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
                 "webhook_status": delivery.status if delivery else None,
@@ -784,7 +802,7 @@ class SqlPostCallQueue:
                 live_agent_language=payload.get("live_agent_language"),
                 started_at=job["started_at"],
                 ended_at=job["ended_at"],
-                transcript=payload["transcript"],
+                transcript=payload.get("transcript") or "",
                 recording_uri=payload.get("recording_uri"),
                 post_call_context=payload.get("post_call_context"),
                 output_schema=payload.get("output_schema"),
@@ -835,13 +853,91 @@ class SqlPostCallQueue:
                         completed_call, recording_loader=load_recording
                     )
             failure_stage = "agent_processing"
+            # Status is platform-owned metadata. It remains on the job row and is
+            # intentionally not added to the client result/webhook object.
+            async with self._sessions.begin() as session:
+                await session.execute(
+                    update(PostCallJobRow)
+                    .where(
+                        PostCallJobRow.session_id == job["session_id"],
+                        PostCallJobRow.status == "processing",
+                        PostCallJobRow.attempts == attempt,
+                    )
+                    .values(
+                        transcript_status="pending",
+                        stt_status="pending",
+                        decision_reason=(
+                            "missing_live_transcript"
+                            if not completed_call.transcript.strip()
+                            else "awaiting_transcript_assessment"
+                        ),
+                        updated_at=datetime.now(UTC),
+                    )
+                )
             result = await asyncio.wait_for(
                 agent.process(completed_call), timeout=self.lease_duration.total_seconds() / 2
             )
             failure_stage = "result_encryption"
+            result_payload = asdict(result)
+            transcript_status = result_payload.get("transcript_status")
+            # Pipeline assessment is returned by the status endpoint separately;
+            # preserve the existing analysis webhook result shape.
+            stt_status = result_payload.pop("stt_status", "not_needed")
+            decision_reason = result_payload.pop("decision_reason", "analysis_completed")
             encrypted_result = self._fernet.encrypt(
-                json.dumps(asdict(result), ensure_ascii=False).encode("utf-8")
+                json.dumps(result_payload, ensure_ascii=False).encode("utf-8")
             ).decode("ascii")
+        except NoTranscriptDataError as exc:
+            failure_stage = "transcript_unavailable"
+            async with self._sessions.begin() as session:
+                terminalized = await session.execute(
+                    update(PostCallJobRow)
+                    .where(
+                        PostCallJobRow.session_id == job["session_id"],
+                        PostCallJobRow.status == "processing",
+                        PostCallJobRow.attempts == attempt,
+                    )
+                    .values(
+                        status="failed",
+                        next_attempt_at=None,
+                        lease_expires_at=None,
+                        last_error_type="NoTranscriptDataError",
+                        transcript_status="no_data",
+                        stt_status=exc.stt_status,
+                        decision_reason=exc.reason[:80],
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+            if terminalized.rowcount != 1:
+                return True
+            post_call_job_event("failed")
+            await self.enqueue_failure(
+                session_id=job["session_id"],
+                tenant_id=job["tenant_id"],
+                event_type="call.post_call.failed",
+                provider=job["provider"],
+                channel=job["channel"],
+                direction=job["direction"],
+                failure_stage=failure_stage,
+                failure_code="transcript_unavailable",
+                started_at=job["started_at"],
+                ended_at=job["ended_at"],
+                retryable=False,
+                attempts=attempt,
+                target_url=payload.get("failure_webhook_url"),
+                custom_payload=payload.get("failure_webhook_payload"),
+                transcript_status="no_data",
+            )
+            logger.warning(
+                "post_call_no_transcript_data",
+                extra={
+                    "session_id": job["session_id"],
+                    "tenant_id": job["tenant_id"],
+                    "stt_status": exc.stt_status,
+                    "decision_reason": exc.reason,
+                },
+            )
+            return True
         except Exception as exc:
             trace = traceback.extract_tb(exc.__traceback__)
             origin = trace[-1] if trace else None
@@ -911,6 +1007,9 @@ class SqlPostCallQueue:
                 .values(
                     status="completed",
                     encrypted_result=encrypted_result,
+                    transcript_status=transcript_status,
+                    stt_status=stt_status,
+                    decision_reason=decision_reason,
                     lease_expires_at=None,
                     last_error_type=None,
                     updated_at=datetime.now(UTC),

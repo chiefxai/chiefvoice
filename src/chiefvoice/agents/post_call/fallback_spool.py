@@ -56,8 +56,12 @@ class S3PostCallFallbackSpool:
         self._max_object_bytes = max_object_bytes
 
     async def store(self, call: CompletedCall) -> None:
-        if not call.session_id or not call.tenant_id or not call.transcript:
-            raise ValueError("A completed call with tenant and transcript is required")
+        if (
+            not call.session_id
+            or not call.tenant_id
+            or not (call.transcript and call.transcript.strip()) and not call.recording_uri
+        ):
+            raise ValueError("A completed call with tenant and transcript or recording is required")
         payload = json.dumps(asdict(call), ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )

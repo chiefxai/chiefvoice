@@ -386,8 +386,6 @@ class SqlCallSessionStore:
                         PostCallJobRow.status.is_(None),
                         PostCallJobRow.status == "",
                     ),
-                    CallSessionRow.encrypted_transcript.is_not(None),
-                    CallSessionRow.transcript_persistence_failed.is_(False),
                     CallSessionRow.encrypted_session.is_not(None),
                 )
                 .order_by(CallSessionRow.ended_at)
@@ -401,10 +399,19 @@ class SqlCallSessionStore:
                 if not session.post_call_agent_enabled:
                     await self.mark_post_call_enqueued(session.tenant_id, session.session_id)
                     continue
-                transcript = self._fernet.decrypt(row.encrypted_transcript.encode("ascii")).decode(
-                    "utf-8"
+                transcript = (
+                    self._fernet.decrypt(row.encrypted_transcript.encode("ascii")).decode("utf-8")
+                    if row.encrypted_transcript
+                    else ""
                 )
-                if not transcript.strip():
+                recording_uri = session.metadata.get("recording_uri")
+                has_recording = isinstance(recording_uri, str) and bool(recording_uri.strip())
+                if not transcript.strip() and not has_recording:
+                    # This is the crash-recovery path for calls that ended without
+                    # either transcript text or a recording. There is no safe work
+                    # item to enqueue, so terminalize the reconciliation marker to
+                    # keep these rows from starving recoverable calls on every scan.
+                    await self.mark_post_call_enqueued(session.tenant_id, session.session_id)
                     continue
                 calls.append(
                     CompletedCall(
@@ -430,7 +437,7 @@ class SqlCallSessionStore:
                         ),
                         failure_webhook_url=session.post_call_failure_webhook_url,
                         failure_webhook_payload=session.post_call_failure_webhook_payload,
-                        recording_uri=session.metadata.get("recording_uri"),
+                        recording_uri=recording_uri if has_recording else None,
                     )
                 )
             return calls
@@ -445,12 +452,15 @@ class SqlCallSessionStore:
             )
             if row is None:
                 return None
+            stored_session = (
+                self._decrypt_session(row.encrypted_session)
+                if row.encrypted_session
+                else None
+            )
             return {
                 "session_id": row.session_id,
                 "provider": (
-                    self._decrypt_session(row.encrypted_session).provider
-                    if row.encrypted_session
-                    else None
+                    stored_session.provider if stored_session else None
                 ),
                 "status": row.status,
                 "provider_call_id": row.provider_call_id,
@@ -461,6 +471,12 @@ class SqlCallSessionStore:
                 "transcript_available": bool(row.encrypted_transcript),
                 "transcript_persistence_failed": row.transcript_persistence_failed,
                 "post_call_enqueued": row.post_call_enqueued_at is not None,
+                "post_call_agent_enabled": (
+                    stored_session.post_call_agent_enabled if stored_session else None
+                ),
+                "recording_available": bool(
+                    stored_session and stored_session.metadata.get("recording_uri")
+                ),
             }
 
     async def get_transcript(self, tenant_id: str, session_id: str) -> dict[str, Any] | None:
