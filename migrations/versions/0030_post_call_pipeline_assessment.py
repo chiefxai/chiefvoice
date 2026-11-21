@@ -1,6 +1,6 @@
 """Persist platform-owned post-call assessment and recording STT state.
 
-Revision ID: 0030_post_call_pipeline_assessment
+Revision ID: 0030_post_call_assessment
 Revises: 0029_custom_failure_webhook
 Create Date: 2026-11-21 00:00:00.000000
 """
@@ -8,7 +8,7 @@ Create Date: 2026-11-21 00:00:00.000000
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0030_post_call_pipeline_assessment"
+revision = "0030_post_call_assessment"
 down_revision = "0029_custom_failure_webhook"
 branch_labels = None
 depends_on = None
