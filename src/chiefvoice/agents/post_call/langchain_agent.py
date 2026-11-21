@@ -188,6 +188,16 @@ class LangChainPostCallAgent(PostCallAgent):
                 transcript_status=parsed.transcript_status,
             )
 
+        logger.info(
+            "post_call_transcript_assessed",
+            extra={
+                "session_id": call.session_id,
+                "tenant_id": call.tenant_id,
+                "transcript_status": parsed.transcript_status,
+                "needs_audio_review": parsed.needs_audio_review,
+                "audio_review_attempted": call.audio_review_attempted,
+            },
+        )
         is_tamil_call = (call.live_agent_language or "").split("-", 1)[0].lower() == "ta"
         transcript_is_unclear = parsed.transcript_status == "unclear"
         if call.audio_review_attempted or not (
@@ -215,6 +225,8 @@ class LangChainPostCallAgent(PostCallAgent):
                     "session_id": call.session_id,
                     "tenant_id": call.tenant_id,
                     "reason": "recording_unavailable",
+                    "transcript_status": parsed.transcript_status,
+                    "needs_audio_review": parsed.needs_audio_review,
                     "automatic_tamil_review": is_tamil_call,
                 },
             )
@@ -232,6 +244,15 @@ class LangChainPostCallAgent(PostCallAgent):
             )
             audio_transcript = await self._transcribe_recording(call)
             if not audio_transcript:
+                logger.warning(
+                    "post_call_recording_transcription_empty",
+                    extra={
+                        "session_id": call.session_id,
+                        "tenant_id": call.tenant_id,
+                        "transcript_status": parsed.transcript_status,
+                        "transcription_provider": f"google_cloud_speech_{settings.post_call_transcription_model}",
+                    },
+                )
                 return analysis
             logger.info(
                 "post_call_recording_transcription_completed",
