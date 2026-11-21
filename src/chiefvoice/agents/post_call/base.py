@@ -42,6 +42,7 @@ class PostCallResult:
     action_items: tuple[str, ...] = ()
     structured_output: dict[str, Any] | None = None
     transcript_status: Literal["clear", "unclear", "no_data"] = "clear"
+    needs_audio_review: bool = False
 
 
 class PostCallAgent(Protocol):

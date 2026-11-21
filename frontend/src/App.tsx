@@ -958,10 +958,22 @@ function ApiCallHistoryPage({ api, loading, error, calls, callsTotal, callsPage,
 
 function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
   const [expanded, setExpanded] = useState(false)
+  const [sessionIdCopied, setSessionIdCopied] = useState(false)
+  const [sessionIdCopyFailed, setSessionIdCopyFailed] = useState(false)
   const [requestRecording, setRequestRecording] = useState(false)
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null)
   const detail = useQuery({ queryKey: ['platform-api-call-detail', apiId, call.session_id], queryFn: () => api.apiCallDetail(apiId, call.session_id), enabled: expanded, retry: false, refetchInterval: expanded && (call.status !== 'completed' || call.post_call_status === 'queued' || call.post_call_status === 'running') ? 4000 : false })
   const recording = useQuery({ queryKey: ['platform-api-call-recording', apiId, call.session_id], queryFn: () => api.apiCallRecording(apiId, call.session_id), enabled: expanded && requestRecording && Boolean(detail.data?.recording_available), retry: false })
+
+  const copySessionId = () => {
+    void navigator.clipboard.writeText(call.session_id).then(() => {
+      setSessionIdCopied(true)
+      setSessionIdCopyFailed(false)
+    }).catch(() => {
+      setSessionIdCopied(false)
+      setSessionIdCopyFailed(true)
+    })
+  }
 
   useEffect(() => {
     if (!recording.data) return
@@ -981,13 +993,13 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
       <TableCell className="table-cell"><Button size="small" onClick={() => setExpanded(true)}>Details</Button></TableCell>
     </TableRow>
     <Dialog open={expanded} onClose={() => setExpanded(false)} maxWidth="md" fullWidth>
-      <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}><Stack><span>Call details</span><Typography variant="body2" color="text.secondary">{new Date(call.started_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {new Date(call.started_at).toLocaleDateString()} · {call.session_id}</Typography></Stack><IconButton aria-label="Close call details" onClick={() => setExpanded(false)}><CloseRoundedIcon /></IconButton></DialogTitle>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, fontFamily: 'Manrope', fontWeight: 800 }}><Stack><span>Call details</span><Stack direction="row" alignItems="center" gap={0.25}><Typography variant="body2" color="text.secondary">{new Date(call.started_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {new Date(call.started_at).toLocaleDateString()} · {call.session_id}</Typography><Tooltip title={sessionIdCopyFailed ? 'Copy failed' : sessionIdCopied ? 'Copied' : 'Copy session ID'}><IconButton aria-label="Copy session ID" size="small" onClick={copySessionId} color={sessionIdCopyFailed ? 'error' : 'default'}>{sessionIdCopied ? <CheckCircleRoundedIcon fontSize="small" /> : <ContentCopyRoundedIcon fontSize="small" />}</IconButton></Tooltip></Stack></Stack><IconButton aria-label="Close call details" onClick={() => setExpanded(false)}><CloseRoundedIcon /></IconButton></DialogTitle>
       <DialogContent dividers>{detail.isLoading ? <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={22} /></Stack> : detail.error ? <Alert severity="error">{errorText(detail.error)}</Alert> : detail.data && <Stack gap={1.5}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
           <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Recording</Typography>{detail.data.recording_available ? <Stack gap={1}>{recordingUrl ? <audio controls preload="none" src={recordingUrl} style={{ width: '100%' }}>Your browser does not support audio playback.</audio> : <Button size="small" variant="outlined" disabled={recording.isFetching} onClick={() => setRequestRecording(true)}>{recording.isFetching ? 'Loading recording…' : 'Load recording'}</Button>}{recording.error && <Alert severity="error">{errorText(recording.error)}</Alert>}</Stack> : <Typography variant="body2" color="text.secondary">{detail.data.recording_allowed ? 'No saved recording is available.' : 'Recording was disabled for this call.'}</Typography>}</Card>
-          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Post-call result</Typography>{detail.data.post_call_error && <Alert severity="error" sx={{ mb: 1 }}>{detail.data.post_call_error}</Alert>}{detail.data.post_call_result ? <pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 280, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre> : <Typography variant="body2" color="text.secondary">Result appears after post-call processing completes.</Typography>}</Card>
+          <Card variant="outlined" sx={{ p: 1.5, flex: 1 }}><Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Post-call result</Typography><CopyIconButton value={detail.data.post_call_result ? JSON.stringify(detail.data.post_call_result, null, 2) : ''} label="Copy post-call result" disabled={!detail.data.post_call_result} /></Stack>{detail.data.post_call_error && <Alert severity="error" sx={{ mb: 1 }}>{detail.data.post_call_error}</Alert>}{detail.data.post_call_result ? <><Alert severity={typeof detail.data.post_call_result.needs_audio_review !== 'boolean' ? 'info' : detail.data.post_call_result.needs_audio_review ? 'warning' : 'success'} sx={{ mb: 1 }}>{typeof detail.data.post_call_result.needs_audio_review !== 'boolean' ? 'Audio review status unavailable' : detail.data.post_call_result.needs_audio_review ? 'Audio review needed' : 'No audio review needed'}</Alert><pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', maxHeight: 280, padding: 12, borderRadius: 8, background: 'rgba(120,130,150,.12)' }}>{JSON.stringify(detail.data.post_call_result, null, 2)}</pre></> : <Typography variant="body2" color="text.secondary">Result appears after post-call processing completes.</Typography>}</Card>
         </Stack>
-        <Card variant="outlined" sx={{ p: 1.5 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>Transcript</Typography>{detail.data.transcript ? <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflowY: 'auto', margin: 0, fontFamily: 'inherit' }}>{detail.data.transcript}</pre> : <Typography variant="body2" color="text.secondary">{detail.data.status === 'completed' ? 'Transcript is unavailable.' : 'Transcript is not ready yet.'}</Typography>}</Card>
+        <Card variant="outlined" sx={{ p: 1.5 }}><Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}><Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Transcript</Typography><CopyIconButton value={detail.data.transcript || ''} label="Copy transcript" disabled={!detail.data.transcript} /></Stack>{detail.data.transcript ? <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflowY: 'auto', margin: 0, fontFamily: 'inherit' }}>{detail.data.transcript}</pre> : <Typography variant="body2" color="text.secondary">{detail.data.status === 'completed' ? 'Transcript is unavailable.' : 'Transcript is not ready yet.'}</Typography>}</Card>
       </Stack>}</DialogContent>
       <DialogActions><Button onClick={() => setExpanded(false)}>Close</Button></DialogActions>
     </Dialog>
@@ -1627,6 +1639,23 @@ return "ok", 200`
     </main>
   </div>
 }
+function CopyIconButton({ value, label, disabled = false }: { value: string; label: string; disabled?: boolean }) {
+  const [copied, setCopied] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const copy = () => {
+    void navigator.clipboard.writeText(value).then(() => {
+      setCopied(true)
+      setFailed(false)
+    }).catch(() => {
+      setCopied(false)
+      setFailed(true)
+    })
+  }
+  return <Tooltip title={failed ? 'Copy failed' : copied ? 'Copied' : label}>
+    <span><IconButton size="small" aria-label={label} disabled={disabled} color={failed ? 'error' : 'default'} onClick={copy}>{copied ? <CheckCircleRoundedIcon fontSize="small" /> : <ContentCopyRoundedIcon fontSize="small" />}</IconButton></span>
+  </Tooltip>
+}
+
 function CopyableCode({ value, minRows = 2 }: { value: string; minRows?: number }) {
   const [copied, setCopied] = useState(false)
   const copy = () => {

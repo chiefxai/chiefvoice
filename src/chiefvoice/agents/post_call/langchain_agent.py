@@ -178,6 +178,7 @@ class LangChainPostCallAgent(PostCallAgent):
                     mode="json", by_alias=True, exclude_unset=True
                 ),
                 transcript_status=parsed.transcript_status,
+                needs_audio_review=parsed.needs_audio_review,
             )
         else:
             analysis = PostCallResult(
@@ -186,6 +187,7 @@ class LangChainPostCallAgent(PostCallAgent):
                 extracted_data=parsed.extracted_data,
                 action_items=tuple(parsed.action_items),
                 transcript_status=parsed.transcript_status,
+                needs_audio_review=parsed.needs_audio_review,
             )
 
         logger.info(
