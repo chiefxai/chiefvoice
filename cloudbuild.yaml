@@ -1,9 +1,9 @@
 substitutions:
-  _REGION: us-central1
+  _REGION: asia-south1
   _AR_REPOSITORY: chiefvoice
   _IMAGE_NAME: api
   _VM_NAME: chiefvoice-backend
-  _ZONE: us-central1-a
+  _ZONE: asia-south1-a
   _PUBLIC_DOMAIN: chiefvoice.elvoryx.in
   _FUNCTION_NAME: chiefvoice-post-call
   _FUNCTION_VPC_CONNECTOR: chiefvoice-functions

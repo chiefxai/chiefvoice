@@ -17,6 +17,7 @@ from pipecat.frames.frames import (
     LLMFullResponseStartFrame,
     LLMRunFrame,
     OutputAudioRawFrame,
+    StartFrame,
     TranscriptionFrame,
     TTSTextFrame,
     UserStartedSpeakingFrame,
@@ -142,6 +143,7 @@ class GeminiConversationWatchdog(FrameProcessor):
         self._gemini_is_generating = False
         self._bot_audio_playing = False
         self._response_audio_seen = False
+        self._initial_response_watchdog_started = False
         self._assistant_text_buffer = ""
         self._closed = False
         self._watch_task: asyncio.Task | None = None
@@ -169,7 +171,15 @@ class GeminiConversationWatchdog(FrameProcessor):
             or bool(self._metadata.get("call_terminated"))
         )
 
-        if direction is FrameDirection.DOWNSTREAM and isinstance(frame, UserStartedSpeakingFrame):
+        if direction is FrameDirection.DOWNSTREAM and isinstance(frame, StartFrame):
+            # A context aggregator can consume the initial LLMRunFrame before
+            # this processor sees it. StartFrame is the reliable signal that
+            # the media pipeline is live, so the initial greeting still gets
+            # a bounded response window.
+            if not is_call_terminating:
+                self._arm_initial_response_watchdog("pipeline_started")
+
+        elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, UserStartedSpeakingFrame):
             if is_call_terminating:
                 return
             # A start frame is reliable evidence that the caller interacted even
@@ -281,7 +291,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             and not self._gemini_is_generating
         ):
             if not is_call_terminating:
-                self._arm_response_watchdog("initial_greeting")
+                self._arm_initial_response_watchdog("initial_greeting")
 
         await self.push_frame(frame, direction)
 
@@ -420,6 +430,12 @@ class GeminiConversationWatchdog(FrameProcessor):
             self._watch_response(turn_id, trigger, self._response_timeout),
             name=f"gemini_response_watchdog_{turn_id}",
         )
+
+    def _arm_initial_response_watchdog(self, trigger: str) -> None:
+        if self._initial_response_watchdog_started or self._turn_id > 0:
+            return
+        self._initial_response_watchdog_started = True
+        self._arm_response_watchdog(trigger)
 
     def _arm_generation_watchdog(self) -> None:
         if (

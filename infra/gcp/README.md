@@ -33,6 +33,37 @@ This Terraform root is the active GCP deployment: one Compute Engine VM runs the
 - This no-organization deployment uses the hosting project for Vertex AI. Customer records, API keys and call data remain tenant-scoped in PostgreSQL, but Vertex project-level usage and spend caps are shared. The backend and post-call function identities receive Vertex AI access only in this project. Per-customer Vertex project isolation requires a GCP folder/organization or manually provisioned customer projects and a later integration change.
 - Terraform creates the `chiefvoice-build` service account. Register the Cloud Build trigger with the `cloud_build_service_account` output and populate its custom substitutions from `terraform output -json cloud_build_substitutions`. The output derives region, VM, service accounts, connector, secret names, OIDC values, and transcription model/region from this environment's Terraform state, avoiding project-specific edits to `cloudbuild.yaml`. The build identity receives scoped Artifact Registry access and permissions to deploy the function and update the VM over IAP.
 - GitHub Actions deployment is available in `.github/workflows/deploy-gcp.yml`. Terraform provisions GitHub Workload Identity Federation for `github_repository` (default `chiefxai/chiefvoice`) and a least-purpose Cloud Build submitter account. After Terraform apply, set GitHub repository variables from Terraform outputs: `GCP_PROJECT_ID` = `project_id`, `GCP_REGION` = `region`, `GCP_WORKLOAD_IDENTITY_PROVIDER` = `github_workload_identity_provider`, and `GCP_CLOUD_BUILD_SERVICE_ACCOUNT` = `cloud_build_service_account`. The GitHub submitter has project-level `roles/storage.bucketViewer` permission so `gcloud builds submit` can list bucket metadata, plus bucket-scoped source-object access on `${project_id}_cloudbuild`; the Cloud Build execution service account has bucket-level viewer and object-user access there as well. The workflow uses the Terraform-created `chiefvoice-github-deploy` service account directly. The provider only accepts OIDC tokens for the configured repository's `main` branch. The workflow submits `cloudbuild.yaml`; Cloud Build continues to run tests, publish images, deploy the post-call function, apply migrations, deploy the VM, and run health probes. Keep deployment-specific substitutions in `cloudbuild.yaml` aligned with this Terraform stack. If a Cloud Build push trigger is already enabled for the same repository and branch, disable it to avoid deploying twice.
+- A separate, manual full-region migration workflow is available at `.github/workflows/terraform-gcp-region.yml`. It uses the same GitHub OIDC identity and Terraform GCS state. Set repository variables `GCP_PROJECT_ID=chief-502717`, `GCP_WORKLOAD_IDENTITY_PROVIDER` to the `github_workload_identity_provider` Terraform output, `GCP_TF_STATE_BUCKET=chiefvoice-tfstate-297803100712`, and `GCP_TF_STATE_PREFIX=chiefvoice/prod`. Set repository secrets `GCP_TERRAFORM_TFVARS` to the complete contents of the ignored `infra/gcp/terraform.tfvars` (with `region="asia-south1"` and `zone="asia-south1-a"`) and `GCP_TF_PLAN_ENCRYPTION_KEY` to a long random passphrase. Configure a protected GitHub environment named `production` with required reviewers. The workflow creates a complete plan, publishes a resource action summary, encrypts the exact plan for a one-day artifact, then waits at the protected apply job. Run it only after pushing the configuration and reviewing the plan; its explicit `yes` confirmation permits deleting the old VM/database, recordings and backups bucket contents, and queued tasks. The 2-vCPU, 8-GiB VM has a 50-GiB boot disk. Regional IP, VPC connector, bucket, Artifact Registry repository, Cloud Tasks queue, and post-call function are migrated to Mumbai. The Terraform state bucket remains in `us-central1`.
+
+  Before GitHub Actions can run Terraform, a project administrator must bootstrap permissions for `chiefvoice-github-deploy`. Terraform declares the same project roles, but the initial grant must be made by an existing administrator. In Cloud Shell, run:
+
+  ```sh
+  PROJECT=chief-502717
+  DEPLOY_SA=chiefvoice-github-deploy@chief-502717.iam.gserviceaccount.com
+  for ROLE in \
+    roles/artifactregistry.admin \
+    roles/cloudtasks.admin \
+    roles/compute.admin \
+    roles/iam.serviceAccountAdmin \
+    roles/iam.workloadIdentityPoolAdmin \
+    roles/resourcemanager.projectIamAdmin \
+    roles/secretmanager.admin \
+    roles/serviceusage.serviceUsageAdmin \
+    roles/storage.admin \
+    roles/vpcaccess.admin; do
+    gcloud projects add-iam-policy-binding "$PROJECT" \
+      --member="serviceAccount:$DEPLOY_SA" --role="$ROLE" --condition=None --quiet
+  done
+  gcloud iam service-accounts add-iam-policy-binding \
+    chiefvoice-backend@chief-502717.iam.gserviceaccount.com \
+    --project="$PROJECT" --member="serviceAccount:$DEPLOY_SA" \
+    --role=roles/iam.serviceAccountUser --quiet
+  gcloud storage buckets add-iam-policy-binding \
+    gs://chiefvoice-tfstate-297803100712 \
+    --member="serviceAccount:$DEPLOY_SA" --role=roles/storage.objectAdmin
+  ```
+
+  This is a powerful production deploy identity: Terraform manages project IAM bindings, so it receives `roles/resourcemanager.projectIamAdmin`. After the GitHub run applies Terraform, set/update deployment repository variables `GCP_REGION=asia-south1` and `GCP_CLOUD_BUILD_SERVICE_ACCOUNT` from the `cloud_build_service_account` output (along with the existing project, WIF provider and state variables). Change the DNS A record for `chiefvoice.elvoryx.in` to the new `backend_external_ip`, then run the existing Deploy to GCP workflow manually. That Cloud Build run publishes images in Mumbai, deploys the post-call function in Mumbai, initializes the fresh database, and starts the app. The previous function in `us-central1` is outside this Terraform state and should be removed after confirming the Mumbai deployment works. The current Cloud Build pipeline still builds and serves the console on the VM; it does not deploy the frontend to Vercel.
 - Protect the Terraform remote state: it contains Secret Manager secret versions for the database password, Fernet keys, Vobiz secrets and HMAC object-storage credentials, as well as the rendered startup script. Runtime startup reads values from Secret Manager into root-only files; instance metadata contains secret IDs rather than those values.
 
 ## Apply and deploy
@@ -52,7 +83,7 @@ Post-call transcript review uses Cloud Speech-to-Text Chirp 2 in `asia-southeast
 For a manual VM-only deployment (for example, a change confined to the API or console), SSH to the VM and run the repository script. The VM startup installs Docker but may not install Git, so install it if needed. Keep the checkout beside `/opt/chiefvoice/compose.yaml`; the script uses that compose directory for the running services:
 
 ```sh
-gcloud compute ssh chiefvoice-backend --project=chief-502717 --zone=us-central1-a --tunnel-through-iap
+gcloud compute ssh chiefvoice-backend --project=chief-502717 --zone=asia-south1-a --tunnel-through-iap
 sudo apt-get update && sudo apt-get install -y git # only if git is missing
 sudo git clone https://github.com/chiefxai/chiefvoice.git /opt/chiefvoice/source # first deployment only
 cd /opt/chiefvoice/source

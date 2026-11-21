@@ -538,13 +538,19 @@ class CallCoordinator:
         session.metadata["persist_transcript_segment"] = persist_segment
 
     async def _enqueue_failure_webhook(
-        self, session: AcceptedSession, *, stage: str, code: str, ended_at: datetime | None = None
+        self,
+        session: AcceptedSession,
+        *,
+        stage: str,
+        code: str,
+        ended_at: datetime | None = None,
+        transcript_status: str | None = None,
     ) -> None:
         enqueue_failure = getattr(self.post_call_dispatcher, "enqueue_failure", None)
         if not callable(enqueue_failure) or not session.tenant_id:
             return
         try:
-            await enqueue_failure(
+            failure_args = dict(
                 session_id=session.session_id,
                 tenant_id=session.tenant_id,
                 event_type="call.failed" if stage == "call" else "call.post_call.failed",
@@ -559,6 +565,9 @@ class CallCoordinator:
                 target_url=session.post_call_failure_webhook_url,
                 custom_payload=session.post_call_failure_webhook_payload,
             )
+            if transcript_status is not None:
+                failure_args["transcript_status"] = transcript_status
+            await enqueue_failure(**failure_args)
         except Exception as exc:
             logger.error(
                 "failure_webhook_enqueue_failed",
@@ -687,6 +696,7 @@ class CallCoordinator:
                         else "transcript_unavailable"
                     ),
                     ended_at=ended_at,
+                    transcript_status="no_data",
                 )
             return
         call = CompletedCall(

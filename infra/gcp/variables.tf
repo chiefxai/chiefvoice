@@ -6,19 +6,24 @@ variable "github_repository" {
 }
 variable "region" {
   type    = string
-  default = "us-central1"
+  default = "asia-south1"
 }
 variable "zone" {
   type    = string
-  default = "us-central1-a"
+  default = "asia-south1-a"
 }
 variable "vm_machine_type" {
   type    = string
-  default = "e2-standard-4"
+  default = "e2-standard-2"
 }
 variable "vm_disk_gb" {
   type    = number
-  default = 100
+  default = 50
+}
+variable "terraform_state_bucket_name" {
+  type        = string
+  default     = "chiefvoice-tfstate-297803100712"
+  description = "Existing GCS bucket used by the infra/gcp Terraform backend."
 }
 variable "object_storage_bucket_name" { type = string }
 variable "public_domain" {

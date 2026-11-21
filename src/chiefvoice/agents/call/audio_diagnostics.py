@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import struct
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +30,9 @@ class _AudioStage:
     audio_bytes: int = 0
     wire_bytes: int = 0
     sample_rates: set[int] = field(default_factory=set)
+    pcm_samples: int = 0
+    pcm_sum_squares: int = 0
+    pcm_peak: int = 0
 
 
 class CallAudioDiagnostics:
@@ -40,6 +45,7 @@ class CallAudioDiagnostics:
         self._gemini_audio = {
             "received": 0,
             "queued": 0,
+            "preroll_buffered": 0,
             "sent": 0,
             "dropped": 0,
         }
@@ -94,6 +100,7 @@ class CallAudioDiagnostics:
         audio_bytes: int,
         sample_rate: int | None,
         wire_bytes: int = 0,
+        audio: bytes | None = None,
     ) -> None:
         stats = self._stages.setdefault(stage, _AudioStage())
         stats.frames += 1
@@ -101,6 +108,12 @@ class CallAudioDiagnostics:
         stats.wire_bytes += max(0, wire_bytes)
         if sample_rate:
             stats.sample_rates.add(sample_rate)
+        if audio:
+            pcm = audio[: len(audio) - (len(audio) % 2)]
+            for (sample,) in struct.iter_unpack("<h", pcm):
+                stats.pcm_samples += 1
+                stats.pcm_sum_squares += sample * sample
+                stats.pcm_peak = max(stats.pcm_peak, abs(sample))
         if stats.frames == 1:
             extra = {
                 "session_id": self.session_id,
@@ -108,6 +121,8 @@ class CallAudioDiagnostics:
                 "audio_bytes": audio_bytes,
                 "sample_rate": sample_rate,
                 "elapsed_since_pipeline_ms": round((time.monotonic() - self._started_at) * 1000),
+                "rms_dbfs": _dbfs(stats.pcm_sum_squares, stats.pcm_samples),
+                "peak_dbfs": _peak_dbfs(stats.pcm_peak),
             }
             logger.info(
                 "call_audio_first_frame",
@@ -120,7 +135,7 @@ class CallAudioDiagnostics:
         frame: InputAudioRawFrame | OutputAudioRawFrame,
         wire_bytes: int = 0,
     ) -> None:
-        self.record(stage, len(frame.audio), frame.sample_rate, wire_bytes)
+        self.record(stage, len(frame.audio), frame.sample_rate, wire_bytes, frame.audio)
 
     def log_summary(self) -> None:
         stages: dict[str, dict[str, Any]] = {
@@ -129,6 +144,8 @@ class CallAudioDiagnostics:
                 "audio_bytes": stats.audio_bytes,
                 "wire_bytes": stats.wire_bytes,
                 "sample_rates": sorted(stats.sample_rates),
+                "rms_dbfs": _dbfs(stats.pcm_sum_squares, stats.pcm_samples),
+                "peak_dbfs": _peak_dbfs(stats.pcm_peak),
             }
             for name, stats in self._stages.items()
         }
@@ -140,7 +157,14 @@ class CallAudioDiagnostics:
         ):
             stages.setdefault(
                 name,
-                {"frames": 0, "audio_bytes": 0, "wire_bytes": 0, "sample_rates": []},
+                {
+                    "frames": 0,
+                    "audio_bytes": 0,
+                    "wire_bytes": 0,
+                    "sample_rates": [],
+                    "rms_dbfs": -120.0,
+                    "peak_dbfs": -120.0,
+                },
             )
         logger.info(
             "call_audio_flow_summary",
@@ -152,6 +176,19 @@ class CallAudioDiagnostics:
                 "conversation_events": dict(self._vad_events),
             },
         )
+
+
+def _dbfs(sum_squares: int, sample_count: int) -> float:
+    if not sample_count or not sum_squares:
+        return -120.0
+    rms = math.sqrt(sum_squares / sample_count)
+    return round(max(-120.0, 20 * math.log10(rms / 32768.0)), 1)
+
+
+def _peak_dbfs(peak: int) -> float:
+    if not peak:
+        return -120.0
+    return round(max(-120.0, 20 * math.log10(peak / 32768.0)), 1)
 
 
 class AudioFrameCounter(FrameProcessor):

@@ -419,6 +419,7 @@ class SqlPostCallQueue:
         attempts: int | None = None,
         target_url: str | None = None,
         custom_payload: dict | None = None,
+        transcript_status: str | None = None,
     ) -> bool:
         """Queue a signed failure callback without invoking a model."""
         if event_type not in {"call.failed", "call.post_call.failed"}:
@@ -443,6 +444,8 @@ class SqlPostCallQueue:
                 "attempts": attempts,
             },
         }
+        if transcript_status is not None:
+            body["post_call"] = {"transcript_status": transcript_status}
         async with self._sessions.begin() as session:
             config = await session.get(PostCallWebhookConfigRow, tenant_id)
             if config is None:

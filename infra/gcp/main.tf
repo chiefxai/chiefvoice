@@ -98,7 +98,8 @@ resource "google_storage_bucket" "objects" {
   location                    = var.region
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
-  force_destroy               = false
+  # Regional migration intentionally replaces this bucket; old recordings and backups may be discarded.
+  force_destroy               = true
   labels                      = var.labels
 }
 resource "google_artifact_registry_repository" "images" {
@@ -173,6 +174,33 @@ resource "google_project_iam_member" "github_deploy_cloudbuild_bucket_lister" {
   project = var.project_id
   role    = "roles/storage.bucketViewer"
   member  = "serviceAccount:${google_service_account.github_deploy.email}"
+}
+resource "google_project_iam_member" "github_deploy_terraform_roles" {
+  for_each = toset([
+    "roles/artifactregistry.admin",
+    "roles/cloudtasks.admin",
+    "roles/compute.admin",
+    "roles/iam.serviceAccountAdmin",
+    "roles/iam.workloadIdentityPoolAdmin",
+    "roles/resourcemanager.projectIamAdmin",
+    "roles/secretmanager.admin",
+    "roles/serviceusage.serviceUsageAdmin",
+    "roles/storage.admin",
+    "roles/vpcaccess.admin",
+  ])
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.github_deploy.email}"
+}
+resource "google_service_account_iam_member" "github_deploy_backend_act_as" {
+  service_account_id = google_service_account.backend.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.github_deploy.email}"
+}
+resource "google_storage_bucket_iam_member" "github_deploy_terraform_state" {
+  bucket = var.terraform_state_bucket_name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.github_deploy.email}"
 }
 data "google_storage_bucket" "cloudbuild_source" {
   name = "${var.project_id}_cloudbuild"

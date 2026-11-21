@@ -140,6 +140,7 @@ def reliable_vertex_service_class(
             self._chiefvoice_pending_interruption = False
             self._chiefvoice_pending_interruption_task: asyncio.Task | None = None
             self._chiefvoice_preconnected = False
+            self._chiefvoice_audio_input_frames = 0
             super().__init__(*args, **kwargs)
 
         async def setup(self, setup: Any) -> None:
@@ -260,6 +261,18 @@ def reliable_vertex_service_class(
 
         async def _send_user_audio(self, frame: InputAudioRawFrame) -> None:
             diagnostics.record_gemini_audio("received")
+            self._chiefvoice_audio_input_frames += 1
+            if self._chiefvoice_audio_input_frames == 1:
+                logger.info(
+                    "gemini_audio_received_by_service",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "audio_bytes": len(frame.audio),
+                        "sample_rate": frame.sample_rate,
+                        "ready_for_audio": bool(self._ready_for_realtime_input),
+                    },
+                )
             if self._audio_input_paused or self._disconnecting:
                 diagnostics.record_gemini_audio("dropped")
                 logger.debug(
@@ -330,6 +343,8 @@ def reliable_vertex_service_class(
                 )
                 self._user_audio_preroll_buffer = self._user_audio_preroll_buffer[-preroll_len:]
                 self._user_audio_preroll_buffer_sample_rate = frame.sample_rate
+                diagnostics.record_gemini_audio("preroll_buffered")
+                return
             diagnostics.record_gemini_audio("sent")
             return True
 

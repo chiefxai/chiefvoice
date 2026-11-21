@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +41,7 @@ class PostCallResult:
     extracted_data: dict[str, Any] = field(default_factory=dict)
     action_items: tuple[str, ...] = ()
     structured_output: dict[str, Any] | None = None
+    transcript_status: Literal["clear", "unclear", "no_data"] = "clear"
 
 
 class PostCallAgent(Protocol):
