@@ -7,7 +7,8 @@ substitutions:
   _PUBLIC_DOMAIN: core.elvoryx.in
   _FUNCTION_NAME: chiefvoice-post-call
   _FUNCTION_REGION: asia-south1
-  _FUNCTION_VPC_CONNECTOR: REPLACE_WITH_TERRAFORM_OUTPUT
+  _FUNCTION_NETWORK: REPLACE_WITH_TERRAFORM_OUTPUT
+  _FUNCTION_SUBNET: REPLACE_WITH_TERRAFORM_OUTPUT
   _FUNCTION_SERVICE_ACCOUNT: REPLACE_WITH_TERRAFORM_OUTPUT
   _FUNCTION_BUILD_SERVICE_ACCOUNT: REPLACE_WITH_TERRAFORM_OUTPUT
   _TASK_INVOKER_SERVICE_ACCOUNT: REPLACE_WITH_TERRAFORM_OUTPUT
@@ -48,10 +49,11 @@ steps:
       - |
         test "${PROJECT_ID}" = "chiefvoice-service" || { echo "Refusing deployment to unexpected GCP project" >&2; exit 1; }
         test "${_REGION}" = "asia-south1" || { echo "Refusing deployment with unexpected region" >&2; exit 1; }
+        test "${_FUNCTION_REGION}" = "asia-south1" || { echo "Refusing deployment with unexpected function region" >&2; exit 1; }
         test "${_PUBLIC_DOMAIN}" = "core.elvoryx.in" || { echo "Refusing deployment with unexpected public domain" >&2; exit 1; }
         for value in \
           "${_AR_REPOSITORY}" "${_VM_NAME}" "${_ZONE}" \
-          "${_FUNCTION_NAME}" "${_FUNCTION_REGION}" "${_FUNCTION_VPC_CONNECTOR}" \
+          "${_FUNCTION_NAME}" "${_FUNCTION_REGION}" "${_FUNCTION_NETWORK}" "${_FUNCTION_SUBNET}" \
           "${_FUNCTION_SERVICE_ACCOUNT}" "${_FUNCTION_BUILD_SERVICE_ACCOUNT}" \
           "${_TASK_INVOKER_SERVICE_ACCOUNT}" "${_DATABASE_URL_SECRET}" \
           "${_CREDENTIALS_ENCRYPTION_KEY_SECRET}" "${_POST_CALL_ENCRYPTION_KEY_SECRET}" \
@@ -124,7 +126,7 @@ steps:
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${BUILD_ID}
 
   - id: deploy-post-call-function
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:558.0.0-slim
     entrypoint: bash
     args:
       - -ceu
@@ -136,8 +138,9 @@ steps:
           --trigger-http --no-allow-unauthenticated \
           --service-account=${_FUNCTION_SERVICE_ACCOUNT} \
           --build-service-account=${_FUNCTION_BUILD_SERVICE_ACCOUNT} \
-          --vpc-connector=${_FUNCTION_VPC_CONNECTOR} \
-          --egress-settings=private-ranges-only \
+          --network=${_FUNCTION_NETWORK} \
+          --subnet=${_FUNCTION_SUBNET} \
+          --direct-vpc-egress=private-ranges-only \
           --timeout=240s --memory=1Gi \
           --max-instances=${_POST_CALL_FUNCTION_MAX_INSTANCES} \
           --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=false,VERTEX_PROJECT_ID=${PROJECT_ID},VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_LOCATION=${_POST_CALL_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL},POST_CALL_TRANSCRIPTION_PROJECT_ID=${PROJECT_ID},POST_CALL_TRANSCRIPTION_LOCATION=${_POST_CALL_TRANSCRIPTION_LOCATION},POST_CALL_TRANSCRIPTION_MODEL=${_POST_CALL_TRANSCRIPTION_MODEL},RECORDINGS_ENABLED=true,RECORDINGS_STORAGE_BACKEND=s3,OBJECT_STORAGE_BUCKET=${_OBJECT_STORAGE_BUCKET},OBJECT_STORAGE_REGION=auto,OBJECT_STORAGE_ENDPOINT_URL=https://storage.googleapis.com,OBJECT_STORAGE_ADDRESSING_STYLE=path,OBJECT_STORAGE_PREFIX=chiefvoice \

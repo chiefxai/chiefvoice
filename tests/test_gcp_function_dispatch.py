@@ -1,8 +1,23 @@
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
 from chiefvoice.agents.post_call.gcp_function_dispatch import GoogleCloudFunctionInvoker
+
+
+def test_cloud_build_deploys_function_with_direct_vpc_egress():
+    cloudbuild = (Path(__file__).resolve().parents[1] / "cloudbuild.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "gcr.io/google.com/cloudsdktool/cloud-sdk:558.0.0-slim" in cloudbuild
+    assert "--network=${_FUNCTION_NETWORK}" in cloudbuild
+    assert "--subnet=${_FUNCTION_SUBNET}" in cloudbuild
+    assert "--direct-vpc-egress=private-ranges-only" in cloudbuild
+    assert '--region=${_FUNCTION_REGION}' in cloudbuild
+    assert 'test "${_FUNCTION_REGION}" = "asia-south1"' in cloudbuild
+    assert "--vpc-connector" not in cloudbuild
+    assert "--egress-settings" not in cloudbuild
 
 
 def test_gcp_function_url_requires_https_without_query_or_credentials():
