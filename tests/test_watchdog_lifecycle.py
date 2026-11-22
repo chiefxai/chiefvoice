@@ -12,6 +12,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMRunFrame,
+    OutputAudioRawFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
@@ -50,7 +51,12 @@ async def make_watchdog(
     response_timeout=0.02,
     inactivity_timeout=0.02,
 ):
-    session = SimpleNamespace(session_id="watchdog-test", provider="vobiz")
+    session = SimpleNamespace(
+        session_id="watchdog-test",
+        provider="vobiz",
+        auto_hangup_when_complete=False,
+        metadata={},
+    )
     diagnostics = CallAudioDiagnostics(session)
 
     watchdog = FakeWatchdog(
@@ -121,20 +127,21 @@ async def test_stale_turn_cannot_recover_after_new_caller_turn():
     await asyncio.sleep(0.03)
     assert old_task is not None
     assert service.recoveries == 1  # only the current turn can recover
-    assert service.hangups == 0
+    assert service.hangups == 1  # unrecovered silence follows the fallback contract
     await watchdog.cleanup()
 
 
 @pytest.mark.asyncio
-async def test_unready_gemini_connection_is_not_recovered_or_hung_up():
+async def test_unready_gemini_connection_uses_fallback_and_hangup():
     service = FakeService(ready=False)
     watchdog, _ = await make_watchdog(service, response_timeout=0.001)
     await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     await asyncio.sleep(0.02)
     # The watchdog delegates reconnect/readiness validation to the service;
-    # the fake service refuses recovery while its session is unavailable.
+    # the fake refuses recovery while its session is unavailable, then fallback
+    # prevents leaving the caller connected to a silent agent.
     assert service.recoveries == 1
-    assert service.hangups == 0
+    assert service.hangups == 1
     await watchdog.cleanup()
 
 
@@ -169,6 +176,10 @@ async def test_llm_response_end_clears_generation_state():
 
     await watchdog.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
     assert watchdog._gemini_is_generating is True
+    await watchdog.process_frame(
+        OutputAudioRawFrame(audio=b"hello", sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
 
     await watchdog.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
 
@@ -197,6 +208,10 @@ async def test_playback_stop_does_not_mark_generation_complete():
     watchdog, _ = await make_watchdog(response_timeout=10)
 
     await watchdog.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+    await watchdog.process_frame(
+        OutputAudioRawFrame(audio=b"hello", sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
     await watchdog.process_frame(BotStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     await watchdog.process_frame(BotStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
 
@@ -218,6 +233,10 @@ async def test_inactivity_timer_waits_for_playback_to_finish():
 
     await watchdog.process_frame(BotStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     await watchdog.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+    await watchdog.process_frame(
+        OutputAudioRawFrame(audio=b"hello", sample_rate=16000, num_channels=1),
+        FrameDirection.DOWNSTREAM,
+    )
     await watchdog.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
 
     assert watchdog._gemini_is_generating is False
@@ -260,7 +279,10 @@ async def test_llm_response_start_cancels_pending_response_watchdog():
     await asyncio.sleep(0)
 
     assert task.cancelled()
-    assert watchdog._watch_task is None
+    generation_task = watchdog._watch_task
+    assert generation_task is not None
+    assert generation_task is not task
+    assert "::gemini_generation_watchdog_" in generation_task.get_name()
     assert watchdog._gemini_is_generating is True
 
     await watchdog.cleanup()
