@@ -6,13 +6,19 @@ from uuid import uuid4
 
 from cryptography.fernet import Fernet
 import pytest
+from sqlalchemy import select
 
 from chiefvoice.accounts.models import new_tenant_account
 from chiefvoice.accounts.store import SqlAccountStore
 from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.queue import SqlPostCallQueue
 from chiefvoice.billing import BillingMode
-from chiefvoice.billing.store import SqlBillingDirectory
+from chiefvoice.billing.store import (
+    BillingLedgerEntryRow,
+    SqlBillingDirectory,
+    TenantVoicePlanRow,
+    VoiceReservationRow,
+)
 from chiefvoice.channels.vobiz.replay import SqlVobizCallbackNonceStore
 from chiefvoice.identity.api_keys import SqlApiKeyDirectory
 from chiefvoice.sessions import Direction
@@ -68,12 +74,68 @@ async def test_postgres_tenant_scoping_billing_and_post_call_outbox():
 
         answered_at = datetime.now(UTC)
         await billing.mark_prepaid_voice_answered(tenant_id, session_id, answered_at)
-        assert await billing.settle_prepaid_voice_at(
+        # The boolean reports whether this settlement emitted a duration-limit
+        # event, not whether settlement itself succeeded.
+        assert not await billing.settle_prepaid_voice_at(
             tenant_id, session_id, 10, answered_at + timedelta(seconds=10)
         )
         assert not await billing.settle_prepaid_voice_at(
             tenant_id, session_id, 10, answered_at + timedelta(seconds=10)
         )
+
+        async with billing._sessions() as db:
+            reservation = await db.get(VoiceReservationRow, session_id)
+            assert reservation is not None
+            assert reservation.tenant_id == tenant_id
+            assert reservation.status == "settled"
+            assert reservation.billable_seconds == 10
+            assert reservation.charged_minor is not None
+
+            plan = await db.get(TenantVoicePlanRow, tenant_id)
+            assert plan is not None
+            assert plan.prepaid_balance_minor == 100 - reservation.charged_minor
+
+            ledger_entries = list(
+                (
+                    await db.scalars(
+                        select(BillingLedgerEntryRow).where(
+                            BillingLedgerEntryRow.session_id == session_id
+                        )
+                    )
+                ).all()
+            )
+            assert len(ledger_entries) == 1
+            assert ledger_entries[0].tenant_id == tenant_id
+            assert ledger_entries[0].entry_type == "voice_charge"
+            assert ledger_entries[0].amount_minor == -reservation.charged_minor
+
+        # A separate over-limit call checks the event return semantics and
+        # idempotent duration-limit marker independently.
+        limit_session_id = str(uuid4())
+        limit_entitlement = await billing.reserve_prepaid_voice(
+            tenant_id, limit_session_id, "phone", Direction.OUTBOUND
+        )
+        assert limit_entitlement is not None and limit_entitlement.can_use_voice
+        limit_answered_at = datetime.now(UTC)
+        await billing.mark_prepaid_voice_answered(tenant_id, limit_session_id, limit_answered_at)
+        assert await billing.settle_prepaid_voice_at(
+            tenant_id, limit_session_id, 61, limit_answered_at + timedelta(seconds=61)
+        )
+        assert not await billing.settle_prepaid_voice_at(
+            tenant_id, limit_session_id, 61, limit_answered_at + timedelta(seconds=61)
+        )
+        async with billing._sessions() as db:
+            limit_reservation = await db.get(VoiceReservationRow, limit_session_id)
+            assert limit_reservation is not None
+            assert limit_reservation.tenant_id == tenant_id
+            assert limit_reservation.status == "settled_over_limit"
+            assert limit_reservation.duration_limit_event_reported is True
+            assert await db.scalar(
+                select(BillingLedgerEntryRow.entry_id).where(
+                    BillingLedgerEntryRow.session_id == limit_session_id,
+                    BillingLedgerEntryRow.tenant_id == other_tenant_id,
+                )
+            ) is None
 
         call = CompletedCall(
             session_id=str(uuid4()),
@@ -92,6 +154,36 @@ async def test_postgres_tenant_scoping_billing_and_post_call_outbox():
         await vobiz_nonces.close()
         await billing.close()
         await account_store.close()
+
+
+def test_api_key_model_import_registers_agent_configuration_table_in_isolated_process():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repository_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    source_path = str(repository_root / "src")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [source_path, env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import chiefvoice.identity.api_keys; "
+            "from chiefvoice.accounts.store import Base; "
+            "assert 'agent_provider_configs' in Base.metadata.tables; "
+            "assert 'api_keys' in Base.metadata.tables",
+        ],
+        cwd=repository_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio

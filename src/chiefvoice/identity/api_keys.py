@@ -16,8 +16,13 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from chiefvoice.accounts.models import TenantAccount
 from chiefvoice.accounts.store import Base, TenantAccountRow
+from chiefvoice.agents.configuration_store import AgentConfigurationRow
 from chiefvoice.billing import BillingMode
 from chiefvoice.core.db_schema import verify_schema_revision
+
+# Register the table referenced by ApiKeyRow's foreign keys whenever this
+# persistence module is imported, without depending on a later lazy code path.
+_REGISTERED_FOREIGN_KEY_MODELS = (AgentConfigurationRow,)
 
 API_KEY_PREFIX = "cv_live_"
 _KEY_PATTERN = re.compile(r"^cv_live_([a-f0-9]{24})\.([A-Za-z0-9_-]{43})$")
