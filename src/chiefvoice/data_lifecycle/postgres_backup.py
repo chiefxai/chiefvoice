@@ -67,6 +67,7 @@ class EncryptedPostgresBackupProvider:
             raise ValueError("S3 backup storage requires both a client and bucket")
         self._s3_client = s3_client
         self._s3_bucket = s3_bucket
+        self._storage_uri_scheme = getattr(s3_client, "uri_scheme", "s3")
         self._s3_prefix = s3_prefix.strip("/") or "backups"
         try:
             key = base64.urlsafe_b64decode(encryption_key.encode("ascii"))
@@ -94,7 +95,7 @@ class EncryptedPostgresBackupProvider:
         try:
             created_at, checksum, size_bytes = await self._dump_encrypted(encrypted_path)
             storage_uri = (
-                f"s3://{self._s3_bucket}/{self._backup_key(backup_id, 'database.dump.aesgcm')}"
+                f"{self._storage_uri_scheme}://{self._s3_bucket}/{self._backup_key(backup_id, 'database.dump.aesgcm')}"
                 if self._s3_client is not None
                 else (self.directory / backup_id / encrypted_path.name).as_uri()
             )
@@ -321,7 +322,7 @@ class EncryptedPostgresBackupProvider:
                 finally:
                     body.close()
                 expected_uri = (
-                    f"s3://{self._s3_bucket}/"
+                    f"{self._storage_uri_scheme}://{self._s3_bucket}/"
                     f"{self._backup_key(backup_id, 'database.dump.aesgcm')}"
                 )
             else:
@@ -346,7 +347,11 @@ class EncryptedPostgresBackupProvider:
             if payload.get("backup_id") != backup_id:
                 return None
             if self._s3_client is not None:
-                if payload.get("storage_uri") != expected_uri:
+                allowed_uris = {expected_uri}
+                if self._storage_uri_scheme == "gs":
+                    # Preserve backups created before migration through the GCS XML API.
+                    allowed_uris.add(expected_uri.replace("gs://", "s3://", 1))
+                if payload.get("storage_uri") not in allowed_uris:
                     return None
             elif Path(payload["storage_uri"]).resolve().as_uri() != expected_uri:
                 return None
@@ -559,7 +564,11 @@ def _safe_process_environment() -> dict[str, str]:
 def _is_missing_s3_object(exc: Exception) -> bool:
     response = getattr(exc, "response", {})
     error = response.get("Error", {}) if isinstance(response, dict) else {}
-    return error.get("Code") in {"404", "NoSuchKey", "NotFound"}
+    return (
+        error.get("Code") in {"404", "NoSuchKey", "NotFound"}
+        or exc.__class__.__name__ == "NotFound"
+        or getattr(exc, "code", None) == 404
+    )
 
 
 def _libpq_environment(database_url: str) -> tuple[dict[str, str], tuple[str, str, str]]:

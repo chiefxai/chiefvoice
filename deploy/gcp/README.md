@@ -34,8 +34,6 @@ The active GCP Terraform root is maintained in the separate [chiefvoice-infra re
 | `chiefvoice-vobiz-route-token` | Random inbound route token |
 | `chiefvoice-recordings-encryption-key` | Fernet key for call recordings |
 | `chiefvoice-backup-encryption-key` | URL-safe base64 32-byte key for AES-GCM backups |
-| `chiefvoice-object-storage-access-key-id` | Cloud Storage service-account HMAC access ID |
-| `chiefvoice-object-storage-secret-access-key` | Cloud Storage service-account HMAC secret |
 
 Configure a Cloud Build trigger substitution for every deployment-specific value in `cloudbuild.yaml`, especially `_RUNTIME_SERVICE_ACCOUNT`, `_MIGRATION_SERVICE_ACCOUNT`, `_CLOUD_SQL_INSTANCE`, `_OBJECT_STORAGE_BUCKET`, `_VOBIZ_PUBLIC_URL`, `_GCP_PROJECT_PARENT`, `_GCP_BILLING_ACCOUNT_ID`, `_GCP_BUDGET_API_PROJECT_ID`, `_GCP_VERTEX_MONTHLY_SPEND_CAP`, `_OIDC_ISSUER`, `_OIDC_AUDIENCE`, and `_OIDC_JWKS_URL`. Set `_VOBIZ_PUBLIC_URL` to the HTTPS custom domain that Vobiz can reach. For Cloud Functions execution, also set `_POST_CALL_EXECUTION_BACKEND=gcp_function` and `_POST_CALL_FUNCTION_SERVICE_ACCOUNT`. Change the default placeholder values before creating the trigger. The API is publicly reachable so Vobiz can send call webhooks; application routes still enforce OIDC/API-key auth or provider signature/route-token validation. The pipeline runs unit tests and static import checks before building, then probes `/healthz`, `/readyz`, and `/metrics` after deployment.
 

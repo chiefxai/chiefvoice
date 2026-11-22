@@ -74,7 +74,7 @@ from chiefvoice.data_lifecycle.backup import (
     run_backups_periodically,
 )
 from chiefvoice.data_lifecycle.postgres_backup import EncryptedPostgresBackupProvider
-from chiefvoice.storage.s3 import create_s3_compatible_client
+from chiefvoice.storage.client import create_object_storage_client
 from chiefvoice.sessions import AcceptedSession
 from chiefvoice.calls.routes import router as calls_router
 
@@ -537,15 +537,15 @@ def create_app(
         if not isinstance(restore_targets, list) or any(not isinstance(item, str) for item in restore_targets):
             raise ValueError("BACKUP_RESTORE_TARGETS_JSON must be a JSON list of DSNs")
         backup_backend = settings.backup_storage_backend
-        if backup_backend == "s3":
+        if backup_backend in {"s3", "gcs"}:
             if not settings.object_storage_bucket:
-                raise ValueError("OBJECT_STORAGE_BUCKET is required for S3 database backups")
+                raise ValueError("OBJECT_STORAGE_BUCKET is required for object-storage database backups")
             provider = EncryptedPostgresBackupProvider(
                 settings.database_url,
                 settings.backup_directory,
                 settings.backup_encryption_key,
                 allowed_restore_targets=tuple(restore_targets),
-                s3_client=create_s3_compatible_client(),
+                s3_client=create_object_storage_client(),
                 s3_bucket=settings.object_storage_bucket,
                 s3_prefix="backups",
             )
@@ -560,7 +560,7 @@ def create_app(
                 allowed_restore_targets=tuple(restore_targets),
             )
         else:
-            raise ValueError("BACKUP_STORAGE_BACKEND must be 'local' or 's3'")
+            raise ValueError("BACKUP_STORAGE_BACKEND must be 'local', 's3', or 'gcs'")
         backup_provider = provider
         backup_runner = BackupRunner(backup_policies, provider)
         backup_execution_lock = PostgresBackupRunLock(settings.database_url)

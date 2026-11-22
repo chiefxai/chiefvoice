@@ -125,3 +125,56 @@ def test_backup_metadata_mac_changes_when_metadata_is_tampered(tmp_path: Path):
 
     assert signature == provider._metadata_signature(payload)
     assert signature != provider._metadata_signature({**payload, "resource": "other"})
+
+
+def test_gcs_backup_metadata_accepts_legacy_s3_uri(tmp_path: Path):
+    from io import BytesIO
+
+    class MemoryGCS:
+        uri_scheme = "gs"
+
+        def __init__(self):
+            self.objects = {}
+
+        def get_object(self, *, Bucket, Key):
+            return {"Body": BytesIO(self.objects[(Bucket, Key)])}
+
+    client = MemoryGCS()
+    bucket = "chiefvoice-service"
+    backup_id = "b" * 32
+    encryption_key = Fernet.generate_key().decode("ascii")
+
+    provider = EncryptedPostgresBackupProvider(
+        "postgresql+asyncpg://dbuser:dbpass@db.example:5432/app",
+        tmp_path,
+        encryption_key,
+        s3_client=client,
+        s3_bucket=bucket,
+        s3_prefix="backups",
+    )
+
+    backup_key = provider._backup_key(backup_id, "database.dump.aesgcm")
+    legacy_uri = f"s3://{bucket}/{backup_key}"
+    artifact = BackupArtifact(
+        backup_id=backup_id,
+        scope=BackupScope.SERVICE,
+        tenant_id=None,
+        resource="postgres",
+        created_at=datetime.now(UTC),
+        storage_uri=legacy_uri,
+        checksum_sha256="a" * 64,
+        encrypted=True,
+        size_bytes=100,
+    )
+
+    payload = _artifact_payload(artifact)
+    payload["metadata_hmac"] = provider._metadata_signature(payload)
+    metadata_key = provider._backup_key(backup_id, "metadata.json")
+    client.objects[(bucket, metadata_key)] = (
+        json.dumps(payload).encode("utf-8")
+    )
+
+    restored_metadata = provider._read_metadata(backup_id)
+
+    assert restored_metadata is not None
+    assert restored_metadata["storage_uri"] == legacy_uri
