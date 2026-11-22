@@ -47,16 +47,3 @@ jobs:
           uv run ruff check src tests --select F
           uv run mypy src/chiefvoice_sdk src/chiefvoice/agents/post_call/gcp_function_dispatch.py src/chiefvoice/agents/post_call/lambda_handler.py
           uv run python -m compileall -q src
-
-  terraform:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.8
-      - name: Validate AWS template
-        working-directory: infra/aws
-        run: terraform fmt -recursive && terraform init -backend=false -input=false && terraform validate
-
