@@ -29,9 +29,17 @@ class FakeService:
         self._bot_is_responding = False
         self.recoveries = 0
         self.hangups = 0
+        self.recovery_started = asyncio.Event()
+        self.recovery_gate = None
+        self.recovery_error = None
 
     async def recover_unanswered_turn(self):
         self.recoveries += 1
+        self.recovery_started.set()
+        if self.recovery_gate is not None:
+            await self.recovery_gate.wait()
+        if self.recovery_error is not None:
+            raise self.recovery_error
         return bool(self._session and self._ready_for_realtime_input)
 
     async def play_fallback_and_hangup(self):
@@ -49,8 +57,13 @@ async def make_watchdog(
     *,
     response_timeout=0.02,
     inactivity_timeout=0.02,
+    recovery_grace=0,
 ):
-    session = SimpleNamespace(session_id="watchdog-test", provider="vobiz")
+    session = SimpleNamespace(
+        session_id="watchdog-test",
+        provider="vobiz",
+        auto_hangup_when_complete=False,
+    )
     diagnostics = CallAudioDiagnostics(session)
 
     watchdog = FakeWatchdog(
@@ -58,7 +71,7 @@ async def make_watchdog(
         service or FakeService(),
         diagnostics,
         response_timeout_seconds=response_timeout,
-        recovery_grace_seconds=0,
+        recovery_grace_seconds=recovery_grace,
         caller_inactivity_seconds=inactivity_timeout,
     )
 
@@ -113,29 +126,90 @@ async def test_gemini_response_start_cancels_watchdog():
 @pytest.mark.asyncio
 async def test_stale_turn_cannot_recover_after_new_caller_turn():
     service = FakeService()
-    watchdog, _ = await make_watchdog(service, response_timeout=0.01)
+    watchdog, _ = await make_watchdog(
+        service, response_timeout=0.01, recovery_grace=1
+    )
     await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     old_task = watchdog._watch_task
     await watchdog.process_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     await asyncio.sleep(0.03)
     assert old_task is not None
+    assert old_task.cancelled()
     assert service.recoveries == 1  # only the current turn can recover
     assert service.hangups == 0
     await watchdog.cleanup()
 
 
 @pytest.mark.asyncio
-async def test_unready_gemini_connection_is_not_recovered_or_hung_up():
+async def test_unready_gemini_waits_for_recovery_decision_then_falls_back_once():
     service = FakeService(ready=False)
+    service.recovery_gate = asyncio.Event()
     watchdog, _ = await make_watchdog(service, response_timeout=0.001)
     await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-    await asyncio.sleep(0.02)
-    # The watchdog delegates reconnect/readiness validation to the service;
-    # the fake service refuses recovery while its session is unavailable.
-    assert service.recoveries == 1
+    await asyncio.wait_for(service.recovery_started.wait(), timeout=1)
+    task = watchdog._watch_task
+    assert task is not None
+    # Do not hang up while the reconnect/readiness decision is still pending.
     assert service.hangups == 0
+    service.recovery_gate.set()
+    await task
+    assert service.recoveries == 1
+    assert service.hangups == 1
+    assert watchdog._watch_task is None
     await watchdog.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_readiness_restored_during_recovery_leads_to_one_fallback():
+    service = FakeService(ready=False)
+    service.recovery_gate = asyncio.Event()
+    watchdog, _ = await make_watchdog(service, response_timeout=0.001)
+    await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+    await asyncio.wait_for(service.recovery_started.wait(), timeout=1)
+    task = watchdog._watch_task
+    assert task is not None
+    service._session = object()
+    service._ready_for_realtime_input = True
+    service.recovery_gate.set()
+    await task
+
+    assert service.recoveries == 1
+    assert service.hangups == 1
+    assert watchdog._watch_task is None
+    await watchdog.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_recovery_exception_falls_back_once():
+    service = FakeService()
+    service.recovery_error = RuntimeError("reconnect failed")
+    watchdog, _ = await make_watchdog(service, response_timeout=0.001)
+    await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+    task = watchdog._watch_task
+    assert task is not None
+    await task
+
+    assert service.recoveries == 1
+    assert service.hangups == 1
+    assert watchdog._watch_task is None
+    await watchdog.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cancels_watchdog_recovery_task():
+    service = FakeService(ready=False)
+    service.recovery_gate = asyncio.Event()
+    watchdog, _ = await make_watchdog(service, response_timeout=0.001)
+    await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+    await asyncio.wait_for(service.recovery_started.wait(), timeout=1)
+    task = watchdog._watch_task
+    assert task is not None and not task.done()
+
+    await watchdog.cleanup()
+
+    assert task.cancelled()
+    assert service.hangups == 0
 
 
 @pytest.mark.asyncio
@@ -260,7 +334,9 @@ async def test_llm_response_start_cancels_pending_response_watchdog():
     await asyncio.sleep(0)
 
     assert task.cancelled()
-    assert watchdog._watch_task is None
+    assert watchdog._watch_task is not None
+    assert watchdog._watch_task is not task
+    assert "gemini_generation_watchdog" in watchdog._watch_task.get_name()
     assert watchdog._gemini_is_generating is True
 
     await watchdog.cleanup()

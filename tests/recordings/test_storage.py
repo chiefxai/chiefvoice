@@ -137,3 +137,27 @@ def test_static_retention_configuration_is_empty_by_default():
             '[{"tenant_id":"tenant-alpha","data_class":"recording",'
             '"retain_for_seconds":0}]'
         )
+
+
+def test_gcs_recording_store_reads_legacy_s3_uri():
+    class MemoryGCS(_MemoryS3):
+        uri_scheme = "gs"
+
+    client = MemoryGCS()
+    key = Fernet.generate_key().decode("ascii")
+    store = S3RecordingStore("recordings-bucket", key, client=client)
+
+    uri = asyncio.run(
+        store.save_wav("tenant-alpha", "session-legacy", b"\x00\x00", 8000, 1)
+    )
+    assert uri is not None
+    assert uri.startswith("gs://")
+
+    legacy_uri = uri.replace("gs://", "s3://", 1)
+    data = asyncio.run(
+        store.read_wav("tenant-alpha", "session-legacy", legacy_uri)
+    )
+
+    assert data is not None
+    with wave.open(io.BytesIO(data), "rb") as wav:
+        assert wav.readframes(1) == b"\x00\x00"

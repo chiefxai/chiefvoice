@@ -496,8 +496,8 @@ async def test_watchdog_and_inactivity_mutual_exclusion():
     await watchdog.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
     await watchdog.process_frame(BotStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     assert watchdog._turn_state == ConversationTurnState.AWAITING_CALLER
-    assert watchdog._watch_task is not None
-    assert watchdog._caller_inactivity_task is None
+    assert watchdog._watch_task is None
+    assert watchdog._caller_inactivity_task is not None
 
     await watchdog.cleanup()
 
