@@ -67,13 +67,24 @@ async def test_postgres_tenant_scoping_billing_and_post_call_outbox():
         ) is None
 
         answered_at = datetime.now(UTC)
-        await billing.mark_prepaid_voice_answered(tenant_id, session_id, answered_at)
-        assert await billing.settle_prepaid_voice_at(
-            tenant_id, session_id, 10, answered_at + timedelta(seconds=10)
-        )
+        assert await billing.mark_prepaid_voice_answered(
+            tenant_id, session_id, answered_at
+        ) == answered_at
+        # Settlement returns whether this call exceeded the configured duration
+        # limit (the caller uses it to emit the limit metric), not whether the
+        # reservation was settled. Ten seconds is within the 60-second limit.
         assert not await billing.settle_prepaid_voice_at(
             tenant_id, session_id, 10, answered_at + timedelta(seconds=10)
         )
+        usage = await billing.get_usage_for_api_key(tenant_id, None)
+        assert usage is not None
+        assert usage["billable_seconds"] == 10
+        assert usage["charges_minor"] == 5
+        assert usage["active_reservations"] == 0
+        assert not await billing.settle_prepaid_voice_at(
+            tenant_id, session_id, 10, answered_at + timedelta(seconds=10)
+        )
+        assert (await billing.get_plan(tenant_id))["prepaid_balance_minor"] == 95
 
         call = CompletedCall(
             session_id=str(uuid4()),

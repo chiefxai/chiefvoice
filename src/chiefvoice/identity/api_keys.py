@@ -16,6 +16,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from chiefvoice.accounts.models import TenantAccount
 from chiefvoice.accounts.store import Base, TenantAccountRow
+from chiefvoice.agents.configuration_store import AgentConfigurationRow
 from chiefvoice.billing import BillingMode
 from chiefvoice.core.db_schema import verify_schema_revision
 
@@ -331,8 +332,6 @@ class SqlApiKeyDirectory:
             )
             if row is None:
                 return None
-            from chiefvoice.agents.configuration_store import AgentConfigurationRow
-
             voice_agent = await session.get(AgentConfigurationRow, row.voice_agent_id) if row.voice_agent_id else None
             post_call_agent = await session.get(AgentConfigurationRow, row.post_call_agent_id) if row.post_call_agent_id else None
             credentials = None

@@ -261,6 +261,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             self._gemini_is_generating = False
             self._metadata["gemini_is_generating"] = False
             logger.info("gemini_generation_completed", extra=self._log_context())
+            self._cancel_response_watchdog("gemini_response_completed")
             if self._session.auto_hangup_when_complete:
                 await self._maybe_hangup_after_completed_response()
             self._maybe_arm_caller_inactivity_timer()
@@ -677,7 +678,19 @@ class GeminiConversationWatchdog(FrameProcessor):
                     else 0
                 )
                 try:
-                    recovered = await self._service.recover_unanswered_turn()
+                    try:
+                        recovered = await self._service.recover_unanswered_turn()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        recovered = False
+                        logger.exception(
+                            "gemini_watchdog_recovery_failed",
+                            extra={
+                                **self._log_context(),
+                                "error_type": type(error).__name__,
+                            },
+                        )
                     if recovered:
                         logger.info("gemini_watchdog_recovery_requested", extra=self._log_context())
                         await asyncio.sleep(self._recovery_grace)
@@ -693,6 +706,11 @@ class GeminiConversationWatchdog(FrameProcessor):
                 or self._metadata.get("call_terminated")
             ):
                 return
+            # recover_unanswered_turn owns the bounded reconnect/readiness wait.
+            # If Gemini stays unavailable for that window, the local fallback
+            # still travels through the call's media pipeline and ends the turn;
+            # waiting for Gemini here would orphan this watchdog with no later
+            # readiness event subscribed to resume it.
             logger.warning(
                 "gemini_watchdog_recovery_finished_without_response",
                 extra={**self._log_context(), "recovery_succeeded": recovered},

@@ -77,6 +77,9 @@ class Settings:
     gemini_recovery_grace_seconds: float = float(
         os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "6")
     )
+    gemini_recovery_ready_timeout_seconds: float = float(
+        os.getenv("GEMINI_RECOVERY_READY_TIMEOUT_SECONDS", "8")
+    )
     # Independent caller silence and inactivity management configuration.
     caller_inactivity_timeout_seconds: float = float(
         os.getenv("CALLER_INACTIVITY_TIMEOUT_SECONDS", "30")
