@@ -1,7 +1,7 @@
 import pytest
 
 from chiefvoice.agents.post_call.workflows.attendance.validation import validate_attendance
-from chiefvoice.agents.post_call.base import CompletedCall
+from chiefvoice.agents.post_call.base import CompletedCall, PostCallResult
 from chiefvoice.agents.post_call.langchain_agent import LangChainPostCallAgent
 from chiefvoice.agents.post_call.workflows import PostCallWorkflowRegistry
 from chiefvoice.agents.post_call.workflows.attendance import AttendanceWorkflow
@@ -147,12 +147,44 @@ def test_partial_identity_is_incomplete():
     assert result["outcome"] == "incomplete"
 
 
-def test_arrival_without_actual_time_can_verify_status_but_time_is_null():
+def test_check_in_without_actual_time_is_incomplete_and_time_is_null():
     data = _data(status_text="I have arrived", time=None)
     result = _validate(data=data, status_text="I have arrived")
-    assert result["outcome"] == "verified"
+    assert result["outcome"] == "incomplete"
     assert result["fields"]["attendance_time"]["value"] is None
     assert "actual_attendance_time_unverified" in result["validation_errors"]
+
+
+def test_check_out_without_actual_time_is_incomplete_and_time_is_null():
+    text = "I departed"
+    data = _data(status="departed", status_text=text, time=None)
+    result = _validate(
+        data=data,
+        status_text=text,
+        claim={"collected_data": {"attendance_type": "check_out"}},
+    )
+    assert result["outcome"] == "incomplete"
+    assert result["fields"]["attendance_time"]["value"] is None
+    assert "actual_attendance_time_unverified" in result["validation_errors"]
+
+
+@pytest.mark.asyncio
+async def test_registered_attendance_workflow_without_assignment_requires_manual_review():
+    call = CompletedCall(
+        session_id="attendance-no-assignment",
+        tenant_id="tenant-a",
+        provider="test",
+        channel="phone",
+        direction="outbound",
+        transcript=_transcript(),
+        workflow_id="attendance",
+        workflow_context=None,
+    )
+    workflow = AttendanceWorkflow(chat_model=None)
+    result = await workflow.process(call, PostCallResult())
+    assert result["outcome"] == "incomplete"
+    assert result["requires_manual_review"] is True
+    assert "mandatory_assignment_configuration_missing" in result["validation_errors"]
 
 
 def test_not_arrived_with_callback_requested():
@@ -217,7 +249,6 @@ def test_identity_tool_event_is_accepted_only_with_matching_caller_turn():
 
 
 def test_caller_yes_without_assistant_final_summary_is_not_confirmation():
-    text = "Yes, I confirm the summary"
     transcript = _transcript().replace(
         "Assistant: Summary: caregiver Kumar, patient Meena, address Anna Nagar, attendance details recorded. Please confirm.\n",
         "",
@@ -307,3 +338,55 @@ def test_live_claim_conflict_is_reported_without_overwrite():
     assert result["outcome"] == "verified"
     assert result["is_consistent"] is False
     assert "patient_identity" in result["mismatched_fields"]
+
+
+def test_live_attendance_status_claim_agrees_with_caller_evidence():
+    result = _validate(
+        claim={"collected_data": {"attendance_status": "check in"}}
+    )
+
+    assert result["outcome"] == "verified"
+    assert result["fields"]["attendance_status"]["value"] == "arrived"
+    assert result["is_consistent"] is True
+    assert "attendance_status" not in result["mismatched_fields"]
+
+
+@pytest.mark.parametrize(
+    ("status", "utterance", "time", "claimed_status"),
+    [
+        ("arrived", "I arrived at 09:15", "09:15", "departed"),
+        ("departed", "I departed at 17:30", "17:30", "arrived"),
+    ],
+)
+def test_contradictory_live_attendance_status_claim_does_not_change_outcome(
+    status, utterance, time, claimed_status
+):
+    result = _validate(
+        data=_data(status=status, status_text=utterance, time=time),
+        status_text=utterance,
+        claim={"collected_data": {"attendance_status": claimed_status}},
+    )
+
+    assert result["outcome"] == "verified"
+    assert result["fields"]["attendance_status"]["value"] == status
+    assert result["is_consistent"] is False
+    assert "attendance_status" in result["mismatched_fields"]
+    assert "live_call_attendance_status_claim_conflicts_with_caller" in result[
+        "validation_errors"
+    ]
+
+
+def test_live_attendance_status_claim_is_unsupported_without_caller_status():
+    result = _validate(
+        data=_data(status=None, status_text="I am not sure"),
+        status_text="I am not sure",
+        claim={"collected_data": {"attendance_status": "arrived"}},
+    )
+
+    assert result["outcome"] == "incomplete"
+    assert result["fields"]["attendance_status"]["value"] is None
+    assert result["is_consistent"] is False
+    assert "attendance_status" in result["mismatched_fields"]
+    assert "live_call_attendance_status_claim_unsupported" in result[
+        "validation_errors"
+    ]

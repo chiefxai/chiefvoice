@@ -188,6 +188,32 @@ def _contains(text: str, terms: tuple[str, ...]) -> bool:
     return any(_norm(term) and _norm(term) in normalized for term in terms)
 
 
+def _attendance_status_kind(value: Any) -> str | None:
+    """Normalize only explicit attendance states, keeping check-in/out distinct."""
+    normalized = _norm(value).replace("_", " ")
+    if normalized in {
+        "not arrived", "haven't arrived", "have not arrived", "not reached",
+        "hasn't arrived", "has not arrived",
+    }:
+        return "not_arrived"
+    if normalized in {"arrived", "reached", "present", "checked in", "check in", "checkin"}:
+        return "arrived"
+    if normalized in {"departed", "left", "checked out", "check out", "checkout"}:
+        return "departed"
+    return None
+
+
+def _caller_attendance_status(utterance: str) -> str | None:
+    """Determine a status only when the cited caller utterance names one clearly."""
+    if _contains(utterance, _NOT_ARRIVED):
+        return "not_arrived"
+    arrival = _contains(utterance, _ARRIVAL + ("checked in", "check in", "checkin"))
+    departure = _contains(utterance, _DEPARTURE + ("checked out", "check out", "checkout"))
+    if arrival == departure:
+        return None
+    return "arrived" if arrival else "departed"
+
+
 def _confirms_final_summary(turns: list[tuple[str, str]], utterance: str) -> bool:
     for index, (speaker, text) in enumerate(turns):
         if speaker not in {"caller", "user"} or _norm(text) != _norm(utterance):
@@ -378,10 +404,14 @@ def validate_attendance(
                 elif not confirmed:
                     outcome = "incomplete"
                     errors.append("explicit_summary_confirmation_missing")
+                elif time_ev["verification_status"] != "verified":
+                    outcome = "incomplete"
+                    errors.append("actual_attendance_time_unverified")
                 else:
                     outcome = "verified"
                 if time_ev["verification_status"] != "verified":
-                    errors.append("actual_attendance_time_unverified")
+                    if "actual_attendance_time_unverified" not in errors:
+                        errors.append("actual_attendance_time_unverified")
             else:
                 outcome = "unclear" if _GARBLED.match(_norm(status_text)) else "incomplete"
                 errors.append("arrival_or_departure_not_supported_by_caller_speech")
@@ -420,6 +450,26 @@ def validate_attendance(
         if claimed_time and (not verified_time or _norm(claimed_time) != _norm(verified_time)):
             mismatches.append("attendance_time")
             errors.append("live_call_attendance_time_claim_conflicts")
+        explicit_claim_status = claim_data.get("attendance_status")
+        claimed_status = _attendance_status_kind(explicit_claim_status)
+        if explicit_claim_status is None:
+            # Historical end_call payloads used `status` for the attendance
+            # state; generic values such as "confirmed" remain broad claims.
+            legacy_status = claim_data.get("status")
+            claimed_status = _attendance_status_kind(legacy_status)
+            explicit_claim_status = legacy_status if claimed_status is not None else None
+        if explicit_claim_status is not None:
+            caller_status = _caller_attendance_status(
+                str(fields["attendance_status"]["original_utterance"] or "")
+                if fields["attendance_status"]["verification_status"] == "verified"
+                else ""
+            )
+            if claimed_status is None or caller_status is None:
+                mismatches.append("attendance_status")
+                errors.append("live_call_attendance_status_claim_unsupported")
+            elif claimed_status != caller_status:
+                mismatches.append("attendance_status")
+                errors.append("live_call_attendance_status_claim_conflicts_with_caller")
     claimed_complete = (
         _norm(claim_outcome)
         in {"confirmed", "completed", "checked in", "checked out", "arrived", "departed"}
