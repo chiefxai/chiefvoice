@@ -673,7 +673,7 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     setApiConfigurationOpen(false)
     navigate(pagePaths.Numbers, { replace: true })
   }
-  const profileTrigger = <div className="sidebar-profile"><Tooltip title="Profile menu" placement="right"><IconButton onClick={event => setProfileAnchor(event.currentTarget)} aria-label="Open profile menu"><Avatar sx={{ width: 34, height: 34, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar></IconButton></Tooltip><Typography variant="caption" sx={{ color: '#dce5f3', fontWeight: 700 }}>Platform admin</Typography></div>
+  const profileTrigger = <div className="sidebar-profile"><Tooltip title="Profile menu" placement="right"><IconButton onClick={event => setProfileAnchor(event.currentTarget)} aria-label="Open profile menu"><Avatar sx={{ width: 34, height: 34, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar></IconButton></Tooltip><Typography variant="caption" sx={{ color: '#dce5f3', fontWeight: 700 }}>Platform admin</Typography><Tooltip title="Sign out" placement="right"><IconButton aria-label="Sign out" onClick={() => { void disconnect() }} sx={{ color: '#aab5c7', '&:hover': { color: '#fff', backgroundColor: 'rgba(255,255,255,.08)' } }}><LogoutRoundedIcon fontSize="small" /></IconButton></Tooltip></div>
   const profileMenu = <Menu anchorEl={profileAnchor} open={Boolean(profileAnchor)} onClose={() => setProfileAnchor(null)} anchorOrigin={{ vertical: 'top', horizontal: 'right' }} transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}>
     <MenuItem onClick={() => { onToggleTheme(); setProfileAnchor(null) }}>{mode === 'light' ? <DarkModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} /> : <LightModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} />}Switch to {mode === 'light' ? 'dark' : 'light'} theme</MenuItem>
   </Menu>
@@ -691,7 +691,6 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
       <header className="topbar">
         <Stack direction="row" alignItems="center" gap={1}><IconButton className="mobile-menu" onClick={() => setDrawerOpen(true)}><MenuRoundedIcon /></IconButton><Typography variant="h6" className="topbar-title">{headerTitle}</Typography></Stack>
         <div className="topbar-actions">
-          <Button variant="outlined" color="inherit" startIcon={<LogoutRoundedIcon />} onClick={() => { void disconnect() }}>Sign out</Button>
           {page === 'Numbers' && <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={event => setAddNumberAnchor(event.currentTarget)}>Add number</Button>}
           {page === 'Agents' && <Button variant="contained" startIcon={<AddRoundedIcon />} onClick={openCreateAgentConfig}>Add agent</Button>}
           {page === 'Simulation' && <Button variant="contained" startIcon={<ScienceRoundedIcon />} onClick={() => window.dispatchEvent(new Event('chiefvoice-open-call-setup'))}>Call setup</Button>}
