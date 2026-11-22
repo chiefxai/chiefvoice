@@ -16,7 +16,7 @@ The command uses two distinct credentials:
 
 | Environment variable | Used for | Required access |
 |---|---|---|
-| `CHIEFVOICE_URL` | API server, e.g. `https://chiefvoice.elvoryx.in` | Reachable API base URL, without `/v1` |
+| `CHIEFVOICE_URL` | API server, e.g. `https://core.elvoryx.in` | Reachable API base URL, without `/v1` |
 | `CHIEFVOICE_API_KEY_ID` | Assigning created templates to the API | API ID from the platform console, not the secret key |
 | `CHIEFVOICE_ADMIN_TOKEN` | Creating templates | Current OIDC **access token** for an allowlisted platform administrator with `platform:customers:write` |
 | `CHIEFVOICE_API_KEY` | Starting the outbound call | Full customer API key with `calls:write` |
@@ -28,7 +28,7 @@ The admin token is not the OIDC ID token, password, or customer API key. In the 
 Export the values in your terminal. Don’t put secrets directly into a command line, shell script committed to Git, or shared logs.
 
 ```bash
-export CHIEFVOICE_URL="https://chiefvoice.elvoryx.in"
+export CHIEFVOICE_URL="https://core.elvoryx.in"
 export CHIEFVOICE_API_KEY_ID="<API ID from the API page>"
 export CHIEFVOICE_ADMIN_TOKEN="<platform admin OIDC access token>"
 export CHIEFVOICE_API_KEY="<full customer API key>"
