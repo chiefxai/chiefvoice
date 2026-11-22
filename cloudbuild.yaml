@@ -4,34 +4,35 @@ substitutions:
   _IMAGE_NAME: api
   _VM_NAME: chiefvoice-backend
   _ZONE: asia-south1-a
-  _PUBLIC_DOMAIN: chiefvoice.elvoryx.in
+  _PUBLIC_DOMAIN: core.elvoryx.in
   _FUNCTION_NAME: chiefvoice-post-call
-  _FUNCTION_REGION: us-central1
-  _FUNCTION_VPC_CONNECTOR: chiefvoice-functions
-  _FUNCTION_SERVICE_ACCOUNT: chiefvoice-post-call@chief-502717.iam.gserviceaccount.com
-  _FUNCTION_BUILD_SERVICE_ACCOUNT: projects/chief-502717/serviceAccounts/chiefvoice-function-build@chief-502717.iam.gserviceaccount.com
-  _TASK_INVOKER_SERVICE_ACCOUNT: chiefvoice-task-invoker@chief-502717.iam.gserviceaccount.com
+  _FUNCTION_REGION: asia-south1
+  _FUNCTION_NETWORK: REPLACE_WITH_TERRAFORM_OUTPUT
+  _FUNCTION_SUBNET: REPLACE_WITH_TERRAFORM_OUTPUT
+  _FUNCTION_SERVICE_ACCOUNT: REPLACE_WITH_TERRAFORM_OUTPUT
+  _FUNCTION_BUILD_SERVICE_ACCOUNT: REPLACE_WITH_TERRAFORM_OUTPUT
+  _TASK_INVOKER_SERVICE_ACCOUNT: REPLACE_WITH_TERRAFORM_OUTPUT
   _POST_CALL_FUNCTION_MAX_INSTANCES: "10"
-  _DATABASE_URL_SECRET: chiefvoice-function-database-url
-  _CREDENTIALS_ENCRYPTION_KEY_SECRET: chiefvoice-credentials
-  _POST_CALL_ENCRYPTION_KEY_SECRET: chiefvoice-post-call-encryption-key
-  _RECORDINGS_ENCRYPTION_KEY_SECRET: chiefvoice-recordings
-  _OBJECT_STORAGE_ACCESS_KEY_ID_SECRET: chiefvoice-object-access-id
-  _OBJECT_STORAGE_SECRET_ACCESS_KEY_SECRET: chiefvoice-object-secret
-  _OBJECT_STORAGE_BUCKET: chiefvoice-297803100712-recordings
+  _DATABASE_URL_SECRET: REPLACE_WITH_TERRAFORM_OUTPUT
+  _CREDENTIALS_ENCRYPTION_KEY_SECRET: REPLACE_WITH_TERRAFORM_OUTPUT
+  _POST_CALL_ENCRYPTION_KEY_SECRET: REPLACE_WITH_TERRAFORM_OUTPUT
+  _RECORDINGS_ENCRYPTION_KEY_SECRET: REPLACE_WITH_TERRAFORM_OUTPUT
+  _OBJECT_STORAGE_ACCESS_KEY_ID_SECRET: REPLACE_WITH_TERRAFORM_OUTPUT
+  _OBJECT_STORAGE_SECRET_ACCESS_KEY_SECRET: REPLACE_WITH_TERRAFORM_OUTPUT
+  _OBJECT_STORAGE_BUCKET: REPLACE_WITH_TERRAFORM_OUTPUT
   _VERTEX_LOCATION: us-central1
   _POST_CALL_LOCATION: global
   _POST_CALL_MODEL: gemini-3.5-flash-lite
   _POST_CALL_TRANSCRIPTION_LOCATION: asia-southeast1
   _POST_CALL_TRANSCRIPTION_MODEL: chirp_2
-  _OIDC_AUDIENCE: https://chiefvoice.elvoryx.in/api
-  _OIDC_AUTHORITY: https://dev-ls5gkmim0q0ioeu1.us.auth0.com/
-  _OIDC_CLIENT_ID: JjVV1d1Rn69oazE7h7s5JOuwbvAA6q4K
+  _OIDC_AUDIENCE: https://core.elvoryx.in/api
+  _OIDC_AUTHORITY: REPLACE_WITH_TERRAFORM_OUTPUT
+  _OIDC_CLIENT_ID: REPLACE_WITH_TERRAFORM_OUTPUT
   _OIDC_SCOPE: openid profile email platform:customers:read platform:customers:write
-  _OIDC_ISSUER: https://dev-ls5gkmim0q0ioeu1.us.auth0.com/
-  _OIDC_JWKS_URL: https://dev-ls5gkmim0q0ioeu1.us.auth0.com/.well-known/jwks.json
-  _OIDC_TENANT_CLAIM: https://chiefvoice.elvoryx.in/tenant_id
-  _PLATFORM_ADMIN_SUBJECTS: auth0|6af9a7262178bf91525670d9
+  _OIDC_ISSUER: REPLACE_WITH_TERRAFORM_OUTPUT
+  _OIDC_JWKS_URL: REPLACE_WITH_TERRAFORM_OUTPUT
+  _OIDC_TENANT_CLAIM: https://core.elvoryx.in/tenant_id
+  _PLATFORM_ADMIN_SUBJECTS: REPLACE_WITH_TERRAFORM_OUTPUT
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -40,6 +41,41 @@ options:
 timeout: 3600s
 
 steps:
+  - id: verify-production-configuration
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        test "${PROJECT_ID}" = "chiefvoice-service" || { echo "Refusing deployment to unexpected GCP project" >&2; exit 1; }
+        test "${_REGION}" = "asia-south1" || { echo "Refusing deployment with unexpected region" >&2; exit 1; }
+        test "${_FUNCTION_REGION}" = "asia-south1" || { echo "Refusing deployment with unexpected function region" >&2; exit 1; }
+        test "${_PUBLIC_DOMAIN}" = "core.elvoryx.in" || { echo "Refusing deployment with unexpected public domain" >&2; exit 1; }
+        for value in \
+          "${_AR_REPOSITORY}" "${_VM_NAME}" "${_ZONE}" \
+          "${_FUNCTION_NAME}" "${_FUNCTION_REGION}" "${_FUNCTION_NETWORK}" "${_FUNCTION_SUBNET}" \
+          "${_FUNCTION_SERVICE_ACCOUNT}" "${_FUNCTION_BUILD_SERVICE_ACCOUNT}" \
+          "${_TASK_INVOKER_SERVICE_ACCOUNT}" "${_DATABASE_URL_SECRET}" \
+          "${_CREDENTIALS_ENCRYPTION_KEY_SECRET}" "${_POST_CALL_ENCRYPTION_KEY_SECRET}" \
+          "${_RECORDINGS_ENCRYPTION_KEY_SECRET}" "${_OBJECT_STORAGE_ACCESS_KEY_ID_SECRET}" \
+          "${_OBJECT_STORAGE_SECRET_ACCESS_KEY_SECRET}" "${_OBJECT_STORAGE_BUCKET}" \
+          "${_VERTEX_LOCATION}" "${_POST_CALL_LOCATION}" "${_POST_CALL_MODEL}" \
+          "${_POST_CALL_TRANSCRIPTION_LOCATION}" "${_POST_CALL_TRANSCRIPTION_MODEL}" \
+          "${_OIDC_AUDIENCE}" "${_OIDC_AUTHORITY}" "${_OIDC_CLIENT_ID}" \
+          "${_OIDC_SCOPE}" "${_OIDC_ISSUER}" "${_OIDC_JWKS_URL}" "${_OIDC_TENANT_CLAIM}" \
+          "${_PLATFORM_ADMIN_SUBJECTS}"; do
+          if [[ -z "$${value}" || "$${value}" == "REPLACE_WITH_TERRAFORM_OUTPUT" ]]; then
+            echo "Refusing deployment with missing Terraform-managed configuration" >&2
+            exit 1
+          fi
+        done
+        for account in "${_FUNCTION_SERVICE_ACCOUNT}" "${_FUNCTION_BUILD_SERVICE_ACCOUNT}" "${_TASK_INVOKER_SERVICE_ACCOUNT}"; do
+          [[ "$${account}" == *@${PROJECT_ID}.iam.gserviceaccount.com ]] || {
+            echo "Refusing deployment with a service account outside the target project" >&2
+            exit 1
+          }
+        done
+
   - id: verify-source
     name: python:3.12-slim
     entrypoint: bash
@@ -90,7 +126,7 @@ steps:
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/console:${BUILD_ID}
 
   - id: deploy-post-call-function
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:558.0.0-slim
     entrypoint: bash
     args:
       - -ceu
@@ -102,8 +138,9 @@ steps:
           --trigger-http --no-allow-unauthenticated \
           --service-account=${_FUNCTION_SERVICE_ACCOUNT} \
           --build-service-account=${_FUNCTION_BUILD_SERVICE_ACCOUNT} \
-          --vpc-connector=${_FUNCTION_VPC_CONNECTOR} \
-          --egress-settings=private-ranges-only \
+          --network=${_FUNCTION_NETWORK} \
+          --subnet=${_FUNCTION_SUBNET} \
+          --direct-vpc-egress=private-ranges-only \
           --timeout=240s --memory=1Gi \
           --max-instances=${_POST_CALL_FUNCTION_MAX_INSTANCES} \
           --set-env-vars=POST_CALL_AGENT_PROVIDER=langchain_vertex,VERTEX_PROJECT_ISOLATION_ENABLED=false,VERTEX_PROJECT_ID=${PROJECT_ID},VERTEX_LOCATION=${_VERTEX_LOCATION},POST_CALL_LOCATION=${_POST_CALL_LOCATION},POST_CALL_MODEL=${_POST_CALL_MODEL},POST_CALL_TRANSCRIPTION_PROJECT_ID=${PROJECT_ID},POST_CALL_TRANSCRIPTION_LOCATION=${_POST_CALL_TRANSCRIPTION_LOCATION},POST_CALL_TRANSCRIPTION_MODEL=${_POST_CALL_TRANSCRIPTION_MODEL},RECORDINGS_ENABLED=true,RECORDINGS_STORAGE_BACKEND=s3,OBJECT_STORAGE_BUCKET=${_OBJECT_STORAGE_BUCKET},OBJECT_STORAGE_REGION=auto,OBJECT_STORAGE_ENDPOINT_URL=https://storage.googleapis.com,OBJECT_STORAGE_ADDRESSING_STYLE=path,OBJECT_STORAGE_PREFIX=chiefvoice \

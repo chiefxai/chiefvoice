@@ -17,9 +17,9 @@ BRANCH="${1:-main}"
 COMPOSE_DIR="${COMPOSE_DIR:-/opt/chiefvoice}"
 VITE_OIDC_AUTHORITY="${VITE_OIDC_AUTHORITY:-https://dev-ls5gkmim0q0ioeu1.us.auth0.com/}"
 VITE_OIDC_CLIENT_ID="${VITE_OIDC_CLIENT_ID:-JjVV1d1Rn69oazE7h7s5JOuwbvAA6q4K}"
-VITE_OIDC_AUDIENCE="${VITE_OIDC_AUDIENCE:-https://chiefvoice.elvoryx.in/api}"
+VITE_OIDC_AUDIENCE="${VITE_OIDC_AUDIENCE:-https://core.elvoryx.in/api}"
 VITE_OIDC_SCOPE="${VITE_OIDC_SCOPE:-openid profile email platform:customers:read platform:customers:write}"
-HEALTHCHECK_URL="${HEALTHCHECK_URL:-https://chiefvoice.elvoryx.in/healthz}"
+HEALTHCHECK_URL="${HEALTHCHECK_URL:-https://core.elvoryx.in/healthz}"
 
 if [ ! -f "${COMPOSE_DIR}/compose.yaml" ]; then
   echo "Error: Compose file '${COMPOSE_DIR}/compose.yaml' not found" >&2

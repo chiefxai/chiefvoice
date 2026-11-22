@@ -1,4 +1,6 @@
-# Deploy Chiefvoice to Google Cloud
+# Legacy Cloud Run/Cloud SQL deployment (inactive)
+
+> This document describes an older Cloud Run and Cloud SQL deployment layout. It is retained for historical reference and is not the current Chiefvoice production architecture. The active deployment uses the Compute Engine VM and VM-hosted PostgreSQL managed by [chiefvoice-infra](https://github.com/chiefxai/chiefvoice-infra/tree/main/gcp). Do not use this guide to deploy or change production infrastructure.
 
 The root `Dockerfile` builds the API container. `cloudbuild.yaml` builds and tags it, pushes it to Artifact Registry, runs PostgreSQL migrations as a Cloud Run Job, and deploys the API to Cloud Run. Connect the repository to Cloud Build and create a push trigger for the deployment branch, using `cloudbuild.yaml` as the build configuration.
 
