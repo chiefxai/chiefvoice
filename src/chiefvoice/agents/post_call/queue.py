@@ -919,14 +919,29 @@ class SqlPostCallQueue:
                         updated_at=datetime.now(UTC),
                     )
                 )
-            result = await asyncio.wait_for(
-                agent.process(completed_call), timeout=self.lease_duration.total_seconds() / 2
-            )
+            process_with_producer = getattr(agent, "process_with_producer", None)
+            if callable(process_with_producer):
+                result, result_agent = await asyncio.wait_for(
+                    process_with_producer(completed_call, legacy_payload=payload),
+                    timeout=self.lease_duration.total_seconds() / 2,
+                )
+            else:
+                prepare = getattr(agent, "prepare_legacy_call", None)
+                if callable(prepare):
+                    prepared = prepare(completed_call, payload)
+                    if hasattr(prepared, "__await__"):
+                        completed_call = await prepared
+                    elif prepared is not None:
+                        completed_call = prepared
+                result = await asyncio.wait_for(
+                    agent.process(completed_call), timeout=self.lease_duration.total_seconds() / 2
+                )
+                result_agent = agent
             failure_stage = "result_encryption"
             result_payload = asdict(result)
             if result_payload.get("workflow_result") is None:
                 result_payload.pop("workflow_result", None)
-            compatibility_projection = getattr(agent, "compatibility_fields", None)
+            compatibility_projection = getattr(result_agent, "compatibility_fields", None)
             if callable(compatibility_projection):
                 try:
                     legacy_fields = compatibility_projection(result)
@@ -944,7 +959,7 @@ class SqlPostCallQueue:
                             "error_type": type(exc).__name__,
                         },
                     )
-            legacy_projection = getattr(agent, "legacy_compatibility_fields", None)
+            legacy_projection = getattr(result_agent, "legacy_compatibility_fields", None)
             if not completed_call.workflow_id and callable(legacy_projection):
                 try:
                     legacy_fields = legacy_projection(result, payload)

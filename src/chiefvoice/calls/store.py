@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -252,6 +253,38 @@ class SqlCallSessionStore:
             if row is None or row.encrypted_session is None:
                 return None
             return self._decrypt_session(row.encrypted_session)
+
+    async def get_post_call_workflow_config(
+        self, tenant_id: str, session_id: str, template_directory: Any | None = None
+    ) -> AcceptedSession | None:
+        """Load authoritative workflow identity from the encrypted call config.
+
+        Older queue payloads may omit workflow_id. A template can supply it only
+        when the persisted session pins the same template revision and API-key
+        assignment; prompt text and call context are never inspected.
+        """
+        stored = await self.get_session(tenant_id, session_id)
+        if stored is None or stored.post_call_workflow_id or template_directory is None:
+            return stored
+        template_id = stored.post_call_template_id
+        revision = stored.post_call_template_revision
+        if not template_id or revision is None:
+            return stored
+        if stored.api_key_id:
+            template = await template_directory.get_for_api(stored.api_key_id, template_id)
+        else:
+            template = await template_directory.get(template_id, include_disabled=True)
+        if (
+            template is None
+            or template.kind != "post_call"
+            or template.revision != revision
+            or template.api_key_id != stored.api_key_id
+        ):
+            return stored
+        workflow_id = template.settings.get("workflow_id")
+        if not isinstance(workflow_id, str) or not workflow_id:
+            return stored
+        return replace(stored, post_call_workflow_id=workflow_id)
 
     async def append_transcript(
         self, session_id: str, tenant_id: str, speaker: str, text: str

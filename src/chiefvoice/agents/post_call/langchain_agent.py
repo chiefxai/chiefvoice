@@ -543,6 +543,19 @@ class LangChainPostCallAgent(PostCallAgent):
                     return projected
         return {}
 
+    def prepare_legacy_call(
+        self, call: CompletedCall, legacy_payload: dict[str, Any]
+    ) -> CompletedCall:
+        """Let the explicitly selected integration adapt its historical payload."""
+        if not call.workflow_id:
+            return call
+        workflow = self.workflow_registry.get(call.workflow_id)
+        recover = getattr(workflow, "recover_legacy_call", None)
+        if not callable(recover):
+            return call
+        prepared = recover(call, legacy_payload)
+        return prepared if isinstance(prepared, CompletedCall) else call
+
     async def _run_workflow(
         self, call: CompletedCall, result: PostCallResult
     ) -> dict[str, Any] | None:

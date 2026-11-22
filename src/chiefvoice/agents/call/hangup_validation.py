@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from chiefvoice.agents.call.audio_diagnostics import CallAudioDiagnostics
-from chiefvoice.agents.call.identity_state import IDENTITY_FIELDS, collected_data_lock
+from chiefvoice.agents.call.session_state import collected_data_lock
 from chiefvoice.sessions import AcceptedSession
 
 logger = logging.getLogger(__name__)
@@ -164,11 +164,14 @@ def validate_hangup_request(
     if isinstance(session.metadata.get("collected_data"), dict):
         collected.update(session.metadata["collected_data"])
     tool_collected = args.get("collected_data")
+    protected_fields = session.metadata.get("workflow_protected_fields", set())
+    if not isinstance(protected_fields, (set, list, tuple)):
+        protected_fields = set()
     if isinstance(tool_collected, dict):
-        _merge_collected_values(collected, tool_collected)
+        _merge_collected_values(collected, tool_collected, protected_fields, session)
     for k, v in args.items():
         if k not in {"reason", "summary", "notes", "collected_data"}:
-            _merge_collected_values(collected, {k: v})
+            _merge_collected_values(collected, {k: v}, protected_fields, session)
     if collected:
         state = session.metadata.get("collected_data")
         if not isinstance(state, dict):
@@ -182,7 +185,7 @@ def validate_hangup_request(
         missing = [
             field
             for field in sorted(required_fields)
-            if not _is_valid_field_value(field, collected.get(field))
+            if not _is_valid_field_value(field, collected.get(field), session)
         ]
         if missing:
             if diagnostics is not None:
@@ -282,20 +285,24 @@ def _is_nonempty(value: Any) -> bool:
     return value is not None and not (isinstance(value, str) and not value.strip())
 
 
-def _is_valid_field_value(field: str, value: Any) -> bool:
-    if field in IDENTITY_FIELDS:
+def _is_valid_field_value(field: str, value: Any, session: AcceptedSession | None = None) -> bool:
+    string_fields = session.metadata.get("workflow_string_fields", set()) if session else set()
+    if field in string_fields:
         return isinstance(value, str) and bool(value.strip())
     return _is_nonempty(value)
 
 
-def _merge_collected_values(target: dict[str, Any], values: dict[str, Any]) -> None:
+def _merge_collected_values(
+    target: dict[str, Any], values: dict[str, Any], protected_fields=(),
+    session: AcceptedSession | None = None,
+) -> None:
     for key, value in values.items():
-        if not _is_valid_field_value(key, value):
+        if not _is_nonempty(value):
             continue
         # End-call arguments are model-generated and have no extraction
         # confidence marker. A saved identity may only be changed through the
         # explicit, confidence-gated identity-capture tool.
-        if key in IDENTITY_FIELDS and _is_valid_field_value(key, target.get(key)):
+        if key in protected_fields and _is_valid_field_value(key, target.get(key), session):
             continue
         target[key] = value
 

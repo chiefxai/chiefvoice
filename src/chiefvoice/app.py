@@ -28,6 +28,9 @@ from chiefvoice.agents.call.factory import create_realtime_pipeline_factory
 from chiefvoice.agents.call.prepared_session import PreparedRealtimeSessionDirectory
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
+from chiefvoice.agents.post_call.workflows.attendance.live_identity import (
+    AttendanceLiveIdentityExtension,
+)
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
 from chiefvoice.agents.post_call.providers.api_key_vertex import ApiKeyVertexPostCallAgent
 from chiefvoice.agents.post_call.lambda_dispatch import LambdaAsyncInvoker
@@ -450,6 +453,7 @@ def create_app(
                 google_ai_model=settings.google_ai_live_model,
                 api_key_directory=api_key_directory,
                 prepared_sessions=prepared_realtime_sessions,
+                live_tool_extensions={"attendance": AttendanceLiveIdentityExtension()},
             )
             voice_pipeline_factory = create_realtime_pipeline_factory(
                 RealtimeAgentRegistry([vertex_provider]),
@@ -495,7 +499,11 @@ def create_app(
     )
     if isinstance(post_call_dispatcher, SqlPostCallQueue) and call_session_store is not None:
         # Legacy job recovery requires an authoritative tenant-scoped config read.
-        post_call_dispatcher.workflow_config_resolver = call_session_store.get_session
+        post_call_dispatcher.workflow_config_resolver = (
+            lambda tenant_id, session_id: call_session_store.get_post_call_workflow_config(
+                tenant_id, session_id, agent_template_directory
+            )
+        )
     vobiz_callback_nonce_store = (
         SqlVobizCallbackNonceStore(settings.database_url)
         if settings.database_url

@@ -17,30 +17,26 @@ class ApiKeyVertexPostCallAgent:
         self.directory = directory
         self.model = model
         self.fallback = fallback
-        self._agents_by_result_id: dict[int, PostCallAgent] = {}
-
-    def compatibility_fields(self, result: PostCallResult) -> dict:
-        """Forward registered workflow compatibility projections."""
-        producer = self._agents_by_result_id.get(id(result), self.fallback)
-        projector = getattr(producer, "compatibility_fields", None)
-        if callable(projector):
-            return projector(result)
-        return {}
-
-    def legacy_compatibility_fields(
-        self, result: PostCallResult, legacy_payload: dict
-    ) -> dict:
-        producer = self._agents_by_result_id.pop(id(result), self.fallback)
-        projector = getattr(producer, "legacy_compatibility_fields", None)
-        if callable(projector):
-            return projector(result, legacy_payload)
-        return {}
 
     async def process(self, call: CompletedCall) -> PostCallResult:
+        result, _producer = await self.process_with_producer(call)
+        return result
+
+    async def process_with_producer(
+        self, call: CompletedCall, *, legacy_payload: dict | None = None
+    ) -> tuple[PostCallResult, PostCallAgent]:
         if call.api_key_id is None:
             if self.fallback is None:
                 raise RuntimeError("No API key is associated with this call")
-            return await self.fallback.process(call)
+            if legacy_payload is not None:
+                prepare = getattr(self.fallback, "prepare_legacy_call", None)
+                if callable(prepare):
+                    prepared = prepare(call, legacy_payload)
+                    if hasattr(prepared, "__await__"):
+                        call = await prepared
+                    elif prepared is not None:
+                        call = prepared
+            return await self.fallback.process(call), self.fallback
         config = await self.directory.get_vertex_config(call.api_key_id)
         if config is None:
             raise RuntimeError("GCP credentials are not configured for this API key")
@@ -56,9 +52,16 @@ class ApiKeyVertexPostCallAgent:
                 model=model,
                 credentials_json=config.post_call_credentials_json or config.credentials_json,
             )
+            if legacy_payload is not None:
+                prepare = getattr(agent, "prepare_legacy_call", None)
+                if callable(prepare):
+                    prepared = prepare(call, legacy_payload)
+                    if hasattr(prepared, "__await__"):
+                        call = await prepared
+                    elif prepared is not None:
+                        call = prepared
             result = await agent.process(call)
-            self._agents_by_result_id[id(result)] = agent
-            return result
+            return result, agent
         except Exception as exc:
             status = getattr(exc, "status_code", None)
             if status is None:

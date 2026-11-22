@@ -22,20 +22,14 @@ class TenantVertexPostCallAgent:
         self.model = model
         self.credentials_json = credentials_json
         self.credentials_path = credentials_path
-        self._agents_by_result_id: dict[int, PostCallAgent] = {}
-
-    def compatibility_fields(self, result: PostCallResult) -> dict:
-        """Forward the attendance legacy projection for this built-in provider."""
-        producer = self._agents_by_result_id.get(id(result))
-        projector = getattr(producer, "compatibility_fields", None)
-        return projector(result) if callable(projector) else {}
-
-    def legacy_compatibility_fields(self, result: PostCallResult, legacy_payload: dict) -> dict:
-        producer = self._agents_by_result_id.pop(id(result), None)
-        projector = getattr(producer, "legacy_compatibility_fields", None)
-        return projector(result, legacy_payload) if callable(projector) else {}
 
     async def process(self, call: CompletedCall) -> PostCallResult:
+        result, _producer = await self.process_with_producer(call)
+        return result
+
+    async def process_with_producer(
+        self, call: CompletedCall, *, legacy_payload: dict | None = None
+    ) -> tuple[PostCallResult, PostCallAgent]:
         project_id = await self.directory.get_ready_project_id(call.tenant_id)
         if project_id is None:
             raise RuntimeError("Tenant Vertex project is not ready for post-call processing")
@@ -46,6 +40,13 @@ class TenantVertexPostCallAgent:
             credentials_json=self.credentials_json,
             credentials_path=self.credentials_path,
         )
+        if legacy_payload is not None:
+            prepare = getattr(agent, "prepare_legacy_call", None)
+            if callable(prepare):
+                prepared = prepare(call, legacy_payload)
+                if hasattr(prepared, "__await__"):
+                    call = await prepared
+                elif prepared is not None:
+                    call = prepared
         result = await agent.process(call)
-        self._agents_by_result_id[id(result)] = agent
-        return result
+        return result, agent

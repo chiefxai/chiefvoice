@@ -26,6 +26,7 @@ from chiefvoice.agents.post_call.queue import (
 from chiefvoice.agents.post_call.replay import ReplayNotFound, SqlPostCallReplayService
 from chiefvoice.agents.post_call.workflows import PostCallWorkflowRegistry
 from chiefvoice.agents.post_call.workflows.attendance import AttendanceWorkflow
+from chiefvoice.agents.post_call.workflows.attendance.validation import validate_attendance
 from chiefvoice.calls.store import CallSessionRow, SqlCallSessionStore
 from chiefvoice.sessions import AcceptedSession, Direction
 
@@ -416,7 +417,15 @@ async def test_tenant_cannot_retry_another_tenants_queued_job(persisted):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "workflow_mode",
-    ["none", "success", "failure", "attendance_success", "attendance_failure"],
+    [
+        "none",
+        "success",
+        "failure",
+        "attendance_success",
+        "attendance_unclear",
+        "attendance_incomplete",
+        "attendance_failure",
+    ],
 )
 async def test_api_result_and_webhook_shapes_are_additive_and_exact(
     persisted, monkeypatch, workflow_mode
@@ -472,12 +481,17 @@ async def test_api_result_and_webhook_shapes_are_additive_and_exact(
     elif workflow_mode == "failure":
         registry.register(_FailingMutatingWorkflow())
     elif is_attendance:
+        extraction = _attendance_extraction()
+        if workflow_mode == "attendance_unclear":
+            extraction["transcript_status"] = "unclear"
+        elif workflow_mode == "attendance_incomplete":
+            extraction["extracted_data"]["attendance_time"] = None
         model = _Model(
             [
                 _Model.response,
                 RuntimeError("attendance extractor unavailable")
                 if workflow_mode == "attendance_failure"
-                else _attendance_extraction(),
+                else extraction,
             ]
         )
         registry.register(AttendanceWorkflow(model))
@@ -527,6 +541,28 @@ async def test_api_result_and_webhook_shapes_are_additive_and_exact(
             "error_code": "workflow_execution_failed",
         }
         expected_result["attendance_validation"] = _failed_attendance_validation()
+    elif workflow_mode in {"attendance_unclear", "attendance_incomplete"}:
+        extraction = _attendance_extraction()
+        if workflow_mode == "attendance_unclear":
+            extraction_status = "unclear"
+        else:
+            extraction_status = "clear"
+            extraction["extracted_data"]["attendance_time"] = None
+        validation = validate_attendance(
+            extracted=extraction["extracted_data"],
+            transcript=_attendance_transcript(),
+            expected=call.workflow_context,
+            live_claim=call.end_call_claim,
+            tool_events=call.tool_events,
+            extraction_status=extraction_status,
+        )
+        expected_result["workflow_result"] = {
+            "version": 1,
+            "workflow_id": "attendance",
+            "status": "completed",
+            "data": validation,
+        }
+        expected_result["attendance_validation"] = validation
     assert status["result"] == expected_result
 
     async def resolve(_url):
@@ -562,14 +598,23 @@ async def test_legacy_queue_recovers_only_tenant_scoped_persisted_workflow(persi
     key = Fernet.generate_key().decode("ascii")
     fernet = Fernet(key.encode("ascii"))
     queue = _new_queue(factory, key)
-    call = _call("legacy-recovery-session", workflow_id=None)
+    call = replace(
+        _call("legacy-recovery-session", workflow_id=None),
+        transcript=_attendance_transcript(),
+        workflow_context=None,
+    )
     assert await queue.enqueue(call)
     with sessionmaker(engine).begin() as db:
         row = db.get(PostCallJobRow, call.session_id)
         payload = json.loads(fernet.decrypt(row.encrypted_payload.encode("ascii")))
         payload.pop("workflow_id", None)
         payload.pop("workflow_context", None)
-        payload["expected_assignment"] = {"patient_name": "legacy"}
+        payload["expected_assignment"] = {
+            "caregiver_identity": "Kumar",
+            "patient_identity": "Meena",
+            "patient_address": "Anna Nagar",
+            "attendance_type": "check_in",
+        }
         row.encrypted_payload = fernet.encrypt(json.dumps(payload).encode()).decode("ascii")
 
     async def resolver(tenant_id, session_id):
@@ -578,23 +623,19 @@ async def test_legacy_queue_recovers_only_tenant_scoped_persisted_workflow(persi
             tenant_id=call.tenant_id,
             session_id=call.session_id,
             post_call_workflow_id="attendance",
-            post_call_workflow_context={"assignment_id": "persisted-config"},
+            post_call_workflow_context=None,
         )
 
     queue.workflow_config_resolver = resolver
-    seen = {}
-
-    class Agent:
-        async def process(self, recovered):
-            seen["workflow_id"] = recovered.workflow_id
-            seen["context"] = recovered.workflow_context
-            return PostCallResult()
-
-    assert await queue.process_job(call.session_id, Agent())
-    assert seen == {
-        "workflow_id": "attendance",
-        "context": {"assignment_id": "persisted-config"},
-    }
+    model = _Model([_Model.response, _attendance_extraction()])
+    registry = PostCallWorkflowRegistry()
+    registry.register(AttendanceWorkflow(model))
+    assert await queue.process_job(
+        call.session_id, LangChainPostCallAgent(model, workflow_registry=registry)
+    )
+    status = await queue.get_status(call.tenant_id, call.session_id)
+    assert status["result"]["workflow_result"]["data"]["outcome"] == "verified"
+    assert status["result"]["attendance_validation"]["outcome"] == "verified"
 
 
 @pytest.mark.asyncio
@@ -630,6 +671,132 @@ async def test_legacy_attendance_without_authoritative_config_is_flagged_for_rev
     assert validation["outcome"] == "unclear"
     assert validation["requires_manual_review"] is True
     assert validation["validation_errors"] == ["workflow_identity_unverified"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_attendance_without_assignment_but_with_persisted_workflow_is_manual_review(
+    persisted,
+):
+    factory, engine = persisted
+    key = Fernet.generate_key().decode("ascii")
+    fernet = Fernet(key.encode("ascii"))
+    queue = _new_queue(factory, key)
+    call = replace(
+        _call("legacy-attendance-no-assignment", workflow_id=None),
+        transcript=_attendance_transcript(),
+        workflow_context=None,
+    )
+    assert await queue.enqueue(call)
+    with sessionmaker(engine).begin() as db:
+        row = db.get(PostCallJobRow, call.session_id)
+        payload = json.loads(fernet.decrypt(row.encrypted_payload.encode("ascii")))
+        payload.pop("workflow_id", None)
+        payload.pop("workflow_context", None)
+        payload.pop("expected_assignment", None)
+        row.encrypted_payload = fernet.encrypt(json.dumps(payload).encode()).decode("ascii")
+
+    async def persisted_attendance_config(tenant_id, session_id):
+        return SimpleNamespace(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            post_call_workflow_id="attendance",
+            post_call_workflow_context=None,
+        )
+
+    queue.workflow_config_resolver = persisted_attendance_config
+    model = _Model([_Model.response])
+    registry = PostCallWorkflowRegistry()
+    registry.register(AttendanceWorkflow(model))
+    assert await queue.process_job(
+        call.session_id, LangChainPostCallAgent(model, workflow_registry=registry)
+    )
+    status = await queue.get_status(call.tenant_id, call.session_id)
+    validation = status["result"]["workflow_result"]["data"]
+    assert validation["outcome"] == "incomplete"
+    assert validation["requires_manual_review"] is True
+    assert "mandatory_assignment_configuration_missing" in validation["validation_errors"]
+    assert status["result"]["attendance_validation"] == validation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_id,legacy_context",
+    [
+        ("legacy-non-attendance", "Summarize the customer support request."),
+        ("legacy-ambiguous", "Caregiver check-in; confirm the caller arrived."),
+    ],
+)
+async def test_legacy_unproven_workflow_stays_generic(persisted, session_id, legacy_context):
+    factory, engine = persisted
+    key = Fernet.generate_key().decode("ascii")
+    fernet = Fernet(key.encode("ascii"))
+    queue = _new_queue(factory, key)
+    call = replace(
+        _call(session_id, workflow_id=None),
+        post_call_context=legacy_context,
+        workflow_context=None,
+    )
+    assert await queue.enqueue(call)
+    with sessionmaker(engine).begin() as db:
+        row = db.get(PostCallJobRow, call.session_id)
+        payload = json.loads(fernet.decrypt(row.encrypted_payload.encode("ascii")))
+        payload.pop("workflow_id", None)
+        payload.pop("workflow_context", None)
+        payload.pop("expected_assignment", None)
+        row.encrypted_payload = fernet.encrypt(json.dumps(payload).encode()).decode("ascii")
+
+    async def no_authoritative_config(_tenant_id, _session_id):
+        return None
+
+    queue.workflow_config_resolver = no_authoritative_config
+    registry = PostCallWorkflowRegistry()
+    registry.register(AttendanceWorkflow(_Model()))
+    assert await queue.process_job(
+        call.session_id, LangChainPostCallAgent(_Model(), workflow_registry=registry)
+    )
+    status = await queue.get_status(call.tenant_id, call.session_id)
+    assert status["result"]["structured_output"] == {
+        "ticket": "T-7",
+        "nested": {"value": "caller result"},
+    }
+    assert "workflow_result" not in status["result"]
+    assert "attendance_validation" not in status["result"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_queue_rejects_persisted_configuration_for_another_session(persisted):
+    factory, engine = persisted
+    key = Fernet.generate_key().decode("ascii")
+    fernet = Fernet(key.encode("ascii"))
+    queue = _new_queue(factory, key)
+    call = _call("legacy-cross-session", workflow_id=None)
+    assert await queue.enqueue(call)
+    with sessionmaker(engine).begin() as db:
+        row = db.get(PostCallJobRow, call.session_id)
+        payload = json.loads(fernet.decrypt(row.encrypted_payload.encode("ascii")))
+        payload.pop("workflow_id", None)
+        payload.pop("workflow_context", None)
+        row.encrypted_payload = fernet.encrypt(json.dumps(payload).encode()).decode("ascii")
+
+    async def other_session_config(tenant_id, _session_id):
+        return SimpleNamespace(
+            tenant_id=tenant_id,
+            session_id="different-session",
+            post_call_workflow_id="attendance",
+            post_call_workflow_context={"leaked": "context"},
+        )
+
+    queue.workflow_config_resolver = other_session_config
+    seen = {}
+
+    class Agent:
+        async def process(self, recovered):
+            seen["workflow_id"] = recovered.workflow_id
+            seen["context"] = recovered.workflow_context
+            return PostCallResult(structured_output={"generic": True})
+
+    assert await queue.process_job(call.session_id, Agent())
+    assert seen == {"workflow_id": None, "context": None}
 
 
 

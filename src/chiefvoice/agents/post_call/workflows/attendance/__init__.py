@@ -59,12 +59,47 @@ class AttendanceWorkflow:
             return {}
         return self.legacy_manual_review_fields(result)
 
+    def recover_legacy_call(
+        self, call: CompletedCall, payload: dict[str, Any]
+    ) -> CompletedCall:
+        """Restore the old assignment field only after attendance was explicitly selected."""
+        if call.workflow_id != self.workflow_id or call.workflow_context is not None:
+            return call
+        assignment = payload.get("expected_assignment")
+        if isinstance(assignment, dict):
+            from dataclasses import replace
+
+            return replace(call, workflow_context=assignment)
+        return call
+
     async def process(self, call: CompletedCall, result: PostCallResult) -> dict[str, Any]:
+        expected = expected_attendance_assignment(call.workflow_context)
+        required_assignment = (
+            "caregiver_identity",
+            "patient_identity",
+            "patient_address",
+        )
+        if any(not expected.get(name) for name in required_assignment):
+            validation = validate_attendance(
+                extracted={},
+                transcript=call.transcript,
+                expected=expected,
+                live_claim=call.end_call_claim,
+                tool_events=call.tool_events,
+                extraction_status="unclear",
+            )
+            validation["outcome"] = "incomplete"
+            validation["validation_errors"] = sorted(
+                set(validation["validation_errors"])
+                | {"mandatory_assignment_configuration_missing"}
+            )
+            validation["requires_manual_review"] = True
+            return validation
         if result.transcript_status == "no_data" or not (call.transcript or "").strip():
             validation = validate_attendance(
                 extracted={},
                 transcript=None,
-                expected=expected_attendance_assignment(call.workflow_context),
+                expected=expected,
                 live_claim=call.end_call_claim,
                 tool_events=call.tool_events,
                 extraction_status="no_data",
@@ -111,7 +146,7 @@ class AttendanceWorkflow:
         return validate_attendance(
             extracted=evidence.get("extracted_data", {}),
             transcript=call.transcript,
-            expected=expected_attendance_assignment(call.workflow_context),
+            expected=expected,
             live_claim=call.end_call_claim,
             tool_events=call.tool_events,
             extraction_status=evidence.get("transcript_status", "unclear"),
