@@ -129,7 +129,7 @@ async def test_gemini_response_start_cancels_watchdog():
 async def test_stale_turn_cannot_recover_after_new_caller_turn():
     service = FakeService()
     watchdog, _ = await make_watchdog(
-        service, response_timeout=0.01, recovery_grace=1
+        service, response_timeout=0.01, recovery_grace=0
     )
     await watchdog.process_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
     old_task = watchdog._watch_task

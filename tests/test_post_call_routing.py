@@ -102,7 +102,10 @@ async def test_client_unclear_outcome_does_not_trigger_stt_when_platform_transcr
 
     monkeypatch.setattr(agent, "_transcribe_recording", transcribe)
 
-    result = await agent.process(_call())
+    # English is configured for automatic audio review even when the initial
+    # transcript assessment is clear. Use an unsupported language to isolate
+    # the behavior this test covers: a clear transcript alone must not trigger STT.
+    result = await agent.process(_call(language="fr-FR"))
 
     assert result.structured_output["outcome"] == "unclear"
     assert len(model.messages) == 1
