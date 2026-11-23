@@ -141,6 +141,7 @@ def reliable_vertex_service_class(
             self._chiefvoice_recovery_ready_timeout_seconds = (
                 settings.gemini_recovery_ready_timeout_seconds
             )
+            self._chiefvoice_recovery_superseded = False
             self._chiefvoice_recent_input_transcript = ""
             self._chiefvoice_recent_input_transcript_at = 0.0
             self._chiefvoice_recent_output_transcript = ""
@@ -280,6 +281,17 @@ def reliable_vertex_service_class(
         def _clear_recovery_reconnect_task(self, task: asyncio.Task) -> None:
             if self._chiefvoice_recovery_reconnect_task is task:
                 self._chiefvoice_recovery_reconnect_task = None
+                self._chiefvoice_recovery_superseded = False
+
+        def supersede_recovery_for_caller_speech(self) -> None:
+            """Prevent a late watchdog reconnect from replaying stale context."""
+            task = self._chiefvoice_recovery_reconnect_task
+            if task is not None and not task.done():
+                self._chiefvoice_recovery_superseded = True
+                logger.info(
+                    "gemini_recovery_superseded_by_caller_speech",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
 
         async def _disconnect(self) -> None:
             was_ready = bool(self._ready_for_realtime_input)
@@ -442,6 +454,23 @@ def reliable_vertex_service_class(
             if self._ready_for_realtime_input:
                 await self._chiefvoice_flush_audio()
 
+        async def _create_initial_response(self, for_reconnect: bool = False) -> None:
+            if for_reconnect and self._chiefvoice_recovery_superseded:
+                # Gemini 2.5 otherwise triggers inference after context seeding.
+                # Caller speech during recovery supersedes that stale inference.
+                inference_on_context_initialization = self._inference_on_context_initialization
+                self._inference_on_context_initialization = False
+                try:
+                    await super()._create_initial_response(for_reconnect=False)
+                finally:
+                    self._inference_on_context_initialization = inference_on_context_initialization
+                logger.info(
+                    "gemini_reconnect_stale_inference_suppressed",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
+                return
+            await super()._create_initial_response(for_reconnect=for_reconnect)
+
         async def push_error(self, error_msg: str, exception: Exception | None = None, *args: Any, **kwargs: Any):
             if not self._chiefvoice_connection_open_event.is_set():
                 self._chiefvoice_connection_error_type = (
@@ -591,6 +620,7 @@ def reliable_vertex_service_class(
                 self._chiefvoice_recovery_ready_timeout_seconds
             )
             try:
+                self._chiefvoice_recovery_superseded = False
                 had_resumption_handle = bool(self._session_resumption_handle)
                 reconnect_will_generate_response = bool(
                     self._context
