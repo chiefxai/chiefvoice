@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from chiefvoice.agents.post_call.base import CompletedCall
 from chiefvoice.agents.post_call.fallback_spool import PostCallFallbackSpool
 from chiefvoice.agents.post_call.queue import PostCallDispatcher
 from chiefvoice.billing import SubscriptionAuthorizer
+from chiefvoice.billing.models import VoiceCapacityFull
 from chiefvoice.calls.store import IdempotencyConflict, SqlCallSessionStore
 from chiefvoice.channels.base import AmbiguousCallStart, ChannelAdapter, OutboundCall
 from chiefvoice.cloud_projects.models import TenantVertexProjectDirectory
@@ -54,6 +56,8 @@ class OutboundCallCommand:
     post_call_tools: list[str] | None = None
     post_call_time_zone: str | None = None
     post_call_time_format: str | None = None
+    post_call_workflow_id: str | None = None
+    post_call_workflow_context: dict[str, Any] | None = None
     include_live_agent_context: bool = False
     recording_allowed: bool = False
     auto_hangup_when_complete: bool = False
@@ -92,7 +96,12 @@ class CallCoordinator:
         self.realtime_preflight = realtime_preflight
         self.realtime_preflight_cleanup = realtime_preflight_cleanup
 
-    async def start_outbound(self, command: OutboundCallCommand) -> AcceptedSession:
+    async def start_outbound(
+        self,
+        command: OutboundCallCommand,
+        *,
+        _queued_session: AcceptedSession | None = None,
+    ) -> AcceptedSession:
         if command.live_agent_language:
             try:
                 Language(command.live_agent_language)
@@ -119,8 +128,8 @@ class CallCoordinator:
             isinstance(command.live_agent_context, dict)
             and command.live_agent_context.get("mandatory_fields")
         )
-        # Per-call requirements are generated for the active attendance stage
-        # (for example, check-out). A reusable template's static completion
+        # Per-call requirements are generated for the active task stage.
+        # A reusable template's static completion
         # contract may belong to another stage, so never combine both contracts.
         effective_completion_requirements = (
             None
@@ -160,16 +169,7 @@ class CallCoordinator:
             )
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
-            if (
-                command.live_agent_language
-                and command.live_agent_language.split("-", 1)[0].lower()
-                != profile.language.split("-", 1)[0].lower()
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail="Calling template language must match the selected voice profile language",
-                )
-        session = AcceptedSession(
+        session = _queued_session or AcceptedSession(
             channel=command.channel,
             provider=command.provider,
             direction=Direction.OUTBOUND,
@@ -193,9 +193,12 @@ class CallCoordinator:
             post_call_tools=command.post_call_tools,
             post_call_time_zone=command.post_call_time_zone,
             post_call_time_format=command.post_call_time_format,
+            post_call_workflow_id=command.post_call_workflow_id,
+            post_call_workflow_context=command.post_call_workflow_context,
             include_live_agent_context=command.include_live_agent_context,
             post_call_agent_enabled=post_call_agent_enabled,
             auto_hangup_when_complete=auto_hangup_when_complete,
+            recording_allowed=command.recording_allowed,
         )
         fingerprint = SqlCallSessionStore.fingerprint(
             {
@@ -220,17 +223,19 @@ class CallCoordinator:
                 "post_call_tools": command.post_call_tools,
                 "post_call_time_zone": command.post_call_time_zone,
                 "post_call_time_format": command.post_call_time_format,
+                "post_call_workflow_id": command.post_call_workflow_id,
+                "post_call_workflow_context": command.post_call_workflow_context,
                 "include_live_agent_context": command.include_live_agent_context,
                 "post_call_agent_enabled": post_call_agent_enabled,
                 "recording_allowed": command.recording_allowed,
             }
         )
-        if command.idempotency_key and self.call_session_store is None:
+        if _queued_session is None and command.idempotency_key and self.call_session_store is None:
             raise HTTPException(
                 status_code=503,
                 detail="Durable idempotency storage is not configured",
             )
-        if self.call_session_store is not None:
+        if _queued_session is None and self.call_session_store is not None:
             try:
                 session, created, previous_status = await self.call_session_store.register_outbound(
                     session, command.idempotency_key, fingerprint
@@ -261,6 +266,33 @@ class CallCoordinator:
                     command.tenant_id, session.session_id, command.channel,
                     Direction.OUTBOUND, command.api_key_id,
                 )
+        except VoiceCapacityFull as exc:
+            if _queued_session is not None:
+                raise
+            if self.call_session_store is None:
+                raise HTTPException(
+                    status_code=429,
+                    detail="All call channels are busy; retry when a channel is free.",
+                    headers={"Retry-After": "5"},
+                ) from exc
+            expires_at = datetime.now(UTC) + timedelta(minutes=15)
+            try:
+                await self.call_session_store.enqueue_outbound(session, expires_at)
+            except Exception as enqueue_exc:
+                await self.call_session_store.update_state(
+                    session, status="failed", end_reason="outbound_queue_enqueue_failed"
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="The outbound call queue is temporarily unavailable.",
+                ) from enqueue_exc
+            session.metadata["call_status"] = "queued"
+            session.metadata["queue_expires_at"] = expires_at.isoformat()
+            logger.info(
+                "outbound_call_queued_capacity_full",
+                extra={"session_id": session.session_id, "tenant_id": session.tenant_id},
+            )
+            return session
         except BaseException:
             if self.call_session_store is not None:
                 await self.call_session_store.update_state(
@@ -375,6 +407,137 @@ class CallCoordinator:
         session.metadata["call_status"] = "initiated"
         session_started(session.channel, session.provider)
         return session
+
+    async def run_outbound_queue_worker(
+        self, *, poll_interval_seconds: float = 1.0, lease_seconds: int = 120
+    ) -> None:
+        """Start durable queued outbound calls when tenant capacity becomes available."""
+        if self.call_session_store is None:
+            return
+        while True:
+            session = await self.call_session_store.claim_outbound(lease_seconds)
+            if session is None:
+                await asyncio.sleep(poll_interval_seconds)
+                continue
+            command = OutboundCallCommand(
+                provider=session.provider,
+                channel=session.channel,
+                tenant_id=session.tenant_id or "",
+                destination=session.callee or "",
+                api_key_id=session.api_key_id,
+                caller_id=session.caller,
+                bot_config_id=session.bot_config_id,
+                live_agent_instructions=session.live_agent_instructions,
+                live_agent_template_id=session.live_agent_template_id,
+                live_agent_template_revision=session.live_agent_template_revision,
+                live_agent_context=session.live_agent_context,
+                live_agent_language=session.live_agent_language,
+                live_agent_completion_requirements=session.live_agent_completion_requirements,
+                post_call_context=session.post_call_context,
+                post_call_template_id=session.post_call_template_id,
+                post_call_template_revision=session.post_call_template_revision,
+                post_call_failure_webhook_url=session.post_call_failure_webhook_url,
+                post_call_failure_webhook_payload=session.post_call_failure_webhook_payload,
+                post_call_output_schema=session.post_call_output_schema,
+                post_call_tools=session.post_call_tools,
+                post_call_time_zone=session.post_call_time_zone,
+                post_call_time_format=session.post_call_time_format,
+                include_live_agent_context=session.include_live_agent_context,
+                recording_allowed=session.recording_allowed,
+                auto_hangup_when_complete=session.auto_hangup_when_complete,
+            )
+            heartbeat = asyncio.create_task(
+                self._renew_outbound_queue_lease(session, lease_seconds)
+            )
+            dispatch_task = asyncio.create_task(
+                self.start_outbound(command, _queued_session=session)
+            )
+            try:
+                await asyncio.shield(dispatch_task)
+            except asyncio.CancelledError:
+                # Let an in-flight provider-start decision finish before shutdown;
+                # cancelling it mid-request could turn a known outcome ambiguous.
+                try:
+                    await dispatch_task
+                except BaseException:
+                    pass
+                raise
+            except VoiceCapacityFull:
+                await self.call_session_store.defer_outbound(
+                    session.session_id,
+                    datetime.now(UTC) + timedelta(seconds=1),
+                    lease_token=session.metadata.get("outbound_queue_lease_token"),
+                )
+                session.metadata["call_status"] = "queued"
+            except Exception as exc:
+                logger.exception(
+                    "outbound_queue_dispatch_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "tenant_id": session.tenant_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                current = await self.call_session_store.get_status(
+                    session.tenant_id or "", session.session_id
+                )
+                if current and current.get("status") not in {
+                    "failed",
+                    "initiated",
+                    "completed",
+                    "reconciliation_required",
+                }:
+                    await self.call_session_store.update_state(
+                        session, status="failed", end_reason="queued_dispatch_failed"
+                    )
+                    await self._enqueue_failure_webhook(
+                        session, stage="call", code="queued_dispatch_failed"
+                    )
+                session.metadata["call_status"] = "failed"
+            finally:
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    pass
+            # `starting` is intentionally left durable on crash: after the lease
+            # expires, recovery marks it ambiguous instead of redialing.
+            if session.metadata.get("call_status") != "queued":
+                await self.call_session_store.remove_outbound(
+                    session.session_id,
+                    lease_token=session.metadata.get("outbound_queue_lease_token"),
+                )
+
+    async def _renew_outbound_queue_lease(
+        self, session: AcceptedSession, lease_seconds: int
+    ) -> None:
+        if self.call_session_store is None:
+            return
+        lease_token = session.metadata.get("outbound_queue_lease_token")
+        if not isinstance(lease_token, str):
+            return
+        interval_seconds = max(1, min(30, lease_seconds // 3))
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                renewed = await self.call_session_store.renew_outbound_lease(
+                    session.session_id, lease_token, lease_seconds
+                )
+            except Exception as exc:
+                logger.warning(
+                    "outbound_queue_lease_renewal_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                continue
+            if not renewed:
+                logger.warning(
+                    "outbound_queue_lease_lost",
+                    extra={"session_id": session.session_id},
+                )
+                return
 
     async def handle_inbound(self, provider: str, request: Request) -> Response:
         adapter = self._adapter(provider)
@@ -686,7 +849,7 @@ class CallCoordinator:
         transcript = transcript if isinstance(transcript, str) else ""
         recording_uri = session.metadata.get("recording_uri")
         has_recording = isinstance(recording_uri, str) and bool(recording_uri.strip())
-        if not transcript.strip() and not has_recording:
+        if not transcript.strip() and not has_recording and not session.post_call_workflow_id:
             post_call_missing_transcript(session.channel, session.provider)
             session.metadata["post_call_status"] = "skipped_no_data"
             session.metadata["transcript_status"] = "no_data"
@@ -751,6 +914,10 @@ class CallCoordinator:
             live_agent_context=(
                 session.live_agent_context if session.include_live_agent_context else None
             ),
+            workflow_id=session.post_call_workflow_id,
+            workflow_context=session.post_call_workflow_context,
+            end_call_claim=session.metadata.get("end_call_claim"),
+            tool_events=tuple(session.metadata.get("tool_events", ())),
             failure_webhook_url=session.post_call_failure_webhook_url,
             failure_webhook_payload=session.post_call_failure_webhook_payload,
             recording_uri=recording_uri if has_recording else None,

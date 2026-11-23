@@ -24,6 +24,12 @@ class TenantVertexPostCallAgent:
         self.credentials_path = credentials_path
 
     async def process(self, call: CompletedCall) -> PostCallResult:
+        result, _producer = await self.process_with_producer(call)
+        return result
+
+    async def process_with_producer(
+        self, call: CompletedCall, *, legacy_payload: dict | None = None
+    ) -> tuple[PostCallResult, PostCallAgent]:
         project_id = await self.directory.get_ready_project_id(call.tenant_id)
         if project_id is None:
             raise RuntimeError("Tenant Vertex project is not ready for post-call processing")
@@ -34,4 +40,13 @@ class TenantVertexPostCallAgent:
             credentials_json=self.credentials_json,
             credentials_path=self.credentials_path,
         )
-        return await agent.process(call)
+        if legacy_payload is not None:
+            prepare = getattr(agent, "prepare_legacy_call", None)
+            if callable(prepare):
+                prepared = prepare(call, legacy_payload)
+                if hasattr(prepared, "__await__"):
+                    call = await prepared
+                elif prepared is not None:
+                    call = prepared
+        result = await agent.process(call)
+        return result, agent

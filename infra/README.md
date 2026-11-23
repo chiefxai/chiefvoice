@@ -1,13 +1,22 @@
 # Infrastructure
 
-Terraform roots are maintained in the separate [chiefvoice-infra repository](https://github.com/chiefxai/chiefvoice-infra). Its `gcp/` root provisions active production infrastructure. Its `aws/` root is a future alternative only; it creates a separate environment and does not migrate GCP data. Do not apply AWS until a migration and cutover plan is ready. GCP uses the existing private GCS state bucket; AWS must use a separate private S3 backend. Never commit state, plan files, backend config, or production `terraform.tfvars`.
+Terraform roots are owned by the separate [chiefvoice-infra repository](https://github.com/chiefxai/chiefvoice-infra). The `gcp/` root is the active production stack. The `aws/` root describes an independent EC2, PostgreSQL, SQS, and Lambda deployment option; it is not currently deployed and does not migrate GCP data. Do not apply it until an AWS migration and cutover plan is approved.
 
-The earlier `infra/scalable-infra/aws` and `infra/scalable-infra/gcp` designs remain here for reference. The AWS EC2/SQS/Lambda root has moved to `chiefvoice-infra/aws`.
+The authoritative AWS root, its variables, and deployment instructions are in [`chiefvoice-infra/aws`](https://github.com/chiefxai/chiefvoice-infra/tree/main/aws). That repository's CI validates the AWS root on pull requests and pushes to its `main` branch. To validate locally without production credentials or a backend:
 
-The AWS VM template creates a VPC, public backend subnet, private Lambda subnet, and NAT gateway for Lambda egress to Vertex. NAT gateways incur ongoing charges. PostgreSQL is on the VM's EBS volume; take and test backups before production.
+```sh
+git clone https://github.com/chiefxai/chiefvoice-infra.git
+cd chiefvoice-infra/aws
+terraform fmt -check -recursive
+terraform init -backend=false -input=false
+terraform validate
+```
+Terraform state, backend configuration, plan files, and production `terraform.tfvars` may contain sensitive values and must not be committed. GCP uses its existing private GCS state bucket; AWS uses a separate private S3 backend.
 
-The AWS deployment uses GCP Vertex project isolation. Supply GCP project/billing configuration and a Google credential secret ARN, or configure workload identity federation and adapt the credential loading path. Give that GCP identity the project creation, billing, API enablement, IAM, and budget permissions described in the main README. AWS Terraform does not grant IAM in your GCP organization or billing account.
+For an approved AWS deployment, follow the prerequisites and manual deployment steps in the [AWS root README](https://github.com/chiefxai/chiefvoice-infra/blob/main/aws/README.md). It documents the AWS account inputs, GCP service-account secret ARN and permissions, backend setup, required Terraform variables, and `init`/`plan`/`apply` commands. AWS uses a separate private S3 state backend; do not reuse the GCP GCS state. Terraform state, backend configuration, plans, and production `terraform.tfvars` may contain sensitive values and must not be committed.
 
-Retention and backup policy lists default to empty, which disables those app workers. Set them deliberately after tenant IDs and data requirements are known. Object versioning and automatic expiration are disabled so app-managed deletion can remove the stored object and respect retention/legal-hold decisions. Database backup/PITR is enabled separately. Do not attach bucket expiration rules that can delete legal-hold or pending recovery data.
+The AWS variables example is a starting point, not a complete production configuration. Complete the required values listed in the destination [`aws/variables.tf`](https://github.com/chiefxai/chiefvoice-infra/blob/main/aws/variables.tf), including the AMI, SSH CIDR, API and Lambda image URIs, public domain, OIDC settings, GCP project/billing/service-account settings, Google credential secret ARN, and object bucket name. The backend example also requires a separately provisioned S3 state bucket and DynamoDB lock table. The destination README explains how to prepare these files and the AWS/GCP credentials. AWS has no automated deployment workflow; deployment is manual and must follow an approved migration plan.
 
-Review Terraform plans, costs, IAM scope, database sizing, network egress, and deletion protection before applying to a real account.
+The earlier `infra/scalable-infra/aws` and `infra/scalable-infra/gcp` designs remain in this repository for reference; they are not the active GCP root or the AWS deployment option.
+
+Review Terraform plans, costs, IAM scope, database sizing, network egress, and deletion protection before applying to any real account.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
 from chiefvoice.agents.templates import BuiltinTool
@@ -20,6 +22,7 @@ from chiefvoice.identity.auth import Principal, require_scope
 from chiefvoice.observability.setup import call_start_event
 
 router = APIRouter()
+_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
 def resolve_assigned_sender(
@@ -73,14 +76,14 @@ def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None):
         body.context,
         tools,
         "end_call" in tools or bool(settings_values.get("auto_hangup_when_complete")),
-        settings_values.get("language"),
+        body.language or settings_values.get("language"),
         settings_values.get("completion_requirements"),
     )
 
 
 def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None):
     if body is None:
-        return None, None, None, None, None, False
+        return None, None, None, None, None, False, None, None
     context_values = body.context
     try:
         instructions = render_template(template, context_values) if template else ""
@@ -97,6 +100,8 @@ def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None)
     schema = body.output_schema.model_dump(exclude_none=True) if body.output_schema else settings_values.get("output_schema")
     time_zone = body.time_zone or settings_values.get("time_zone") or "UTC"
     time_format = body.time_format or settings_values.get("time_format") or "%Y-%m-%dT%H:%M:%S%z"
+    workflow_id = body.workflow_id or settings_values.get("workflow_id")
+    workflow_context = body.workflow_context if body.workflow_context is not None else context_values
     if not schema:
         raise HTTPException(status_code=422, detail="post_call.output_schema is required unless the selected template defines a default")
     try:
@@ -105,7 +110,10 @@ def _render_post_call(template: AgentTemplate | None, body: PostCallBody | None)
         raise HTTPException(status_code=422, detail="post_call output schema is invalid") from exc
     if not instructions.strip():
         raise HTTPException(status_code=422, detail="Assign a post-call template with instructions to this API")
-    return instructions, validated_schema, tools, time_zone, time_format, body.include_live_agent_context
+    return (
+        instructions, validated_schema, tools, time_zone, time_format,
+        body.include_live_agent_context, workflow_id, workflow_context,
+    )
 
 
 async def _resolve_call_templates(
@@ -167,9 +175,24 @@ class LiveAgentBody(BaseModel):
 
     agent_id: str | None = Field(default=None, max_length=128)
     template_id: str | None = Field(default=None, max_length=36)
+    language: str | None = Field(default=None, min_length=2, max_length=35)
     context: dict[str, Any] = Field(default_factory=dict)
     tools: list[BuiltinTool] | None = Field(default=None, max_length=10)
     add_tools: list[BuiltinTool] = Field(default_factory=list, max_length=10)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not _LANGUAGE_TAG.fullmatch(value):
+            raise ValueError("language must be a BCP 47 tag such as en-US or ta-IN")
+        try:
+            Language(value)
+        except ValueError as exc:
+            raise ValueError("language is not supported by the realtime provider") from exc
+        return value
 
     @model_validator(mode="after")
     def validate_live_tools(self):
@@ -192,6 +215,15 @@ class PostCallBody(BaseModel):
     time_zone: str | None = Field(default=None, min_length=1, max_length=100)
     time_format: str | None = Field(default=None, min_length=1, max_length=100)
     include_live_agent_context: bool = False
+    workflow_id: str | None = Field(default=None, min_length=1, max_length=80)
+    workflow_context: dict[str, Any] | None = None
+
+    @field_validator("workflow_id")
+    @classmethod
+    def validate_workflow_id(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", value):
+            raise ValueError("workflow_id must be a valid registered workflow identifier")
+        return value
 
     @field_validator("add_tools")
     @classmethod
@@ -271,6 +303,9 @@ class OutboundCallBody(BaseModel):
         context_payload = {
             "live_agent_context": live_context,
             "post_call_context": self.post_call.context if self.post_call else None,
+            "post_call_workflow_id": (
+                self.post_call.workflow_id if self.post_call else None
+            ),
             "post_call_output_schema": (
                 self.post_call.output_schema.model_dump(exclude_none=True)
                 if self.post_call and self.post_call.output_schema
@@ -281,6 +316,11 @@ class OutboundCallBody(BaseModel):
             "post_call_time_format": self.post_call.time_format if self.post_call else None,
             "include_live_agent_context": (
                 self.post_call.include_live_agent_context if self.post_call else False
+            ),
+            "workflow_context": (
+                self.post_call.workflow_context
+                if self.post_call and self.post_call.workflow_context is not None
+                else self.post_call.context if self.post_call else None
             ),
         }
         if len(json.dumps(context_payload, ensure_ascii=False, default=str).encode("utf-8")) > 12_000:
@@ -394,7 +434,10 @@ async def start_outbound_call(
         live_language,
         completion_requirements,
     ) = _render_live(live_template, body.live_agent)
-    post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
+    (
+        post_context, post_schema, post_tools, post_time_zone, post_time_format,
+        include_live_context, workflow_id, workflow_context,
+    ) = _render_post_call(post_call_template, body.post_call)
     try:
         session = await coordinator.start_outbound(
             OutboundCallCommand(
@@ -428,6 +471,8 @@ async def start_outbound_call(
                 post_call_tools=post_tools,
                 post_call_time_zone=post_time_zone,
                 post_call_time_format=post_time_format,
+                post_call_workflow_id=workflow_id,
+                post_call_workflow_context=workflow_context,
                 include_live_agent_context=include_live_context,
                 recording_allowed=body.recording_allowed,
                 auto_hangup_when_complete=template_hangup,
@@ -441,13 +486,27 @@ async def start_outbound_call(
         call_start_event("failed")
         raise
     call_start_event("accepted")
-    return {
+    result = {
         "session_id": session.session_id,
         "provider": session.provider,
         "channel": session.channel,
         "direction": session.direction,
         "status": session.metadata.get("call_status", "starting"),
     }
+    if result["status"] == "queued":
+        queue_status = getattr(request.app.state, "call_session_store", None)
+        if queue_status is not None and hasattr(queue_status, "get_outbound_queue_status"):
+            queue_details = await queue_status.get_outbound_queue_status(
+                principal.tenant_id, session.session_id
+            )
+            if queue_details:
+                result.update(
+                    {
+                        key: queue_details[key]
+                        for key in ("queued_at", "queue_expires_at", "queue_attempts")
+                    }
+                )
+    return result
 
 
 @router.get("/v1/calls/{session_id}", tags=["calls"])
@@ -472,6 +531,36 @@ async def get_call_status(
         post_call = await dispatcher.get_status(principal.tenant_id, session_id)
     result.update(_post_call_pipeline_fields(result, post_call))
     return result
+
+
+@router.post("/v1/calls/{session_id}/cancel", tags=["calls"])
+async def cancel_queued_call(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("calls:write"))],
+):
+    """Cancel an outbound call only while it is still waiting in the queue."""
+    store = getattr(request.app.state, "call_session_store", None)
+    if store is None or not hasattr(store, "cancel_outbound"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Outbound call queue is not configured",
+        )
+    current = await store.get_status(principal.tenant_id, session_id)
+    if current is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+    await _enforce_number_binding(store, principal, session_id)
+    if current.get("status") != "queued":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only queued calls can be cancelled",
+        )
+    if not await store.cancel_outbound(principal.tenant_id, session_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Call has already started dispatching and cannot be cancelled",
+        )
+    return {"session_id": session_id, "status": "cancelled"}
 
 
 @router.get("/v1/calls/{session_id}/transcript", tags=["calls"])

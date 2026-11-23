@@ -8,12 +8,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from functools import lru_cache
+import logging
 import os
 
 from chiefvoice.agents.post_call.base import PostCallAgent
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
 from chiefvoice.agents.post_call.providers.api_key_vertex import ApiKeyVertexPostCallAgent
 from chiefvoice.agents.post_call.queue import SqlPostCallQueue
+from chiefvoice.calls.store import SqlCallSessionStore
+from chiefvoice.agents.template_store import SqlAgentTemplateDirectory
 from chiefvoice.identity.api_keys import SqlApiKeyDirectory
 from chiefvoice.cloud_projects.post_call import TenantVertexPostCallAgent
 from chiefvoice.cloud_projects.store import SqlTenantVertexProjectDirectory
@@ -22,6 +25,7 @@ from chiefvoice.observability import configure_logging
 from chiefvoice.recordings.storage import create_recording_store
 
 configure_logging()
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=128)
@@ -63,16 +67,36 @@ async def _process(event: Mapping[str, object]) -> dict[str, object]:
     if not has_global_vertex and not settings.credentials_encryption_key:
         raise RuntimeError("Per-API GCP credentials require CREDENTIALS_ENCRYPTION_KEY")
 
-    queue = SqlPostCallQueue(
-        database_url,
-        post_call_key,
-        recording_store=create_recording_store(),
-    )
-    await queue.initialize()
+    queue: SqlPostCallQueue | None = None
+    call_session_store: SqlCallSessionStore | None = None
+    template_directory: SqlAgentTemplateDirectory | None = None
     directory: SqlTenantVertexProjectDirectory | None = None
     api_key_directory: SqlApiKeyDirectory | None = None
-    agent: PostCallAgent | None = None
     try:
+        queue = SqlPostCallQueue(
+            database_url,
+            post_call_key,
+            recording_store=create_recording_store(),
+        )
+        call_session_store = (
+            SqlCallSessionStore(database_url, settings.credentials_encryption_key)
+            if settings.credentials_encryption_key
+            else None
+        )
+        template_directory = (
+            SqlAgentTemplateDirectory(database_url)
+            if settings.credentials_encryption_key
+            else None
+        )
+        if call_session_store is not None:
+            queue.workflow_config_resolver = lambda tenant_id, session_id: (
+                call_session_store.get_post_call_workflow_config(
+                    tenant_id, session_id, template_directory
+                )
+            )
+        await queue.initialize()
+
+        agent: PostCallAgent | None = None
         if has_global_vertex and settings.vertex_project_isolation_enabled:
             directory = SqlTenantVertexProjectDirectory(database_url)
             await directory.initialize()
@@ -105,11 +129,27 @@ async def _process(event: Mapping[str, object]) -> dict[str, object]:
         processed = await queue.process_job(job_id, agent)
         return {"job_id": job_id, "status": "processed" if processed else "already_claimed_or_finished"}
     finally:
-        if directory is not None:
-            await directory.close()
-        if api_key_directory is not None:
-            await api_key_directory.close()
-        await queue.close()
+        resources = (
+            ("tenant_project_directory", directory),
+            ("api_key_directory", api_key_directory),
+            ("call_session_store", call_session_store),
+            ("template_directory", template_directory),
+            ("post_call_queue", queue),
+        )
+        closed_resource_ids: set[int] = set()
+        for resource_name, resource in resources:
+            if resource is None or id(resource) in closed_resource_ids:
+                continue
+            closed_resource_ids.add(id(resource))
+            try:
+                await resource.close()
+            except Exception as exc:
+                # Never replace the initialization or processing failure with a
+                # cleanup error, and keep provider details out of logs.
+                logger.warning(
+                    "post_call_resource_cleanup_failed",
+                    extra={"resource": resource_name, "error_type": type(exc).__name__},
+                )
 
 
 def handler(event: Mapping[str, object], context: object) -> dict[str, object]:

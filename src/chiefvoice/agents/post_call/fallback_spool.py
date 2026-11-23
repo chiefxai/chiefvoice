@@ -61,8 +61,9 @@ class S3PostCallFallbackSpool:
             not call.session_id
             or not call.tenant_id
             or not (call.transcript and call.transcript.strip()) and not call.recording_uri
+            and not call.workflow_id
         ):
-            raise ValueError("A completed call with tenant and transcript or recording is required")
+            raise ValueError("A completed call with tenant and evidence or workflow is required")
         payload = json.dumps(asdict(call), ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -173,6 +174,10 @@ def _completed_call(payload: dict) -> CompletedCall:
         time_zone=payload.get("time_zone", "UTC"),
         time_format=payload.get("time_format", "%Y-%m-%dT%H:%M:%S%z"),
         live_agent_context=payload.get("live_agent_context"),
+        workflow_id=payload.get("workflow_id"),
+        workflow_context=payload.get("workflow_context"),
+        end_call_claim=payload.get("end_call_claim", payload.get("live_call_claim")),
+        tool_events=tuple(payload.get("tool_events", payload.get("identity_tool_events", ()))),
         failure_webhook_url=payload.get("failure_webhook_url"),
         failure_webhook_payload=payload.get("failure_webhook_payload"),
     )

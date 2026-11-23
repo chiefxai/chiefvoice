@@ -2,7 +2,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-CURRENT_SCHEMA_REVISION = "0030_post_call_assessment"
+CURRENT_SCHEMA_REVISION = "0031_outbound_call_queue"
 CONSTRAINT_NAMING = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",

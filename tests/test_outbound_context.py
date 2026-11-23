@@ -1,8 +1,10 @@
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
 from chiefvoice.agents.post_call.output_schema import build_output_model, validate_output_schema
-from chiefvoice.calls.routes import OutboundCallBody, _merge_template_tools
+from chiefvoice.calls.routes import OutboundCallBody, _merge_template_tools, _render_live
 
 
 def _schema():
@@ -115,4 +117,35 @@ def test_merge_template_tools_handles_dicts_and_objects():
     defaults = [{"name": "end_call", "type": "builtin"}]
     assert _merge_template_tools(defaults, None, []) == ["end_call"]
     assert _merge_template_tools(tuple(defaults), None, []) == ["end_call"]
+
+
+def test_live_agent_request_language_overrides_template_default():
+    template = SimpleNamespace(
+        instructions="Call the customer.",
+        variables={},
+        tools=(),
+        settings={"language": "en-US"},
+    )
+
+    _, _, _, _, language, _ = _render_live(
+        template,
+        OutboundCallBody(
+            channel="phone",
+            destination="+15551234567",
+            live_agent={"language": "te-IN"},
+        ).live_agent,
+    )
+
+    assert language == "te-IN"
+
+
+def test_live_agent_request_rejects_unsupported_language_tags():
+    with pytest.raises(ValidationError):
+        OutboundCallBody.model_validate(
+            {
+                "channel": "phone",
+                "destination": "+15551234567",
+                "live_agent": {"language": "not-a-language"},
+            }
+        )
 

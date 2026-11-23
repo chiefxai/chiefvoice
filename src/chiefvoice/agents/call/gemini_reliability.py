@@ -456,8 +456,10 @@ def reliable_vertex_service_class(
 
         async def _create_initial_response(self, for_reconnect: bool = False) -> None:
             if for_reconnect and self._chiefvoice_recovery_superseded:
-                # Gemini 2.5 otherwise triggers inference after context seeding.
-                # Caller speech during recovery supersedes that stale inference.
+                # Pipecat's Gemini 2.5 reconnect path automatically triggers an
+                # inference after seeding retained context. Caller speech that
+                # arrived during the reconnect supersedes that stale inference;
+                # seed without turn completion so the next caller turn drives it.
                 inference_on_context_initialization = self._inference_on_context_initialization
                 self._inference_on_context_initialization = False
                 try:

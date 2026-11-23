@@ -108,10 +108,17 @@ class AgentTemplateBody(BaseModel):
             allowed_settings = {
                 "time_zone", "time_format", "output_schema",
                 "failure_webhook_url", "failure_webhook_payload",
+                "workflow_id",
             }
             if unknown := self.settings.keys() - allowed_settings:
                 raise ValueError("Unsupported post-call template settings: " + ", ".join(sorted(unknown)))
             failure_url = self.settings.get("failure_webhook_url")
+            workflow_id = self.settings.get("workflow_id")
+            if workflow_id is not None and (
+                not isinstance(workflow_id, str)
+                or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", workflow_id)
+            ):
+                raise ValueError("workflow_id must be a valid registered workflow identifier")
             if failure_url is not None and (
                 not isinstance(failure_url, str) or not failure_url.strip() or len(failure_url) > 2048
             ):

@@ -937,7 +937,10 @@ async def simulate_api_call(
         live_language,
         completion_requirements,
     ) = _render_live(live_template, body.live_agent)
-    post_context, post_schema, post_tools, post_time_zone, post_time_format, include_live_context = _render_post_call(post_call_template, body.post_call)
+    (
+        post_context, post_schema, post_tools, post_time_zone, post_time_format,
+        include_live_context, workflow_id, workflow_context,
+    ) = _render_post_call(post_call_template, body.post_call)
     coordinator = get_call_coordinator(request)
     try:
         session = await coordinator.start_outbound(OutboundCallCommand(
@@ -963,6 +966,8 @@ async def simulate_api_call(
             post_call_tools=post_tools,
             post_call_time_zone=post_time_zone,
             post_call_time_format=post_time_format,
+            post_call_workflow_id=workflow_id,
+            post_call_workflow_context=workflow_context,
             include_live_agent_context=include_live_context,
             auto_hangup_when_complete=template_hangup,
             recording_allowed=body.recording_allowed, idempotency_key=idempotency_key,

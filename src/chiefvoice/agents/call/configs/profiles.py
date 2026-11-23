@@ -24,13 +24,16 @@ class AgentProfile:
     created_at: datetime
     updated_at: datetime
 
-    def system_instruction(self, base_instruction: str) -> str:
+    def system_instruction(
+        self, base_instruction: str, *, language: str | None = None
+    ) -> str:
+        effective_language = language or self.language
         language_guidance = {
             "ta": "Respond unmistakably in Tamil (தமிழ்). Prefer natural spoken Tamil over literary Tamil.",
             "ml": "Respond unmistakably in Malayalam (മലയാളം). Prefer natural spoken Malayalam over formal written Malayalam.",
             "te": "Respond unmistakably in Telugu (తెలుగు). Prefer natural spoken Telugu over formal written Telugu.",
         }
-        language_key = self.language.split("-", 1)[0].lower()
+        language_key = effective_language.split("-", 1)[0].lower()
         style_guidance = {
             SpeakingStyle.PROFESSIONAL: "Speak clearly and professionally.",
             SpeakingStyle.FRIENDLY: "Use a warm, friendly, and helpful speaking style.",
@@ -42,7 +45,12 @@ class AgentProfile:
                 "default": "Use natural, mild slang appropriate to the configured language and audience. Avoid profanity and do not force slang into every sentence.",
             }.get(language_key, "Use natural, mild slang appropriate to the configured language and audience. Avoid profanity and do not force slang into every sentence."),
         }[self.speaking_style]
-        parts = [base_instruction.strip(), f"Respond in {self.language}.", language_guidance.get(language_key, ""), style_guidance]
+        parts = [
+            base_instruction.strip(),
+            f"Respond in {effective_language}.",
+            language_guidance.get(language_key, ""),
+            style_guidance,
+        ]
         if self.instructions.strip():
             parts.append(f"Agent instructions:\n{self.instructions.strip()}")
         return "\n\n".join(part for part in parts if part)

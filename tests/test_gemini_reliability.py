@@ -162,6 +162,7 @@ async def test_frames_received_during_reconnect_replay_once_in_order(monkeypatch
         "preroll_buffered": 0,
         "sent": 2,
         "dropped": 0,
+        "preroll_buffered": 0,
     }
     assert len(service._chiefvoice_audio_buffer) == 0
 

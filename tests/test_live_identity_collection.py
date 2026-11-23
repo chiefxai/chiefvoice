@@ -1,25 +1,44 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
-from pipecat.services.llm_service import FunctionCallParams
 
 from chiefvoice.agents.call.hangup_validation import validate_hangup_request_async
-from chiefvoice.agents.call.identity_state import save_caller_identity
+from chiefvoice.agents.call.session_state import initialize_collected_data
+from chiefvoice.agents.post_call.workflows.attendance.live_identity import (
+    AttendanceLiveIdentityExtension,
+    save_caller_identity,
+)
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
 from chiefvoice.sessions import AcceptedSession, Direction
 
 
 def _session() -> AcceptedSession:
-    return AcceptedSession(
+    session = AcceptedSession(
         channel="phone",
         provider="vobiz",
         direction=Direction.OUTBOUND,
         live_agent_context={"mandatory_fields": ["caregiver_identity", "patient_identity"]},
         metadata={"caller_interaction_seen": True},
     )
+    AttendanceLiveIdentityExtension().configure(session)
+    return session
+
+
+def test_assignment_identity_is_not_caller_collected_evidence():
+    session = AcceptedSession(
+        channel="phone",
+        provider="vobiz",
+        direction=Direction.OUTBOUND,
+        live_agent_context={
+            "caregiver_identity": "Expected caregiver",
+            "patient_identity": "Expected patient",
+        },
+    )
+
+    assert initialize_collected_data(session) == {}
 
 
 @pytest.mark.asyncio
@@ -185,7 +204,7 @@ async def test_uncertain_or_empty_value_does_not_overwrite_valid_identity():
 @pytest.mark.asyncio
 async def test_extraction_and_validation_share_a_serialized_state():
     session = _session()
-    from chiefvoice.agents.call.identity_state import collected_data_lock
+    from chiefvoice.agents.call.session_state import collected_data_lock
 
     lock = collected_data_lock(session)
     await lock.acquire()
@@ -241,46 +260,57 @@ async def test_completion_succeeds_after_both_identity_fields_are_saved():
 
 
 @pytest.mark.asyncio
-async def test_gemini_live_identity_tool_persists_into_validator_state(monkeypatch):
+async def test_attendance_workflow_registers_identity_tool(monkeypatch):
     monkeypatch.setattr(
         "pipecat.services.google.gemini_live.vertex.llm.GeminiLiveVertexLLMService._get_credentials",
         lambda *args, **kwargs: MagicMock(),
     )
     session = _session()
     session.auto_hangup_when_complete = True
+    session.post_call_workflow_id = "attendance"
     provider = VertexGeminiLiveProvider(
         project_id="test-project",
         location="us-central1",
         model="google/gemini-live-2.5-flash-native-audio",
         voice="Charon",
         system_instruction="Test instructions",
+        live_tool_extensions={"attendance": AttendanceLiveIdentityExtension()},
     )
     service = (await provider.create_processors(session))[0]
-    identity_tool = next(
-        tool
-        for tool in service._service_tools().standard_tools
-        if tool.name == "record_caller_identity"
+    tool_names = {
+        tool.name for tool in service._service_tools().standard_tools
+    }
+
+    assert "record_caller_identity" in tool_names
+    assert {"end_call", "hang_up_call"}.issubset(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_unregistered_workflow_does_not_receive_attendance_tool_or_fields(monkeypatch):
+    monkeypatch.setattr(
+        "pipecat.services.google.gemini_live.vertex.llm.GeminiLiveVertexLLMService._get_credentials",
+        lambda *args, **kwargs: MagicMock(),
     )
-    result_callback = AsyncMock()
-    params = FunctionCallParams(
-        function_name="record_caller_identity",
-        tool_call_id="identity-1",
-        arguments={
-            "identity_type": "caregiver_identity",
-            "name": "குமார்",
-            "confidence": 0.96,
-            "explicitly_stated": True,
-        },
-        llm=service,
-        pipeline_worker=MagicMock(),
-        context=MagicMock(),
-        result_callback=result_callback,
+    session = AcceptedSession(
+        channel="phone",
+        provider="vobiz",
+        direction=Direction.OUTBOUND,
+        auto_hangup_when_complete=True,
+        post_call_workflow_id="generic",
+        live_agent_completion_requirements={"always": ["account_number"]},
+    )
+    provider = VertexGeminiLiveProvider(
+        project_id="test-project",
+        location="us-central1",
+        model="google/gemini-live-2.5-flash-native-audio",
+        voice="Charon",
+        system_instruction="Test instructions",
+        live_tool_extensions={"attendance": AttendanceLiveIdentityExtension()},
     )
 
-    await identity_tool.handler(params)
+    service = (await provider.create_processors(session))[0]
+    names = {tool.name for tool in service._service_tools().standard_tools}
 
-    assert session.metadata["collected_data"]["caregiver_identity"] == "குமார்"
-    result_callback.assert_awaited_once()
-    assert result_callback.await_args.args[0]["missing_required_identity_fields"] == [
-        "patient_identity"
-    ]
+    assert "record_caller_identity" not in names
+    assert "workflow_protected_fields" not in session.metadata
+    assert "workflow_string_fields" not in session.metadata

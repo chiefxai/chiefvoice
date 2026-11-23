@@ -28,6 +28,9 @@ from chiefvoice.agents.call.factory import create_realtime_pipeline_factory
 from chiefvoice.agents.call.prepared_session import PreparedRealtimeSessionDirectory
 from chiefvoice.agents.call.providers import RealtimeAgentRegistry
 from chiefvoice.agents.call.providers.vertex import VertexGeminiLiveProvider
+from chiefvoice.agents.post_call.workflows.attendance.live_identity import (
+    AttendanceLiveIdentityExtension,
+)
 from chiefvoice.agents.post_call.providers.vertex import create_vertex_post_call_agent
 from chiefvoice.agents.post_call.providers.api_key_vertex import ApiKeyVertexPostCallAgent
 from chiefvoice.agents.post_call.lambda_dispatch import LambdaAsyncInvoker
@@ -98,6 +101,7 @@ async def lifespan(_app: FastAPI):
     post_call_replay_service = getattr(_app.state, "post_call_replay_service", None)
     post_call_recovery_spool = getattr(_app.state, "post_call_recovery_spool", None)
     call_session_store = getattr(_app.state, "call_session_store", None)
+    call_coordinator = getattr(_app.state, "call_coordinator", None)
     vobiz_callback_nonce_store = getattr(_app.state, "vobiz_callback_nonce_store", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
     recording_store = getattr(_app.state, "recording_store", None)
@@ -165,6 +169,10 @@ async def lifespan(_app: FastAPI):
         for check_storage in storage_checks:
             await check_storage()
         _app.state.object_storage_ready = True
+        if call_coordinator is not None and call_session_store is not None:
+            worker_tasks.append(
+                asyncio.create_task(call_coordinator.run_outbound_queue_worker())
+            )
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             if post_call_async_invoker is not None:
                 worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_async_dispatcher(
@@ -450,6 +458,7 @@ def create_app(
                 google_ai_model=settings.google_ai_live_model,
                 api_key_directory=api_key_directory,
                 prepared_sessions=prepared_realtime_sessions,
+                live_tool_extensions={"attendance": AttendanceLiveIdentityExtension()},
             )
             voice_pipeline_factory = create_realtime_pipeline_factory(
                 RealtimeAgentRegistry([vertex_provider]),
@@ -493,6 +502,13 @@ def create_app(
         if settings.database_url and settings.credentials_encryption_key
         else None
     )
+    if isinstance(post_call_dispatcher, SqlPostCallQueue) and call_session_store is not None:
+        # Legacy job recovery requires an authoritative tenant-scoped config read.
+        post_call_dispatcher.workflow_config_resolver = (
+            lambda tenant_id, session_id: call_session_store.get_post_call_workflow_config(
+                tenant_id, session_id, agent_template_directory
+            )
+        )
     vobiz_callback_nonce_store = (
         SqlVobizCallbackNonceStore(settings.database_url)
         if settings.database_url
