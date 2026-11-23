@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
-from pipecat.services.llm_service import FunctionCallParams
 
 from chiefvoice.agents.call.hangup_validation import validate_hangup_request_async
 from chiefvoice.agents.call.identity_state import save_caller_identity
@@ -241,7 +240,7 @@ async def test_completion_succeeds_after_both_identity_fields_are_saved():
 
 
 @pytest.mark.asyncio
-async def test_gemini_live_identity_tool_persists_into_validator_state(monkeypatch):
+async def test_gemini_live_does_not_register_identity_tool(monkeypatch):
     monkeypatch.setattr(
         "pipecat.services.google.gemini_live.vertex.llm.GeminiLiveVertexLLMService._get_credentials",
         lambda *args, **kwargs: MagicMock(),
@@ -256,31 +255,9 @@ async def test_gemini_live_identity_tool_persists_into_validator_state(monkeypat
         system_instruction="Test instructions",
     )
     service = (await provider.create_processors(session))[0]
-    identity_tool = next(
-        tool
-        for tool in service._service_tools().standard_tools
-        if tool.name == "record_caller_identity"
-    )
-    result_callback = AsyncMock()
-    params = FunctionCallParams(
-        function_name="record_caller_identity",
-        tool_call_id="identity-1",
-        arguments={
-            "identity_type": "caregiver_identity",
-            "name": "குமார்",
-            "confidence": 0.96,
-            "explicitly_stated": True,
-        },
-        llm=service,
-        pipeline_worker=MagicMock(),
-        context=MagicMock(),
-        result_callback=result_callback,
-    )
+    tool_names = {
+        tool.name for tool in service._service_tools().standard_tools
+    }
 
-    await identity_tool.handler(params)
-
-    assert session.metadata["collected_data"]["caregiver_identity"] == "குமார்"
-    result_callback.assert_awaited_once()
-    assert result_callback.await_args.args[0]["missing_required_identity_fields"] == [
-        "patient_identity"
-    ]
+    assert "record_caller_identity" not in tool_names
+    assert {"end_call", "hang_up_call"}.issubset(tool_names)
