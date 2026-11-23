@@ -14,7 +14,7 @@ from datetime import timedelta
 from chiefvoice.core.config import settings
 from chiefvoice.data_lifecycle.backup import BackupPolicy, BackupScope
 from chiefvoice.data_lifecycle.postgres_backup import EncryptedPostgresBackupProvider
-from chiefvoice.storage.s3 import create_s3_compatible_client
+from chiefvoice.storage.client import create_object_storage_client
 
 
 async def main() -> None:
@@ -24,7 +24,7 @@ async def main() -> None:
     if not settings.database_url or not settings.backup_encryption_key or not settings.object_storage_bucket:
         raise SystemExit("DATABASE_URL, BACKUP_ENCRYPTION_KEY and OBJECT_STORAGE_BUCKET are required")
 
-    client = create_s3_compatible_client()
+    client = create_object_storage_client()
     provider = EncryptedPostgresBackupProvider(
         settings.database_url,
         settings.backup_directory,

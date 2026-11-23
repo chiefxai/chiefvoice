@@ -15,6 +15,7 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMTextFrame,
     LLMRunFrame,
     OutputAudioRawFrame,
     StartFrame,
@@ -144,6 +145,8 @@ class GeminiConversationWatchdog(FrameProcessor):
         self._bot_audio_playing = False
         self._response_audio_seen = False
         self._initial_response_watchdog_started = False
+        self._assistant_response_completed = False
+        self._assistant_output_suppressed_after_hangup = False
         self._assistant_text_buffer = ""
         self._closed = False
         self._watch_task: asyncio.Task | None = None
@@ -165,6 +168,42 @@ class GeminiConversationWatchdog(FrameProcessor):
     async def process_frame(self, frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
+        assistant_response_frames = (
+            LLMFullResponseStartFrame,
+            LLMFullResponseEndFrame,
+            LLMTextFrame,
+            TTSTextFrame,
+            OutputAudioRawFrame,
+        )
+        if direction is FrameDirection.DOWNSTREAM:
+            if (
+                not self._assistant_output_suppressed_after_hangup
+                and self._assistant_response_completed
+                and self._hangup_is_pending_or_terminal()
+                and isinstance(
+                    frame,
+                    (
+                        LLMFullResponseStartFrame,
+                        LLMTextFrame,
+                        TTSTextFrame,
+                        OutputAudioRawFrame,
+                    ),
+                )
+            ):
+                self._assistant_output_suppressed_after_hangup = True
+                logger.warning(
+                    "assistant_response_suppressed_after_hangup",
+                    extra={**self._log_context(), "frame_type": type(frame).__name__},
+                )
+            elif isinstance(frame, LLMFullResponseStartFrame):
+                self._assistant_response_completed = False
+
+            if (
+                self._assistant_output_suppressed_after_hangup
+                and isinstance(frame, assistant_response_frames)
+            ):
+                return
+
         is_call_terminating = (
             self._call_state in (CallLifecycleState.TERMINATING, CallLifecycleState.TERMINATED)
             or bool(self._metadata.get("call_terminating"))
@@ -182,6 +221,7 @@ class GeminiConversationWatchdog(FrameProcessor):
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, UserStartedSpeakingFrame):
             if is_call_terminating:
                 return
+            self._reset_hangup_output_suppression()
             supersede_recovery = getattr(
                 self._service, "supersede_recovery_for_caller_speech", None
             )
@@ -216,6 +256,7 @@ class GeminiConversationWatchdog(FrameProcessor):
             # activity signal so silence prompts cannot be sent over caller
             # speech, and retain a response watchdog for the missed local turn.
             if not is_call_terminating and frame.text.strip():
+                self._reset_hangup_output_suppression()
                 supersede_recovery = getattr(
                     self._service, "supersede_recovery_for_caller_speech", None
                 )
@@ -270,7 +311,9 @@ class GeminiConversationWatchdog(FrameProcessor):
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
             self._gemini_is_generating = False
             self._metadata["gemini_is_generating"] = False
+            self._assistant_response_completed = True
             logger.info("gemini_generation_completed", extra=self._log_context())
+            self._cancel_response_watchdog("gemini_response_completed")
             if self._session.auto_hangup_when_complete:
                 await self._maybe_hangup_after_completed_response()
             self._maybe_arm_caller_inactivity_timer()
@@ -304,6 +347,19 @@ class GeminiConversationWatchdog(FrameProcessor):
                 self._arm_initial_response_watchdog("initial_greeting")
 
         await self.push_frame(frame, direction)
+
+    def _hangup_is_pending_or_terminal(self) -> bool:
+        return bool(
+            self._metadata.get("agent_hangup_pending")
+            or self._metadata.get("call_terminating")
+            or self._metadata.get("call_terminated")
+        )
+
+    def _reset_hangup_output_suppression(self) -> None:
+        if self._assistant_output_suppressed_after_hangup:
+            logger.info("assistant_output_suppression_reset_by_caller", extra=self._log_context())
+        self._assistant_output_suppressed_after_hangup = False
+        self._assistant_response_completed = False
 
     async def _maybe_hangup_after_completed_response(self) -> None:
         """Hang up only when the whole assistant turn ends with the goodbye.
@@ -687,7 +743,19 @@ class GeminiConversationWatchdog(FrameProcessor):
                     else 0
                 )
                 try:
-                    recovered = await self._service.recover_unanswered_turn()
+                    try:
+                        recovered = await self._service.recover_unanswered_turn()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        recovered = False
+                        logger.exception(
+                            "gemini_watchdog_recovery_failed",
+                            extra={
+                                **self._log_context(),
+                                "error_type": type(error).__name__,
+                            },
+                        )
                     if recovered:
                         logger.info("gemini_watchdog_recovery_requested", extra=self._log_context())
                         await asyncio.sleep(self._recovery_grace)
@@ -703,6 +771,11 @@ class GeminiConversationWatchdog(FrameProcessor):
                 or self._metadata.get("call_terminated")
             ):
                 return
+            # recover_unanswered_turn owns the bounded reconnect/readiness wait.
+            # If Gemini stays unavailable for that window, the local fallback
+            # still travels through the call's media pipeline and ends the turn;
+            # waiting for Gemini here would orphan this watchdog with no later
+            # readiness event subscribed to resume it.
             logger.warning(
                 "gemini_watchdog_recovery_finished_without_response",
                 extra={**self._log_context(), "recovery_succeeded": recovered},

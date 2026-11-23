@@ -18,6 +18,8 @@ from typing import Any
 
 from google.genai.types import Blob
 from pipecat.frames.frames import (
+    CancelFrame,
+    EndFrame,
     InputAudioRawFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -132,7 +134,13 @@ def reliable_vertex_service_class(
             self._chiefvoice_connection_error_type: str | None = None
             self._chiefvoice_last_ready = False
             self._chiefvoice_fallback_active = False
+            self._chiefvoice_terminal = False
             self._chiefvoice_recovery_reconnect_task: asyncio.Task | None = None
+            from chiefvoice.core.config import settings
+
+            self._chiefvoice_recovery_ready_timeout_seconds = (
+                settings.gemini_recovery_ready_timeout_seconds
+            )
             self._chiefvoice_recovery_superseded = False
             self._chiefvoice_recent_input_transcript = ""
             self._chiefvoice_recent_input_transcript_at = 0.0
@@ -157,6 +165,25 @@ def reliable_vertex_service_class(
                 )
                 return
             await super().setup(setup)
+
+        async def _connect(self, session_resumption_handle: str | None = None) -> None:
+            # A reconnect that outlives call teardown must not create a fresh
+            # Gemini connection after the media pipeline has ended.
+            if self._chiefvoice_terminal or self._chiefvoice_fallback_active:
+                return
+            await super()._connect(session_resumption_handle=session_resumption_handle)
+
+        async def stop(self, frame: EndFrame) -> None:
+            self._chiefvoice_terminal = True
+            await super().stop(frame)
+
+        async def cancel(self, frame: CancelFrame) -> None:
+            self._chiefvoice_terminal = True
+            await super().cancel(frame)
+
+        async def cleanup(self) -> None:
+            self._chiefvoice_terminal = True
+            await super().cleanup()
 
         async def _handle_connection_error(self, error: Exception) -> bool:
             # The receive loop waits here before reconnecting. Buffer new
@@ -215,6 +242,42 @@ def reliable_vertex_service_class(
                 )
                 await super()._reconnect()
 
+        async def _cancel_recovery_reconnect(self) -> None:
+            task = self._chiefvoice_recovery_reconnect_task
+            if task is None or task is asyncio.current_task():
+                return
+            if task.done():
+                try:
+                    task.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._clear_recovery_reconnect_task(task)
+                return
+            task.cancel()
+            # Task cancellation should be prompt for a Pipecat reconnect. Keep
+            # ownership via the field and done callback if a provider coroutine
+            # delays cancellation; never block call teardown without a limit.
+            done, _ = await asyncio.wait({task}, timeout=1.0)
+            if task in done:
+                try:
+                    task.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._clear_recovery_reconnect_task(task)
+            else:
+                logger.error(
+                    "gemini_reconnect_cancellation_timed_out",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
+
+        async def _cancel_pending_connection(self) -> None:
+            task = getattr(self, "_connection_task", None)
+            if task is None or task is asyncio.current_task() or task.done():
+                return
+            await self.cancel_task(task, timeout=1.0)
+            if task.done() and getattr(self, "_connection_task", None) is task:
+                self._connection_task = None
+
         def _clear_recovery_reconnect_task(self, task: asyncio.Task) -> None:
             if self._chiefvoice_recovery_reconnect_task is task:
                 self._chiefvoice_recovery_reconnect_task = None
@@ -233,6 +296,9 @@ def reliable_vertex_service_class(
         async def _disconnect(self) -> None:
             was_ready = bool(self._ready_for_realtime_input)
             self._chiefvoice_ready_event.clear()
+            recovery_task = self._chiefvoice_recovery_reconnect_task
+            if recovery_task is not None and recovery_task is not asyncio.current_task():
+                await self._cancel_recovery_reconnect()
             pending_interruption = self._chiefvoice_pending_interruption_task
             self._chiefvoice_pending_interruption_task = None
             self._chiefvoice_pending_interruption = False
@@ -361,6 +427,13 @@ def reliable_vertex_service_class(
             return True
 
         async def _handle_session_ready(self, session: Any) -> None:
+            if self._chiefvoice_terminal or self._chiefvoice_fallback_active:
+                logger.warning(
+                    "gemini_late_session_ignored_after_call_shutdown",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
+                await session.close()
+                return
             await super()._handle_session_ready(session)
             # This event means the provider accepted the Live API connection.
             # It is deliberately distinct from ready_for_realtime_input, which
@@ -539,8 +612,15 @@ def reliable_vertex_service_class(
             turns. For a watchdog recovery, readiness alone is not proof that the
             session is healthy, so perform one serialized reconnect before retrying.
             """
-            if self._disconnecting or self._chiefvoice_fallback_active:
+            if (
+                self._disconnecting
+                or self._chiefvoice_terminal
+                or self._chiefvoice_fallback_active
+            ):
                 return False
+            deadline = asyncio.get_running_loop().time() + (
+                self._chiefvoice_recovery_ready_timeout_seconds
+            )
             try:
                 self._chiefvoice_recovery_superseded = False
                 had_resumption_handle = bool(self._session_resumption_handle)
@@ -551,7 +631,10 @@ def reliable_vertex_service_class(
                 )
                 generation_was_active = bool(self._bot_is_responding)
                 if generation_was_active:
-                    await self._handle_interruption()
+                    await asyncio.wait_for(
+                        self._handle_interruption(),
+                        timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+                    )
 
                 # A stale but truthy readiness flag was the gap in the previous
                 # recovery path. Reopen the same Pipecat service/session once;
@@ -572,8 +655,14 @@ def reliable_vertex_service_class(
                 )
                 self._chiefvoice_recovery_reconnect_task = reconnect_task
                 reconnect_task.add_done_callback(self._clear_recovery_reconnect_task)
-                await asyncio.shield(reconnect_task)
-                await asyncio.wait_for(self._chiefvoice_ready_event.wait(), timeout=8.0)
+                await asyncio.wait_for(
+                    asyncio.shield(reconnect_task),
+                    timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+                )
+                await asyncio.wait_for(
+                    self._chiefvoice_ready_event.wait(),
+                    timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+                )
                 if not self._session or not self._ready_for_realtime_input:
                     return False
 
@@ -581,15 +670,18 @@ def reliable_vertex_service_class(
                 # inference over the retained Pipecat context. Other reconnect
                 # modes need an explicit prompt to continue the pending turn.
                 if not reconnect_will_generate_response:
-                    await self._session.send_realtime_input(
-                        text=(
-                            "Continue from the current conversation state. Do not repeat any "
-                            "question or instruction the caller has already heard. Use the "
-                            "caller's latest answer and the information already collected; "
-                            "ask only for the next missing required item. If the caller's "
-                            "latest answer already addressed the pending question, "
-                            "acknowledge it briefly and continue."
-                        )
+                    await asyncio.wait_for(
+                        self._session.send_realtime_input(
+                            text=(
+                                "Continue from the current conversation state. Do not repeat any "
+                                "question or instruction the caller has already heard. Use the "
+                                "caller's latest answer and the information already collected; "
+                                "ask only for the next missing required item. If the caller's "
+                                "latest answer already addressed the pending question, "
+                                "acknowledge it briefly and continue."
+                            )
+                        ),
+                        timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
                     )
                 logger.warning(
                     "gemini_unanswered_turn_recovery_requested",
@@ -604,8 +696,22 @@ def reliable_vertex_service_class(
                 diagnostics.record_conversation_event("response_watchdog_recovered")
                 return True
             except asyncio.CancelledError:
+                await self._cancel_recovery_reconnect()
                 raise
+            except TimeoutError:
+                logger.warning(
+                    "gemini_unanswered_turn_recovery_timed_out",
+                    extra={
+                        "session_id": session_id,
+                        "provider": "vertex",
+                        "timeout_seconds": self._chiefvoice_recovery_ready_timeout_seconds,
+                    },
+                )
+                await self._cancel_recovery_reconnect()
+                await self._cancel_pending_connection()
+                return False
             except Exception as error:
+                await self._cancel_recovery_reconnect()
                 logger.error(
                     "gemini_unanswered_turn_recovery_failed",
                     extra={
@@ -619,7 +725,11 @@ def reliable_vertex_service_class(
 
         async def prompt_caller_inactivity(self, text: str) -> bool:
             """Prompt Gemini to speak an inactivity / follow-up message to the caller."""
-            if self._disconnecting or self._chiefvoice_fallback_active:
+            if (
+                self._disconnecting
+                or self._chiefvoice_terminal
+                or self._chiefvoice_fallback_active
+            ):
                 return False
             try:
                 if not self._session or not self._ready_for_realtime_input:
@@ -655,6 +765,8 @@ def reliable_vertex_service_class(
                 return False
             self._chiefvoice_fallback_active = True
             try:
+                await self._cancel_recovery_reconnect()
+                await self._cancel_pending_connection()
                 if self._bot_is_responding:
                     # The watchdog invokes fallback only after observing no
                     # model audio for the whole recovery window. Stop a stuck
@@ -737,6 +849,8 @@ def reliable_vertex_service_class(
         async def _handle_context(self, context: Any) -> None:
             # The initial context can arrive after the websocket has connected.
             # Pipecat marks realtime input ready only after seeding that context.
+            if self._chiefvoice_terminal or self._chiefvoice_fallback_active:
+                return
             await super()._handle_context(context)
             if self._ready_for_realtime_input:
                 self._chiefvoice_ready_event.set()

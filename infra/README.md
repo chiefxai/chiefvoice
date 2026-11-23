@@ -11,6 +11,7 @@ terraform fmt -check -recursive
 terraform init -backend=false -input=false
 terraform validate
 ```
+Terraform state, backend configuration, plan files, and production `terraform.tfvars` may contain sensitive values and must not be committed. GCP uses its existing private GCS state bucket; AWS uses a separate private S3 backend.
 
 For an approved AWS deployment, follow the prerequisites and manual deployment steps in the [AWS root README](https://github.com/chiefxai/chiefvoice-infra/blob/main/aws/README.md). It documents the AWS account inputs, GCP service-account secret ARN and permissions, backend setup, required Terraform variables, and `init`/`plan`/`apply` commands. AWS uses a separate private S3 state backend; do not reuse the GCP GCS state. Terraform state, backend configuration, plans, and production `terraform.tfvars` may contain sensitive values and must not be committed.
 

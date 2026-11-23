@@ -19,7 +19,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from chiefvoice.core.config import settings
 from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.observability.setup import recording_storage_event
-from chiefvoice.storage.s3 import create_s3_compatible_client, object_key
+from chiefvoice.storage.client import create_object_storage_client
+from chiefvoice.storage.s3 import object_key
 
 if TYPE_CHECKING:
     from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
@@ -333,7 +334,8 @@ class S3RecordingStore:
             raise ValueError("S3 recording bucket must be configured")
         self.bucket = bucket
         self.prefix = prefix.strip("/") or "recordings"
-        self._client = client or create_s3_compatible_client()
+        self._client = client or create_object_storage_client()
+        self._uri_scheme = getattr(self._client, "uri_scheme", "s3")
         self._fernet = Fernet(encryption_key.encode("ascii"))
 
     async def close(self) -> None:
@@ -392,7 +394,7 @@ class S3RecordingStore:
             except Exception:
                 logger.error("recording_partial_upload_cleanup_failed")
             raise
-        return f"s3://{self.bucket}/{audio_key}"
+        return f"{self._uri_scheme}://{self.bucket}/{audio_key}"
 
     async def check_storage(self) -> None:
         await asyncio.to_thread(
@@ -479,7 +481,10 @@ class S3RecordingStore:
 
     async def read_wav(self, tenant_id: str, session_id: str, recording_uri: str) -> bytes | None:
         parsed = urlsplit(recording_uri)
-        if parsed.scheme != "s3" or parsed.netloc != self.bucket or parsed.query or parsed.fragment:
+        allowed_schemes = {self._uri_scheme}
+        if self._uri_scheme == "gs":
+            allowed_schemes.add("s3")  # Read older GCS XML-API URIs already stored in Postgres.
+        if parsed.scheme not in allowed_schemes or parsed.netloc != self.bucket or parsed.query or parsed.fragment:
             return None
         key = parsed.path.lstrip("/")
         tenant_prefix = object_key(self.prefix, _tenant_digest(tenant_id)) + "/"
@@ -562,7 +567,11 @@ class S3RecordingStore:
 def _is_missing_object(exc: Exception) -> bool:
     response = getattr(exc, "response", {})
     error = response.get("Error", {}) if isinstance(response, dict) else {}
-    return error.get("Code") in {"404", "NoSuchKey", "NotFound"}
+    return (
+        error.get("Code") in {"404", "NoSuchKey", "NotFound"}
+        or exc.__class__.__name__ == "NotFound"
+        or getattr(exc, "code", None) == 404
+    )
 
 
 def create_recording_store() -> RecordingStore | None:
@@ -571,16 +580,17 @@ def create_recording_store() -> RecordingStore | None:
         return None
     backend = settings.recordings_storage_backend
     if settings.recordings_encryption_key:
-        if backend == "s3":
+        if backend in {"s3", "gcs"}:
             if not settings.object_storage_bucket:
                 raise RuntimeError("OBJECT_STORAGE_BUCKET is required for S3 recordings")
             return S3RecordingStore(
                 settings.object_storage_bucket,
                 settings.recordings_encryption_key,
+                client=create_object_storage_client(),
                 prefix="recordings",
             )
         if backend != "local":
-            raise ValueError("RECORDINGS_STORAGE_BACKEND must be 'local' or 's3'")
+            raise ValueError("RECORDINGS_STORAGE_BACKEND must be 'local', 's3', or 'gcs'")
         if settings.app_env.lower() != "local":
             raise RuntimeError("Local recording storage is allowed only in local development")
         return EncryptedLocalRecordingStore(
@@ -593,8 +603,8 @@ def create_recording_store() -> RecordingStore | None:
     ):
         logger.warning("recordings_using_unencrypted_development_storage")
         return LocalRecordingStore(settings.recordings_dir)
-    if backend not in {"local", "s3"}:
-        raise ValueError("RECORDINGS_STORAGE_BACKEND must be 'local' or 's3'")
+    if backend not in {"local", "s3", "gcs"}:
+        raise ValueError("RECORDINGS_STORAGE_BACKEND must be 'local', 's3', or 'gcs'")
     raise RuntimeError(
         "RECORDINGS_ENCRYPTION_KEY is required for S3 recordings and for non-local environments"
     )

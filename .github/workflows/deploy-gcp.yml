@@ -10,6 +10,7 @@ on:
       - "infra/**"
       - "cloudbuild.yaml"
       - ".github/workflows/terraform-gcp-region.yml"
+      - ".github/workflows/deploy-gcp.yml"
   workflow_dispatch:
 
 concurrency:
@@ -32,6 +33,7 @@ jobs:
       GCP_GITHUB_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_GITHUB_DEPLOY_SERVICE_ACCOUNT }}
       GCP_CLOUD_BUILD_SERVICE_ACCOUNT: ${{ vars.GCP_CLOUD_BUILD_SERVICE_ACCOUNT }}
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_CLOUDBUILD_SUBSTITUTIONS_JSON: ${{ vars.GCP_CLOUDBUILD_SUBSTITUTIONS_JSON }}
     steps:
       - name: Check out production revision
         uses: actions/checkout@v7
@@ -49,6 +51,41 @@ jobs:
           [[ "$GCP_REGION" =~ ^[a-z]+-[a-z0-9]+[0-9]$ ]] || { echo "GCP_REGION must be a valid region, such as us-central1" >&2; exit 1; }
           [[ "$GCP_GITHUB_DEPLOY_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || { echo "GCP_GITHUB_DEPLOY_SERVICE_ACCOUNT must be a service account email" >&2; exit 1; }
           [[ "$GCP_CLOUD_BUILD_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || { echo "GCP_CLOUD_BUILD_SERVICE_ACCOUNT must be a service account email" >&2; exit 1; }
+          [[ "$GCP_PROJECT_ID" == "chiefvoice-service" ]] || { echo "GCP_PROJECT_ID must be chiefvoice-service for production deployment" >&2; exit 1; }
+          [[ "$GCP_GITHUB_DEPLOY_SERVICE_ACCOUNT" == "chiefvoice-github-deploy@${GCP_PROJECT_ID}.iam.gserviceaccount.com" ]] || { echo "GCP_GITHUB_DEPLOY_SERVICE_ACCOUNT must be the dedicated app deployment identity" >&2; exit 1; }
+
+      - name: Prepare Terraform-managed Cloud Build substitutions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY' >> "$GITHUB_ENV"
+          import json
+          import os
+          import re
+          import sys
+
+          raw = os.environ.get("GCP_CLOUDBUILD_SUBSTITUTIONS_JSON", "")
+          if not raw:
+              sys.exit("Missing GitHub repository variable: GCP_CLOUDBUILD_SUBSTITUTIONS_JSON")
+          values = json.loads(raw)
+          if not isinstance(values, dict) or not values:
+              sys.exit("GCP_CLOUDBUILD_SUBSTITUTIONS_JSON must contain a non-empty object")
+
+          parts = []
+          for key, value in sorted(values.items()):
+              if not isinstance(key, str) or not re.fullmatch(r"_[A-Z0-9_]+", key):
+                  sys.exit(f"Invalid Cloud Build substitution key: {key!r}")
+              value = str(value)
+              if not value.strip():
+                  sys.exit(f"Cloud Build substitution {key} is empty")
+              if "\n" in value or "\r" in value:
+                  sys.exit(f"Cloud Build substitution {key} contains a newline")
+              parts.append(f"{key}={value}")
+          delimiter = "__CHIEFVOICE_SUBSTITUTION_DELIMITER__"
+          while any(delimiter in part for part in parts):
+              delimiter += "_"
+          print("CLOUDBUILD_SUBSTITUTIONS=^" + delimiter + "^" + delimiter.join(parts))
+          PY
 
       - name: Authenticate to Google Cloud with Workload Identity Federation
         uses: google-github-actions/auth@v3
@@ -74,6 +111,7 @@ jobs:
             --region="$GCP_REGION" \
             --config=cloudbuild.yaml \
             --gcs-source-staging-dir="gs://${GCP_PROJECT_ID}_cloudbuild/source" \
+            --substitutions="$CLOUDBUILD_SUBSTITUTIONS" \
             --service-account="$build_service_account" \
             --log-http \
             --verbosity=debug \

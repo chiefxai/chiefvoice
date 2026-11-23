@@ -186,10 +186,8 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
     async def create_processors(self, session: AcceptedSession) -> Sequence[FrameProcessor]:
         # Import lazily so deployments using another backend do not require Google packages.
         from pipecat.services.google.gemini_live.llm import (
-            EndSensitivity,
             GeminiLiveLLMService,
             GeminiVADParams,
-            StartSensitivity,
         )
         from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
 
@@ -217,11 +215,6 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             profile = await self.profile_directory.get(session.tenant_id, session.bot_config_id)
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
-            if language_tag and language_tag.split("-", 1)[0].lower() != profile.language.split("-", 1)[0].lower():
-                raise HTTPException(
-                    status_code=422,
-                    detail="Calling template language must match the selected voice profile language",
-                )
             language_tag = language_tag or profile.language
             session.metadata["voice_language"] = language_tag
             try:
@@ -232,10 +225,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     detail="The selected realtime provider does not support this language tag",
                 ) from exc
             voice = profile.voice
-            system_instruction = profile.system_instruction(self.system_instruction)
+            system_instruction = profile.system_instruction(
+                self.system_instruction, language=language_tag
+            )
             # Vertex's published Live API language set includes Tamil and Telugu
             # but not Malayalam. Route Malayalam through the Gemini Live API.
-            if language_tag.lower() in {"ml", "ml-in"}:
+            if language_tag.split("-", 1)[0].lower() == "ml":
                 if not self.google_ai_api_key:
                     raise HTTPException(
                         status_code=503,
@@ -299,10 +294,11 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             if not project_id:
                 raise HTTPException(status_code=503, detail="Vertex AI project is not configured")
 
-        # Use conservative server VAD thresholds for telephony echo and pauses,
-        # while the pipeline's independent local VAD verifies interruptions.
-        # Gemini's docs recommend 500–800 ms silence for complete utterances;
-        # 700 ms balances phone-call responsiveness with fewer split turns.
+        # The pipeline's local VAD already emits UserStartedSpeakingFrame and
+        # UserStoppedSpeakingFrame. Disable Gemini's independent server VAD so
+        # Pipecat sends explicit ActivityStart/ActivityEnd markers for each
+        # local turn; otherwise a server-side end-of-speech miss leaves the
+        # model waiting until the response watchdog reconnects it.
         if params is None:
             settings_type = (
                 GeminiLiveLLMService.Settings
@@ -313,11 +309,15 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 params = settings_type(model=model, voice=voice, language=language_tag)
             else:
                 params = settings_type(model=model, voice=voice)
-        params.vad = GeminiVADParams(
-            start_sensitivity=StartSensitivity.START_SENSITIVITY_LOW,
-            end_sensitivity=EndSensitivity.END_SENSITIVITY_LOW,
-            prefix_padding_ms=200,
-            silence_duration_ms=700,
+        params.vad = GeminiVADParams(disabled=True)
+        logger.info(
+            "gemini_turn_detection_configured",
+            extra={
+                "session_id": session.session_id,
+                "provider": "vertex",
+                "mode": "local_vad_activity_markers",
+                "server_vad_disabled": True,
+            },
         )
 
         if session.live_agent_context:
@@ -386,9 +386,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 "do not treat it as completed. "
                 "After you have collected the required information and the caller has confirmed "
                 "the summary, call the end_call tool immediately with reason completed and all "
-                "collected data. Do not wait for an inactivity timeout. The hang_up_call tool "
+                "caller-provided values in collected_data. Do not guess missing values or wait "
+                "for an inactivity timeout. The hang_up_call tool "
                 "is an equivalent compatibility alias. The platform will request hangup after "
-                "the final audio has drained. If an end_call request is rejected for missing fields, "
+                "the final audio has drained. After a successful end_call or hang_up_call, do not "
+                "speak again or invoke either hangup tool; the platform is finishing the current "
+                "audio. If an end_call request is rejected for missing fields, "
                 "follow the tool response: do not repeat the closing, thank-you, or goodbye; ask only "
                 "for the missing information, then retry once with all values in collected_data. "
                 "If the caller already supplied a missing value, include it without asking again. "
@@ -452,6 +455,20 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                         "caller_spoke_during_recovery": caller_spoke_during_recovery,
                     },
                 )
+                if session.metadata.get("agent_hangup_pending"):
+                    logger.info(
+                        "call_agent_hangup_already_pending",
+                        extra={"session_id": session.session_id, "provider": session.provider},
+                    )
+                    await params.result_callback({
+                        "success": True,
+                        "status": "hangup_pending",
+                        "message": (
+                            "The call is already ending. Do not speak again or call the hangup "
+                            "tool again; the platform is finishing the current audio."
+                        ),
+                    })
+                    return
                 if (
                     recovery_active
                     and (

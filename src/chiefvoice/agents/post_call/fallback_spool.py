@@ -12,7 +12,8 @@ from typing import Protocol
 from cryptography.fernet import Fernet
 
 from chiefvoice.agents.post_call.base import CompletedCall
-from chiefvoice.storage.s3 import create_s3_compatible_client, object_key
+from chiefvoice.storage.client import create_object_storage_client
+from chiefvoice.storage.s3 import object_key
 
 logger = logging.getLogger(__name__)
 MAX_SPOOLED_JOB_BYTES = 8 * 1024 * 1024
@@ -51,7 +52,7 @@ class S3PostCallFallbackSpool:
             raise ValueError("Recovery spool prefix must not be empty")
         self._bucket = bucket
         self._fernet = Fernet(encryption_key.encode("ascii"))
-        self._client = client or create_s3_compatible_client()
+        self._client = client or create_object_storage_client()
         self._prefix = prefix.strip("/")
         self._max_object_bytes = max_object_bytes
 

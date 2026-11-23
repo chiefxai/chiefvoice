@@ -6,6 +6,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Settings:
     app_env: str = os.getenv("APP_ENV", "local")
+    object_storage_provider: str = os.getenv("OBJECT_STORAGE_PROVIDER", "s3").strip().lower()
     object_storage_endpoint_url: str | None = os.getenv("OBJECT_STORAGE_ENDPOINT_URL") or None
     object_storage_region: str = os.getenv("OBJECT_STORAGE_REGION", "us-east-1")
     object_storage_bucket: str | None = os.getenv("OBJECT_STORAGE_BUCKET") or None
@@ -75,6 +76,9 @@ class Settings:
     )
     gemini_recovery_grace_seconds: float = float(
         os.getenv("GEMINI_RECOVERY_GRACE_SECONDS", "6")
+    )
+    gemini_recovery_ready_timeout_seconds: float = float(
+        os.getenv("GEMINI_RECOVERY_READY_TIMEOUT_SECONDS", "8")
     )
     # Independent caller silence and inactivity management configuration.
     caller_inactivity_timeout_seconds: float = float(

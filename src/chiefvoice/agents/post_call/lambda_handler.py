@@ -107,7 +107,7 @@ async def _process(event: Mapping[str, object]) -> dict[str, object]:
                 credentials_json=credentials_json,
                 credentials_path=settings.vertex_credentials_path,
             )
-        elif has_global_vertex:
+        elif has_global_vertex and settings.vertex_project_id:
             project_id = settings.vertex_project_id
             agent = create_vertex_post_call_agent(
                 project_id=project_id,

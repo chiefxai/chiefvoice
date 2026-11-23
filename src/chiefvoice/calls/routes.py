@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
 from chiefvoice.agents.templates import BuiltinTool
@@ -21,6 +22,7 @@ from chiefvoice.identity.auth import Principal, require_scope
 from chiefvoice.observability.setup import call_start_event
 
 router = APIRouter()
+_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
 def resolve_assigned_sender(
@@ -74,7 +76,7 @@ def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None):
         body.context,
         tools,
         "end_call" in tools or bool(settings_values.get("auto_hangup_when_complete")),
-        settings_values.get("language"),
+        body.language or settings_values.get("language"),
         settings_values.get("completion_requirements"),
     )
 
@@ -173,9 +175,24 @@ class LiveAgentBody(BaseModel):
 
     agent_id: str | None = Field(default=None, max_length=128)
     template_id: str | None = Field(default=None, max_length=36)
+    language: str | None = Field(default=None, min_length=2, max_length=35)
     context: dict[str, Any] = Field(default_factory=dict)
     tools: list[BuiltinTool] | None = Field(default=None, max_length=10)
     add_tools: list[BuiltinTool] = Field(default_factory=list, max_length=10)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not _LANGUAGE_TAG.fullmatch(value):
+            raise ValueError("language must be a BCP 47 tag such as en-US or ta-IN")
+        try:
+            Language(value)
+        except ValueError as exc:
+            raise ValueError("language is not supported by the realtime provider") from exc
+        return value
 
     @model_validator(mode="after")
     def validate_live_tools(self):
@@ -469,13 +486,27 @@ async def start_outbound_call(
         call_start_event("failed")
         raise
     call_start_event("accepted")
-    return {
+    result = {
         "session_id": session.session_id,
         "provider": session.provider,
         "channel": session.channel,
         "direction": session.direction,
         "status": session.metadata.get("call_status", "starting"),
     }
+    if result["status"] == "queued":
+        queue_status = getattr(request.app.state, "call_session_store", None)
+        if queue_status is not None and hasattr(queue_status, "get_outbound_queue_status"):
+            queue_details = await queue_status.get_outbound_queue_status(
+                principal.tenant_id, session.session_id
+            )
+            if queue_details:
+                result.update(
+                    {
+                        key: queue_details[key]
+                        for key in ("queued_at", "queue_expires_at", "queue_attempts")
+                    }
+                )
+    return result
 
 
 @router.get("/v1/calls/{session_id}", tags=["calls"])
@@ -500,6 +531,36 @@ async def get_call_status(
         post_call = await dispatcher.get_status(principal.tenant_id, session_id)
     result.update(_post_call_pipeline_fields(result, post_call))
     return result
+
+
+@router.post("/v1/calls/{session_id}/cancel", tags=["calls"])
+async def cancel_queued_call(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("calls:write"))],
+):
+    """Cancel an outbound call only while it is still waiting in the queue."""
+    store = getattr(request.app.state, "call_session_store", None)
+    if store is None or not hasattr(store, "cancel_outbound"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Outbound call queue is not configured",
+        )
+    current = await store.get_status(principal.tenant_id, session_id)
+    if current is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+    await _enforce_number_binding(store, principal, session_id)
+    if current.get("status") != "queued":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only queued calls can be cancelled",
+        )
+    if not await store.cancel_outbound(principal.tenant_id, session_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Call has already started dispatching and cannot be cancelled",
+        )
+    return {"session_id": session_id, "status": "cancelled"}
 
 
 @router.get("/v1/calls/{session_id}/transcript", tags=["calls"])

@@ -77,7 +77,7 @@ from chiefvoice.data_lifecycle.backup import (
     run_backups_periodically,
 )
 from chiefvoice.data_lifecycle.postgres_backup import EncryptedPostgresBackupProvider
-from chiefvoice.storage.s3 import create_s3_compatible_client
+from chiefvoice.storage.client import create_object_storage_client
 from chiefvoice.sessions import AcceptedSession
 from chiefvoice.calls.routes import router as calls_router
 
@@ -101,6 +101,7 @@ async def lifespan(_app: FastAPI):
     post_call_replay_service = getattr(_app.state, "post_call_replay_service", None)
     post_call_recovery_spool = getattr(_app.state, "post_call_recovery_spool", None)
     call_session_store = getattr(_app.state, "call_session_store", None)
+    call_coordinator = getattr(_app.state, "call_coordinator", None)
     vobiz_callback_nonce_store = getattr(_app.state, "vobiz_callback_nonce_store", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
     recording_store = getattr(_app.state, "recording_store", None)
@@ -168,6 +169,10 @@ async def lifespan(_app: FastAPI):
         for check_storage in storage_checks:
             await check_storage()
         _app.state.object_storage_ready = True
+        if call_coordinator is not None and call_session_store is not None:
+            worker_tasks.append(
+                asyncio.create_task(call_coordinator.run_outbound_queue_worker())
+            )
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             if post_call_async_invoker is not None:
                 worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_async_dispatcher(
@@ -548,15 +553,15 @@ def create_app(
         if not isinstance(restore_targets, list) or any(not isinstance(item, str) for item in restore_targets):
             raise ValueError("BACKUP_RESTORE_TARGETS_JSON must be a JSON list of DSNs")
         backup_backend = settings.backup_storage_backend
-        if backup_backend == "s3":
+        if backup_backend in {"s3", "gcs"}:
             if not settings.object_storage_bucket:
-                raise ValueError("OBJECT_STORAGE_BUCKET is required for S3 database backups")
+                raise ValueError("OBJECT_STORAGE_BUCKET is required for object-storage database backups")
             provider = EncryptedPostgresBackupProvider(
                 settings.database_url,
                 settings.backup_directory,
                 settings.backup_encryption_key,
                 allowed_restore_targets=tuple(restore_targets),
-                s3_client=create_s3_compatible_client(),
+                s3_client=create_object_storage_client(),
                 s3_bucket=settings.object_storage_bucket,
                 s3_prefix="backups",
             )
@@ -571,7 +576,7 @@ def create_app(
                 allowed_restore_targets=tuple(restore_targets),
             )
         else:
-            raise ValueError("BACKUP_STORAGE_BACKEND must be 'local' or 's3'")
+            raise ValueError("BACKUP_STORAGE_BACKEND must be 'local', 's3', or 'gcs'")
         backup_provider = provider
         backup_runner = BackupRunner(backup_policies, provider)
         backup_execution_lock = PostgresBackupRunLock(settings.database_url)

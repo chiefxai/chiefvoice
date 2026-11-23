@@ -5,11 +5,25 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from cryptography.fernet import Fernet
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, func, or_, select, update
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    and_,
+    func,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
@@ -37,6 +51,15 @@ class CallSessionRow(Base):
     encrypted_transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcript_characters: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     transcript_persistence_failed: Mapped[bool] = mapped_column(nullable=False, default=False)
+    queue_enqueued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    queue_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    queue_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -45,6 +68,31 @@ class CallSessionRow(Base):
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OutboundCallQueueRow(Base):
+    __tablename__ = "outbound_call_queue"
+    __table_args__ = (
+        Index("ix_outbound_call_queue_status_enqueued", "status", "enqueued_at"),
+        Index("ix_outbound_call_queue_status_lease", "status", "lease_expires_at"),
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("call_sessions.session_id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    enqueued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="queued", server_default="queued"
+    )
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -135,6 +183,338 @@ class SqlCallSessionStore:
                     "This idempotency key refers to a retained call; use a new key"
                 )
             return self._decrypt_session(row.encrypted_session), False, row.status
+
+    async def enqueue_outbound(
+        self, session: AcceptedSession, expires_at: datetime
+    ) -> bool:
+        """Atomically move a registered outbound session into the durable FIFO queue."""
+        if not session.tenant_id:
+            raise ValueError("A tenant-owned outbound session is required")
+        if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+            raise ValueError("Queue expiration must be timezone-aware")
+        now = datetime.now(UTC)
+        expires_at = expires_at.astimezone(UTC)
+        if expires_at <= now:
+            raise ValueError("Queue expiration must be in the future")
+        async with self._sessions.begin() as db:
+            row = await db.scalar(
+                select(CallSessionRow)
+                .where(
+                    CallSessionRow.tenant_id == session.tenant_id,
+                    CallSessionRow.session_id == session.session_id,
+                )
+                .with_for_update()
+            )
+            if row is None or row.encrypted_session is None:
+                raise LookupError("Outbound call session is not registered")
+            if row.status == "queued":
+                existing = await db.get(OutboundCallQueueRow, session.session_id)
+                return existing is not None
+            if row.status != "starting":
+                return False
+
+            session.metadata["call_status"] = "queued"
+            row.status = "queued"
+            row.queue_enqueued_at = now
+            row.queue_expires_at = expires_at
+            row.queue_attempts = 0
+            row.end_reason = None
+            row.updated_at = now
+            row.encrypted_session = self._encrypt_session(session)
+            db.add(
+                OutboundCallQueueRow(
+                    session_id=session.session_id,
+                    tenant_id=session.tenant_id,
+                    enqueued_at=now,
+                    expires_at=expires_at,
+                    status="queued",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    available_at=now,
+                    attempts=0,
+                    updated_at=now,
+                )
+            )
+            return True
+
+    async def claim_outbound(self, lease_seconds: int = 120) -> AcceptedSession | None:
+        """Claim the oldest ready call, recovering expired leases without redialing starts."""
+        if not 1 <= lease_seconds <= 3_600:
+            raise ValueError("Outbound queue lease must be between 1 and 3600 seconds")
+        now = datetime.now(UTC)
+        claimed: AcceptedSession | None = None
+        async with self._sessions.begin() as db:
+            recovery_rows = await db.execute(
+                select(OutboundCallQueueRow, CallSessionRow)
+                .join(
+                    CallSessionRow,
+                    CallSessionRow.session_id == OutboundCallQueueRow.session_id,
+                )
+                .where(
+                    or_(
+                        (
+                            (OutboundCallQueueRow.status == "dispatching")
+                            & (OutboundCallQueueRow.lease_expires_at <= now)
+                        ),
+                        (
+                            (OutboundCallQueueRow.status == "queued")
+                            & (OutboundCallQueueRow.expires_at <= now)
+                        ),
+                    )
+                )
+                .order_by(OutboundCallQueueRow.enqueued_at)
+                .limit(100)
+                .with_for_update(skip_locked=True)
+            )
+            for queue_row, call_row in recovery_rows:
+                if queue_row.status == "dispatching":
+                    if call_row.status == "starting":
+                        call_row.status = "reconciliation_required"
+                        call_row.end_reason = "provider_start_outcome_ambiguous"
+                        call_row.updated_at = now
+                        await db.delete(queue_row)
+                    elif call_row.status == "queued":
+                        if queue_row.expires_at <= now:
+                            call_row.status = "expired"
+                            call_row.end_reason = "outbound_queue_expired"
+                            call_row.ended_at = now
+                            call_row.updated_at = now
+                            await db.delete(queue_row)
+                        else:
+                            queue_row.status = "queued"
+                            queue_row.lease_token = None
+                            queue_row.lease_expires_at = None
+                            queue_row.available_at = now
+                            queue_row.updated_at = now
+                    else:
+                        await db.delete(queue_row)
+                elif queue_row.status == "queued" and call_row.status == "queued":
+                    call_row.status = "expired"
+                    call_row.end_reason = "outbound_queue_expired"
+                    call_row.ended_at = now
+                    call_row.updated_at = now
+                    await db.delete(queue_row)
+
+            candidate = await db.execute(
+                select(OutboundCallQueueRow, CallSessionRow)
+                .join(
+                    CallSessionRow,
+                    CallSessionRow.session_id == OutboundCallQueueRow.session_id,
+                )
+                .where(
+                    OutboundCallQueueRow.status == "queued",
+                    OutboundCallQueueRow.available_at <= now,
+                    OutboundCallQueueRow.expires_at > now,
+                    CallSessionRow.status == "queued",
+                )
+                .order_by(OutboundCallQueueRow.enqueued_at, OutboundCallQueueRow.session_id)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            item = candidate.first()
+            if item is not None:
+                queue_row, call_row = item
+                if not call_row.encrypted_session:
+                    call_row.status = "failed"
+                    call_row.end_reason = "queued_session_unavailable"
+                    call_row.updated_at = now
+                    await db.delete(queue_row)
+                else:
+                    claimed = self._decrypt_session(call_row.encrypted_session)
+                    lease_token = secrets.token_hex(24)
+                    claimed.metadata["call_status"] = "queued"
+                    claimed.metadata["queue_status"] = "dispatching"
+                    # The lease token is runtime-only and intentionally omitted by
+                    # _encrypt_session, so it is never stored in encrypted_session.
+                    claimed.metadata["outbound_queue_lease_token"] = lease_token
+                    queue_row.status = "dispatching"
+                    queue_row.attempts += 1
+                    queue_row.lease_token = lease_token
+                    queue_row.lease_expires_at = now + timedelta(seconds=lease_seconds)
+                    queue_row.updated_at = now
+                    call_row.queue_attempts += 1
+                    call_row.updated_at = now
+        return claimed
+
+    async def renew_outbound_lease(
+        self, session_id: str, lease_token: str, lease_seconds: int
+    ) -> bool:
+        """Extend a live outbound dispatch lease owned by the matching worker token."""
+        if not 1 <= lease_seconds <= 3_600:
+            raise ValueError("Outbound queue lease must be between 1 and 3600 seconds")
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as db:
+            result = await db.execute(
+                update(OutboundCallQueueRow)
+                .where(
+                    OutboundCallQueueRow.session_id == session_id,
+                    OutboundCallQueueRow.status == "dispatching",
+                    OutboundCallQueueRow.lease_token == lease_token,
+                    OutboundCallQueueRow.lease_expires_at > now,
+                )
+                .values(
+                    lease_expires_at=now + timedelta(seconds=lease_seconds),
+                    updated_at=now,
+                )
+            )
+            return result.rowcount == 1
+
+    async def defer_outbound(
+        self,
+        session_id: str,
+        retry_at: datetime,
+        lease_token: str,
+    ) -> bool:
+        """Release a claimed slot for a known pre-dial deferral, preserving FIFO age."""
+        if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+            raise ValueError("Outbound queue retry time must be timezone-aware")
+        retry_at = retry_at.astimezone(UTC)
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as db:
+            queue_row = await db.scalar(
+                select(OutboundCallQueueRow)
+                .where(OutboundCallQueueRow.session_id == session_id)
+                .with_for_update()
+            )
+            call_row = await db.scalar(
+                select(CallSessionRow)
+                .where(CallSessionRow.session_id == session_id)
+                .with_for_update()
+            )
+            if (
+                queue_row is None
+                or call_row is None
+                or queue_row.status != "dispatching"
+                or call_row.status not in {"queued", "starting"}
+                or queue_row.lease_token != lease_token
+            ):
+                return False
+            if queue_row.expires_at <= now or retry_at >= queue_row.expires_at:
+                call_row.status = "expired"
+                call_row.end_reason = "outbound_queue_expired"
+                call_row.ended_at = now
+                call_row.updated_at = now
+                await db.delete(queue_row)
+                return True
+            if not call_row.encrypted_session:
+                call_row.status = "failed"
+                call_row.end_reason = "queued_session_unavailable"
+                call_row.updated_at = now
+                await db.delete(queue_row)
+                return False
+
+            deferred_session = self._decrypt_session(call_row.encrypted_session)
+            deferred_session.metadata["call_status"] = "queued"
+            deferred_session.metadata.pop("outbound_queue_lease_token", None)
+            call_row.encrypted_session = self._encrypt_session(deferred_session)
+            call_row.status = "queued"
+            call_row.end_reason = None
+            call_row.updated_at = now
+            queue_row.status = "queued"
+            queue_row.lease_token = None
+            queue_row.lease_expires_at = None
+            queue_row.available_at = retry_at
+            queue_row.updated_at = now
+            return True
+
+    async def remove_outbound(
+        self, session_id: str, lease_token: str
+    ) -> bool:
+        """Remove a dispatched queue row only after the session reached a safe terminal start state."""
+        async with self._sessions.begin() as db:
+            queue_row = await db.scalar(
+                select(OutboundCallQueueRow)
+                .where(OutboundCallQueueRow.session_id == session_id)
+                .with_for_update()
+            )
+            call_row = await db.scalar(
+                select(CallSessionRow)
+                .where(CallSessionRow.session_id == session_id)
+                .with_for_update()
+            )
+            if queue_row is None or call_row is None:
+                return False
+            if queue_row.status != "dispatching":
+                return False
+            if lease_token is None or queue_row.lease_token != lease_token:
+                return False
+            if call_row.status in {"queued", "starting"}:
+                return False
+            await db.delete(queue_row)
+            return True
+
+    async def cancel_outbound(self, tenant_id: str, session_id: str) -> bool:
+        """Cancel only a tenant-owned outbound call that has not been claimed."""
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as db:
+            call_row = await db.scalar(
+                select(CallSessionRow)
+                .where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+                .with_for_update()
+            )
+            if call_row is None or call_row.status != "queued":
+                return False
+            queue_row = await db.scalar(
+                select(OutboundCallQueueRow)
+                .where(
+                    OutboundCallQueueRow.tenant_id == tenant_id,
+                    OutboundCallQueueRow.session_id == session_id,
+                    OutboundCallQueueRow.status == "queued",
+                )
+                .with_for_update()
+            )
+            if queue_row is None:
+                return False
+            call_row.status = "cancelled"
+            call_row.end_reason = "cancelled_before_dispatch"
+            call_row.ended_at = now
+            call_row.updated_at = now
+            await db.delete(queue_row)
+            return True
+
+    async def get_outbound_queue_status(
+        self, tenant_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        """Return queue details for a tenant-owned call without decrypting its payload."""
+        async with self._sessions() as db:
+            call_row = await db.scalar(
+                select(CallSessionRow).where(
+                    CallSessionRow.tenant_id == tenant_id,
+                    CallSessionRow.session_id == session_id,
+                )
+            )
+            if call_row is None:
+                return None
+            queue_row = await db.get(OutboundCallQueueRow, session_id)
+            queue_status = (
+                queue_row.status
+                if queue_row is not None
+                else call_row.status
+                if call_row.status in {"expired", "cancelled"}
+                else None
+            )
+            return {
+                "queue_status": queue_status,
+                "queued_at": (
+                    call_row.queue_enqueued_at.isoformat()
+                    if call_row.queue_enqueued_at
+                    else None
+                ),
+                "queue_expires_at": (
+                    call_row.queue_expires_at.isoformat()
+                    if call_row.queue_expires_at
+                    else None
+                ),
+                "queue_attempts": call_row.queue_attempts,
+                "queue_lease_expires_at": (
+                    queue_row.lease_expires_at.isoformat()
+                    if queue_row and queue_row.lease_expires_at
+                    else None
+                ),
+            }
 
     async def register_inbound(self, session: AcceptedSession) -> tuple[AcceptedSession, bool, str]:
         """Persist an inbound session once, keyed by its deterministic session ID.
@@ -498,12 +878,33 @@ class SqlCallSessionStore:
                 if row.encrypted_session
                 else None
             )
+            queue_row = await db.get(OutboundCallQueueRow, session_id)
+            queue_status = (
+                queue_row.status
+                if queue_row is not None
+                else row.status
+                if row.status in {"expired", "cancelled"}
+                else None
+            )
             return {
                 "session_id": row.session_id,
                 "provider": (
                     stored_session.provider if stored_session else None
                 ),
                 "status": row.status,
+                "queue_status": queue_status,
+                "queued_at": (
+                    row.queue_enqueued_at.isoformat() if row.queue_enqueued_at else None
+                ),
+                "queue_expires_at": (
+                    row.queue_expires_at.isoformat() if row.queue_expires_at else None
+                ),
+                "queue_attempts": row.queue_attempts,
+                "queue_lease_expires_at": (
+                    queue_row.lease_expires_at.isoformat()
+                    if queue_row and queue_row.lease_expires_at
+                    else None
+                ),
                 "provider_call_id": row.provider_call_id,
                 "started_at": row.started_at.isoformat(),
                 "answered_at": row.answered_at.isoformat() if row.answered_at else None,
@@ -677,9 +1078,17 @@ class SqlCallSessionStore:
                     CallSessionRow.tenant_id == tenant_id,
                     CallSessionRow.ended_at.is_not(None),
                     CallSessionRow.ended_at < cutoff,
-                    CallSessionRow.status.in_(("completed", "failed")),
-                    CallSessionRow.post_call_enqueued_at.is_not(None),
-                    CallSessionRow.encrypted_transcript.is_not(None),
+                    or_(
+                        and_(
+                            CallSessionRow.status.in_(("completed", "failed")),
+                            CallSessionRow.post_call_enqueued_at.is_not(None),
+                            CallSessionRow.encrypted_transcript.is_not(None),
+                        ),
+                        and_(
+                            CallSessionRow.status.in_(("expired", "cancelled")),
+                            CallSessionRow.encrypted_session.is_not(None),
+                        ),
+                    ),
                 )
                 .order_by(CallSessionRow.ended_at)
                 .limit(batch_size)
