@@ -2,6 +2,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
+class VoiceCapacityFull(Exception):
+    """A valid call could not reserve a slot because all concurrent slots are busy."""
+
+
 class BillingMode(StrEnum):
     """Billing arrangement selected when a tenant account is created."""
 

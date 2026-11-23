@@ -459,13 +459,27 @@ async def start_outbound_call(
         call_start_event("failed")
         raise
     call_start_event("accepted")
-    return {
+    result = {
         "session_id": session.session_id,
         "provider": session.provider,
         "channel": session.channel,
         "direction": session.direction,
         "status": session.metadata.get("call_status", "starting"),
     }
+    if result["status"] == "queued":
+        queue_status = getattr(request.app.state, "call_session_store", None)
+        if queue_status is not None and hasattr(queue_status, "get_outbound_queue_status"):
+            queue_details = await queue_status.get_outbound_queue_status(
+                principal.tenant_id, session.session_id
+            )
+            if queue_details:
+                result.update(
+                    {
+                        key: queue_details[key]
+                        for key in ("queued_at", "queue_expires_at", "queue_attempts")
+                    }
+                )
+    return result
 
 
 @router.get("/v1/calls/{session_id}", tags=["calls"])
@@ -490,6 +504,36 @@ async def get_call_status(
         post_call = await dispatcher.get_status(principal.tenant_id, session_id)
     result.update(_post_call_pipeline_fields(result, post_call))
     return result
+
+
+@router.post("/v1/calls/{session_id}/cancel", tags=["calls"])
+async def cancel_queued_call(
+    session_id: str,
+    request: Request,
+    principal: Annotated[Principal, Security(require_scope("calls:write"))],
+):
+    """Cancel an outbound call only while it is still waiting in the queue."""
+    store = getattr(request.app.state, "call_session_store", None)
+    if store is None or not hasattr(store, "cancel_outbound"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Outbound call queue is not configured",
+        )
+    current = await store.get_status(principal.tenant_id, session_id)
+    if current is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
+    await _enforce_number_binding(store, principal, session_id)
+    if current.get("status") != "queued":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only queued calls can be cancelled",
+        )
+    if not await store.cancel_outbound(principal.tenant_id, session_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Call has already started dispatching and cannot be cancelled",
+        )
+    return {"session_id": session_id, "status": "cancelled"}
 
 
 @router.get("/v1/calls/{session_id}/transcript", tags=["calls"])

@@ -22,7 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from chiefvoice.billing.models import BillingMode, VoiceEntitlement
+from chiefvoice.billing.models import BillingMode, VoiceCapacityFull, VoiceEntitlement
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
 
 logger = logging.getLogger(__name__)
@@ -340,8 +340,6 @@ class SqlBillingDirectory:
                     VoiceReservationRow.status == "reserved",
                 )
             )
-            if int(active_count or 0) >= plan.max_concurrent_sessions:
-                return None
             active_reserved = await session.scalar(
                 select(func.coalesce(func.sum(VoiceReservationRow.reserved_minor), 0)).where(
                     VoiceReservationRow.tenant_id == tenant_id,
@@ -351,12 +349,18 @@ class SqlBillingDirectory:
             reserve_minor = _cost_minor(plan.rate_per_minute_minor, plan.max_call_seconds)
             if mode is BillingMode.PREPAID:
                 available = plan.prepaid_balance_minor - int(active_reserved or 0)
+                total_available = plan.prepaid_balance_minor
             else:
                 available = (
                     plan.postpaid_credit_limit_minor
                     - plan.postpaid_used_minor
                     - int(active_reserved or 0)
                 )
+                total_available = plan.postpaid_credit_limit_minor - plan.postpaid_used_minor
+            if int(active_count or 0) >= plan.max_concurrent_sessions:
+                if total_available < reserve_minor:
+                    return None
+                raise VoiceCapacityFull(tenant_id)
             if available < reserve_minor:
                 return None
             session.add(

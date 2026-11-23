@@ -98,6 +98,7 @@ async def lifespan(_app: FastAPI):
     post_call_replay_service = getattr(_app.state, "post_call_replay_service", None)
     post_call_recovery_spool = getattr(_app.state, "post_call_recovery_spool", None)
     call_session_store = getattr(_app.state, "call_session_store", None)
+    call_coordinator = getattr(_app.state, "call_coordinator", None)
     vobiz_callback_nonce_store = getattr(_app.state, "vobiz_callback_nonce_store", None)
     billing_directory = getattr(_app.state, "billing_directory", None)
     recording_store = getattr(_app.state, "recording_store", None)
@@ -165,6 +166,10 @@ async def lifespan(_app: FastAPI):
         for check_storage in storage_checks:
             await check_storage()
         _app.state.object_storage_ready = True
+        if call_coordinator is not None and call_session_store is not None:
+            worker_tasks.append(
+                asyncio.create_task(call_coordinator.run_outbound_queue_worker())
+            )
         if isinstance(post_call_dispatcher, SqlPostCallQueue):
             if post_call_async_invoker is not None:
                 worker_tasks.append(asyncio.create_task(post_call_dispatcher.run_async_dispatcher(
