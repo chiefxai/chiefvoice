@@ -640,7 +640,14 @@ def reliable_vertex_service_class(
                 if not reconnect_will_generate_response:
                     await asyncio.wait_for(
                         self._session.send_realtime_input(
-                            text="Please respond briefly to the caller's most recent statement."
+                            text=(
+                                "Continue from the current conversation state. Do not repeat any "
+                                "question or instruction the caller has already heard. Use the "
+                                "caller's latest answer and the information already collected; "
+                                "ask only for the next missing required item. If the caller's "
+                                "latest answer already addressed the pending question, "
+                                "acknowledge it briefly and continue."
+                            )
                         ),
                         timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
                     )

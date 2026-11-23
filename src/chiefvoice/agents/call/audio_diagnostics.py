@@ -9,6 +9,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from weakref import WeakValueDictionary
 
 from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.frames.frames import InputAudioRawFrame, InterruptionFrame, OutputAudioRawFrame
@@ -22,6 +23,15 @@ from pipecat.serializers.base_serializer import FrameSerializer
 from chiefvoice.sessions import AcceptedSession
 
 logger = logging.getLogger(__name__)
+
+# Outbound calls create their Gemini processors during preflight, before Vobiz
+# reloads the AcceptedSession for the media websocket. Both session objects
+# must write into one diagnostics object so the final summary includes service
+# counters (audio buffering, reconnects, and watchdog recovery) as well as the
+# transport and pipeline counters.
+_DIAGNOSTICS_BY_SESSION: WeakValueDictionary[str, "CallAudioDiagnostics"] = (
+    WeakValueDictionary()
+)
 
 
 @dataclass
@@ -327,7 +337,13 @@ class ObservedVobizSerializer(FrameSerializer):
 
 def diagnostics_for_session(session: AcceptedSession) -> CallAudioDiagnostics:
     diagnostics = session.metadata.get("call_audio_diagnostics")
-    if not isinstance(diagnostics, CallAudioDiagnostics):
+    if isinstance(diagnostics, CallAudioDiagnostics):
+        _DIAGNOSTICS_BY_SESSION[session.session_id] = diagnostics
+        return diagnostics
+
+    diagnostics = _DIAGNOSTICS_BY_SESSION.get(session.session_id)
+    if diagnostics is None:
         diagnostics = CallAudioDiagnostics(session)
-        session.metadata["call_audio_diagnostics"] = diagnostics
+        _DIAGNOSTICS_BY_SESSION[session.session_id] = diagnostics
+    session.metadata["call_audio_diagnostics"] = diagnostics
     return diagnostics

@@ -69,7 +69,7 @@ class Settings:
         os.getenv("VOBIZ_PLAYBACK_ACK_TIMEOUT_SECONDS", "5")
     )
     gemini_response_watchdog_seconds: float = float(
-        os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "8")
+        os.getenv("GEMINI_RESPONSE_WATCHDOG_SECONDS", "5")
     )
     gemini_generation_watchdog_seconds: float = float(
         os.getenv("GEMINI_GENERATION_WATCHDOG_SECONDS", "8")
