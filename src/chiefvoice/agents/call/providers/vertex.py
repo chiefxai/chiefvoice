@@ -590,6 +590,19 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 ),
             ])
             tools = ToolsSchema(standard_tools=standard_tools)
+
+        async def request_hangup_from_fallback() -> bool:
+            """Resolve the provider callback when fallback actually runs.
+
+            Vobiz attaches its callback after the realtime service is prepared,
+            so capturing metadata here can retain a stale ``None`` value.
+            """
+            callback = session.metadata.get("hang_up_call")
+            if not callable(callback):
+                return False
+            await callback()
+            return True
+
         if service_type == "google_ai":
             reliable_service = reliable_vertex_service_class(
                 GeminiLiveLLMService,
@@ -604,7 +617,7 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 settings=params,
                 tools=tools,
             )
-            service._chiefvoice_hangup_callback = session.metadata.get("hang_up_call")
+            service._chiefvoice_hangup_callback = request_hangup_from_fallback
             return (service,)
 
         reliable_service = reliable_vertex_service_class(
@@ -623,5 +636,5 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             settings=params,
             tools=tools,
         )
-        service._chiefvoice_hangup_callback = session.metadata.get("hang_up_call")
+        service._chiefvoice_hangup_callback = request_hangup_from_fallback
         return (service,)

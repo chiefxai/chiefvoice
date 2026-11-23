@@ -24,6 +24,7 @@ import DescriptionRoundedIcon from '@mui/icons-material/DescriptionRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded'
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded'
+import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import LoginPage from './LoginPage'
 import { clearLoginCallbackFromUrl, currentUser, finishLogin, login, logout } from './auth'
@@ -662,16 +663,19 @@ export default function App({ mode, onToggleTheme }: { mode: 'light' | 'dark'; o
     }
   }
   const disconnect = async () => {
-    await logout()
-    sessionStorage.removeItem('chiefvoice.token')
+    setProfileAnchor(null)
+    await logout().catch(() => undefined)
+    sessionStorage.clear()
     setToken('')
     setAuthError('')
     void queryClient.clear()
+    setPromptTemplatesOpen(false)
+    setApiConfigurationOpen(false)
+    navigate(pagePaths.Numbers, { replace: true })
   }
-  const profileTrigger = <div className="sidebar-profile"><Tooltip title="Profile menu" placement="right"><IconButton onClick={event => setProfileAnchor(event.currentTarget)} aria-label="Open profile menu"><Avatar sx={{ width: 34, height: 34, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar></IconButton></Tooltip><Typography variant="caption" sx={{ color: '#dce5f3', fontWeight: 700 }}>Platform admin</Typography></div>
+  const profileTrigger = <div className="sidebar-profile"><Tooltip title="Profile menu" placement="right"><IconButton onClick={event => setProfileAnchor(event.currentTarget)} aria-label="Open profile menu"><Avatar sx={{ width: 34, height: 34, bgcolor: '#e7eaff', color: '#465bd2', fontSize: 12, fontWeight: 800 }}>CV</Avatar></IconButton></Tooltip><Typography variant="caption" sx={{ color: '#dce5f3', fontWeight: 700 }}>Platform admin</Typography><Tooltip title="Sign out" placement="right"><IconButton aria-label="Sign out" onClick={() => { void disconnect() }} sx={{ color: '#aab5c7', '&:hover': { color: '#fff', backgroundColor: 'rgba(255,255,255,.08)' } }}><LogoutRoundedIcon fontSize="small" /></IconButton></Tooltip></div>
   const profileMenu = <Menu anchorEl={profileAnchor} open={Boolean(profileAnchor)} onClose={() => setProfileAnchor(null)} anchorOrigin={{ vertical: 'top', horizontal: 'right' }} transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}>
     <MenuItem onClick={() => { onToggleTheme(); setProfileAnchor(null) }}>{mode === 'light' ? <DarkModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} /> : <LightModeRoundedIcon fontSize="small" sx={{ mr: 1.5 }} />}Switch to {mode === 'light' ? 'dark' : 'light'} theme</MenuItem>
-    <MenuItem onClick={() => { setProfileAnchor(null); void disconnect() }}>Sign out</MenuItem>
   </Menu>
   const navigation = <><div className="brand"><div className="brand-mark"><HubRoundedIcon fontSize="small" /></div>{!sidebarCollapsed && <div className="brand-word">chief<span>voice</span></div>}<Tooltip title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} placement="right"><IconButton className="platform-collapse-button" size="small" aria-label={sidebarCollapsed ? 'Expand platform sidebar' : 'Collapse platform sidebar'} onClick={() => setSidebarCollapsed(value => !value)}>{sidebarCollapsed ? <ChevronRightRoundedIcon fontSize="small" /> : <ChevronLeftRoundedIcon fontSize="small" />}</IconButton></Tooltip></div><div className="nav-caption">{!sidebarCollapsed && 'Platform'}</div><div className="nav-list">{(['Numbers', 'Agents', 'API', 'Simulation', 'Docs'] as const).map(item => { const icon = item === 'Numbers' ? <HubRoundedIcon /> : item === 'Agents' ? <AutoAwesomeRoundedIcon /> : item === 'API' ? <KeyRoundedIcon /> : item === 'Simulation' ? <ScienceRoundedIcon /> : <ContentCopyRoundedIcon />; return <Tooltip key={item} title={sidebarCollapsed ? item : ''} placement="right"><Button aria-label={item} className={`nav-item ${page === item ? 'active' : ''}`} onClick={() => { navigate(pagePaths[item]); setDrawerOpen(false) }} startIcon={icon}>{!sidebarCollapsed && item}</Button></Tooltip>})}</div>{profileTrigger}</>
 

@@ -133,6 +133,7 @@ def reliable_vertex_service_class(
             self._chiefvoice_last_ready = False
             self._chiefvoice_fallback_active = False
             self._chiefvoice_recovery_reconnect_task: asyncio.Task | None = None
+            self._chiefvoice_recovery_superseded = False
             self._chiefvoice_recent_input_transcript = ""
             self._chiefvoice_recent_input_transcript_at = 0.0
             self._chiefvoice_recent_output_transcript = ""
@@ -217,6 +218,17 @@ def reliable_vertex_service_class(
         def _clear_recovery_reconnect_task(self, task: asyncio.Task) -> None:
             if self._chiefvoice_recovery_reconnect_task is task:
                 self._chiefvoice_recovery_reconnect_task = None
+                self._chiefvoice_recovery_superseded = False
+
+        def supersede_recovery_for_caller_speech(self) -> None:
+            """Prevent a late watchdog reconnect from replaying stale context."""
+            task = self._chiefvoice_recovery_reconnect_task
+            if task is not None and not task.done():
+                self._chiefvoice_recovery_superseded = True
+                logger.info(
+                    "gemini_recovery_superseded_by_caller_speech",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
 
         async def _disconnect(self) -> None:
             was_ready = bool(self._ready_for_realtime_input)
@@ -369,6 +381,25 @@ def reliable_vertex_service_class(
             if self._ready_for_realtime_input:
                 await self._chiefvoice_flush_audio()
 
+        async def _create_initial_response(self, for_reconnect: bool = False) -> None:
+            if for_reconnect and self._chiefvoice_recovery_superseded:
+                # Pipecat's Gemini 2.5 reconnect path automatically triggers an
+                # inference after seeding retained context. Caller speech that
+                # arrived during the reconnect supersedes that stale inference;
+                # seed without turn completion so the next caller turn drives it.
+                inference_on_context_initialization = self._inference_on_context_initialization
+                self._inference_on_context_initialization = False
+                try:
+                    await super()._create_initial_response(for_reconnect=False)
+                finally:
+                    self._inference_on_context_initialization = inference_on_context_initialization
+                logger.info(
+                    "gemini_reconnect_stale_inference_suppressed",
+                    extra={"session_id": session_id, "provider": "vertex"},
+                )
+                return
+            await super()._create_initial_response(for_reconnect=for_reconnect)
+
         async def push_error(self, error_msg: str, exception: Exception | None = None, *args: Any, **kwargs: Any):
             if not self._chiefvoice_connection_open_event.is_set():
                 self._chiefvoice_connection_error_type = (
@@ -511,6 +542,7 @@ def reliable_vertex_service_class(
             if self._disconnecting or self._chiefvoice_fallback_active:
                 return False
             try:
+                self._chiefvoice_recovery_superseded = False
                 had_resumption_handle = bool(self._session_resumption_handle)
                 reconnect_will_generate_response = bool(
                     self._context
@@ -550,7 +582,14 @@ def reliable_vertex_service_class(
                 # modes need an explicit prompt to continue the pending turn.
                 if not reconnect_will_generate_response:
                     await self._session.send_realtime_input(
-                        text="Please respond briefly to the caller's most recent statement."
+                        text=(
+                            "Continue from the current conversation state. Do not repeat any "
+                            "question or instruction the caller has already heard. Use the "
+                            "caller's latest answer and the information already collected; "
+                            "ask only for the next missing required item. If the caller's "
+                            "latest answer already addressed the pending question, "
+                            "acknowledge it briefly and continue."
+                        )
                     )
                 logger.warning(
                     "gemini_unanswered_turn_recovery_requested",
@@ -664,9 +703,10 @@ def reliable_vertex_service_class(
                     },
                 )
                 callback = self._chiefvoice_hangup_callback
+                hangup_requested = False
                 if callable(callback):
-                    await callback()
-                else:
+                    hangup_requested = await callback() is not False
+                if not hangup_requested:
                     logger.error(
                         "gemini_fallback_hangup_unavailable",
                         extra={"session_id": session_id, "provider": "vertex"},
