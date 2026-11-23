@@ -47,14 +47,19 @@ class _FakeChatModel:
         return _FakeStructuredInvoker(self)
 
 
-def _call(*, transcript="Caller: I have completed the duty.", recording=b"wav"):
+def _call(
+    *,
+    transcript="Caller: I have completed the duty.",
+    recording=b"wav",
+    language="en-IN",
+):
     return CompletedCall(
         session_id="session-1",
         tenant_id="tenant-1",
         provider="vobiz",
         channel="phone",
         direction="outbound",
-        live_agent_language="en-IN",
+        live_agent_language=language,
         transcript=transcript,
         recording_audio=recording,
         output_schema=_OUTPUT_SCHEMA,
@@ -171,6 +176,29 @@ async def test_audio_review_request_triggers_fallback_even_when_status_is_clear(
 
     assert stt_calls == [True]
     assert len(model.messages) == 2
+
+
+@pytest.mark.parametrize("language", ["ta-IN", "te-IN", "ml-IN", "en-IN", "kn-IN"])
+@pytest.mark.asyncio
+async def test_supported_languages_automatically_get_audio_review(monkeypatch, language):
+    model = _FakeChatModel(
+        _custom_result(transcript_status="clear"),
+        _custom_result(transcript_status="clear"),
+    )
+    agent = LangChainPostCallAgent(model)
+    stt_calls = []
+
+    async def transcribe(call):
+        stt_calls.append(call.live_agent_language)
+        return "Independent recording transcript."
+
+    monkeypatch.setattr(agent, "_transcribe_recording", transcribe)
+
+    result = await agent.process(_call(language=language))
+
+    assert stt_calls == [language]
+    assert len(model.messages) == 2
+    assert result.stt_status == "completed"
 
 
 @pytest.mark.asyncio

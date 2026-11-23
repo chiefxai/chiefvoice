@@ -13,6 +13,7 @@ from chiefvoice.agents.post_call.tools import build_post_call_tools
 from chiefvoice.core.config import settings
 
 logger = logging.getLogger(__name__)
+_AUTOMATIC_AUDIO_REVIEW_LANGUAGES = frozenset({"en", "kn", "ml", "ta", "te"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,11 +299,26 @@ class LangChainPostCallAgent(PostCallAgent):
                 "audio_review_attempted": call.audio_review_attempted,
             },
         )
-        is_tamil_call = (call.live_agent_language or "").split("-", 1)[0].lower() == "ta"
+        language_code = (
+            (call.live_agent_language or "")
+            .replace("_", "-")
+            .split("-", 1)[0]
+            .lower()
+        )
+        requires_automatic_audio_review = (
+            language_code in _AUTOMATIC_AUDIO_REVIEW_LANGUAGES
+        )
+        review_reason_prefix = (
+            "tamil_review"
+            if language_code == "ta"
+            else "automatic_language_review"
+        )
         transcript_is_unclear = parsed.transcript_status == "unclear"
         transcript_needs_review = parsed.transcript_status in {"unclear", "no_data"}
         if call.audio_review_attempted or not (
-            transcript_needs_review or parsed.needs_audio_review or is_tamil_call
+            transcript_needs_review
+            or parsed.needs_audio_review
+            or requires_automatic_audio_review
         ):
             if initial_stt_status == "completed":
                 return _PipelinePostCallResult(
@@ -350,7 +366,7 @@ class LangChainPostCallAgent(PostCallAgent):
                     "reason": "recording_unavailable",
                     "transcript_status": parsed.transcript_status,
                     "needs_audio_review": parsed.needs_audio_review,
-                    "automatic_tamil_review": is_tamil_call,
+                    "automatic_language_review": requires_automatic_audio_review,
                 },
             )
             return _PipelinePostCallResult(
@@ -363,8 +379,8 @@ class LangChainPostCallAgent(PostCallAgent):
                 needs_audio_review=analysis.needs_audio_review,
                 stt_status="unavailable",
                 decision_reason=(
-                    "tamil_review_recording_unavailable"
-                    if is_tamil_call
+                    f"{review_reason_prefix}_recording_unavailable"
+                    if requires_automatic_audio_review
                     else "no_data_transcript_recording_unavailable"
                     if parsed.transcript_status == "no_data"
                     else "unclear_transcript_recording_unavailable"
@@ -377,7 +393,7 @@ class LangChainPostCallAgent(PostCallAgent):
                     "session_id": call.session_id,
                     "tenant_id": call.tenant_id,
                     "language": call.live_agent_language or "auto",
-                    "automatic_tamil_review": is_tamil_call,
+                    "automatic_language_review": requires_automatic_audio_review,
                     "transcription_provider": (
                         f"google_cloud_speech_{settings.post_call_transcription_model}"
                     ),
@@ -414,7 +430,7 @@ class LangChainPostCallAgent(PostCallAgent):
                     "tenant_id": call.tenant_id,
                     "transcript_characters": len(audio_transcript),
                     "language": call.live_agent_language or "auto",
-                    "automatic_tamil_review": is_tamil_call,
+                    "automatic_language_review": requires_automatic_audio_review,
                     "transcription_provider": (
                         f"google_cloud_speech_{settings.post_call_transcription_model}"
                     ),
@@ -433,8 +449,8 @@ class LangChainPostCallAgent(PostCallAgent):
                 reviewed,
                 stt_status="completed",
                 decision_reason=(
-                    "tamil_review_transcribed"
-                    if is_tamil_call
+                    f"{review_reason_prefix}_transcribed"
+                    if requires_automatic_audio_review
                     else "unclear_transcript_transcribed"
                     if transcript_is_unclear
                     else "no_data_transcript_transcribed"
@@ -461,8 +477,8 @@ class LangChainPostCallAgent(PostCallAgent):
                 needs_audio_review=analysis.needs_audio_review,
                 stt_status="failed",
                 decision_reason=(
-                    "tamil_review_transcription_failed"
-                    if is_tamil_call
+                    f"{review_reason_prefix}_transcription_failed"
+                    if requires_automatic_audio_review
                     else "no_data_transcript_transcription_failed"
                     if parsed.transcript_status == "no_data"
                     else "unclear_transcript_transcription_failed"
