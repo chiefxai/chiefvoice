@@ -374,7 +374,9 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                 "the summary, call the end_call tool immediately with reason completed and all "
                 "collected data. Do not wait for an inactivity timeout. The hang_up_call tool "
                 "is an equivalent compatibility alias. The platform will request hangup after "
-                "the final audio has drained. If an end_call request is rejected for missing fields, "
+                "the final audio has drained. After a successful end_call or hang_up_call, do not "
+                "speak again or invoke either hangup tool; the platform is finishing the current "
+                "audio. If an end_call request is rejected for missing fields, "
                 "follow the tool response: do not repeat the closing, thank-you, or goodbye; ask only "
                 "for the missing information, then retry once with all values in collected_data. "
                 "If the caller already supplied a missing value, include it without asking again. "
@@ -475,6 +477,20 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                         "caller_spoke_during_recovery": caller_spoke_during_recovery,
                     },
                 )
+                if session.metadata.get("agent_hangup_pending"):
+                    logger.info(
+                        "call_agent_hangup_already_pending",
+                        extra={"session_id": session.session_id, "provider": session.provider},
+                    )
+                    await params.result_callback({
+                        "success": True,
+                        "status": "hangup_pending",
+                        "message": (
+                            "The call is already ending. Do not speak again or call the hangup "
+                            "tool again; the platform is finishing the current audio."
+                        ),
+                    })
+                    return
                 if (
                     recovery_active
                     and (
