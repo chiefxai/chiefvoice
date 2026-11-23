@@ -776,9 +776,10 @@ def reliable_vertex_service_class(
                     },
                 )
                 callback = self._chiefvoice_hangup_callback
+                hangup_requested = False
                 if callable(callback):
-                    await callback()
-                else:
+                    hangup_requested = await callback() is not False
+                if not hangup_requested:
                     logger.error(
                         "gemini_fallback_hangup_unavailable",
                         extra={"session_id": session_id, "provider": "vertex"},
