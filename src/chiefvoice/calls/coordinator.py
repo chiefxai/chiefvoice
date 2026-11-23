@@ -160,15 +160,6 @@ class CallCoordinator:
             )
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
-            if (
-                command.live_agent_language
-                and command.live_agent_language.split("-", 1)[0].lower()
-                != profile.language.split("-", 1)[0].lower()
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail="Calling template language must match the selected voice profile language",
-                )
         session = AcceptedSession(
             channel=command.channel,
             provider=command.provider,

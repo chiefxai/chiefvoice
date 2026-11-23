@@ -214,11 +214,6 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
             profile = await self.profile_directory.get(session.tenant_id, session.bot_config_id)
             if profile is None:
                 raise HTTPException(status_code=404, detail="Voice agent profile not found")
-            if language_tag and language_tag.split("-", 1)[0].lower() != profile.language.split("-", 1)[0].lower():
-                raise HTTPException(
-                    status_code=422,
-                    detail="Calling template language must match the selected voice profile language",
-                )
             language_tag = language_tag or profile.language
             session.metadata["voice_language"] = language_tag
             try:
@@ -229,10 +224,12 @@ class VertexGeminiLiveProvider(RealtimeAgentProvider):
                     detail="The selected realtime provider does not support this language tag",
                 ) from exc
             voice = profile.voice
-            system_instruction = profile.system_instruction(self.system_instruction)
+            system_instruction = profile.system_instruction(
+                self.system_instruction, language=language_tag
+            )
             # Vertex's published Live API language set includes Tamil and Telugu
             # but not Malayalam. Route Malayalam through the Gemini Live API.
-            if language_tag.lower() in {"ml", "ml-in"}:
+            if language_tag.split("-", 1)[0].lower() == "ml":
                 if not self.google_ai_api_key:
                     raise HTTPException(
                         status_code=503,

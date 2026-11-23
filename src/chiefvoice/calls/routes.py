@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pipecat.transcriptions.language import Language
 
 from chiefvoice.agents.post_call.output_schema import OutputSchema, validate_output_schema
 from chiefvoice.agents.templates import BuiltinTool
@@ -20,6 +22,7 @@ from chiefvoice.identity.auth import Principal, require_scope
 from chiefvoice.observability.setup import call_start_event
 
 router = APIRouter()
+_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
 def resolve_assigned_sender(
@@ -73,7 +76,7 @@ def _render_live(template: AgentTemplate | None, body: LiveAgentBody | None):
         body.context,
         tools,
         "end_call" in tools or bool(settings_values.get("auto_hangup_when_complete")),
-        settings_values.get("language"),
+        body.language or settings_values.get("language"),
         settings_values.get("completion_requirements"),
     )
 
@@ -167,9 +170,24 @@ class LiveAgentBody(BaseModel):
 
     agent_id: str | None = Field(default=None, max_length=128)
     template_id: str | None = Field(default=None, max_length=36)
+    language: str | None = Field(default=None, min_length=2, max_length=35)
     context: dict[str, Any] = Field(default_factory=dict)
     tools: list[BuiltinTool] | None = Field(default=None, max_length=10)
     add_tools: list[BuiltinTool] = Field(default_factory=list, max_length=10)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not _LANGUAGE_TAG.fullmatch(value):
+            raise ValueError("language must be a BCP 47 tag such as en-US or ta-IN")
+        try:
+            Language(value)
+        except ValueError as exc:
+            raise ValueError("language is not supported by the realtime provider") from exc
+        return value
 
     @model_validator(mode="after")
     def validate_live_tools(self):

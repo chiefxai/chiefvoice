@@ -24,6 +24,7 @@ The API key and selected sender resource determine the provider, so clients do n
   "recording_allowed": true,
   "live_agent": {
     "template_id": "temp-live-xyz",
+    "language": "ta-IN",
     "context": {
       "patient_name": "Avery"
     },
