@@ -2,7 +2,7 @@ import logging
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
