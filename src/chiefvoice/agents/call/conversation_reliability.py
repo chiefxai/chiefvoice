@@ -182,6 +182,11 @@ class GeminiConversationWatchdog(FrameProcessor):
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, UserStartedSpeakingFrame):
             if is_call_terminating:
                 return
+            supersede_recovery = getattr(
+                self._service, "supersede_recovery_for_caller_speech", None
+            )
+            if callable(supersede_recovery):
+                supersede_recovery()
             # A start frame is reliable evidence that the caller interacted even
             # when the realtime pipeline never emits UserStoppedSpeakingFrame.
             # Hangup validation must not depend solely on the latter to avoid
@@ -211,6 +216,11 @@ class GeminiConversationWatchdog(FrameProcessor):
             # activity signal so silence prompts cannot be sent over caller
             # speech, and retain a response watchdog for the missed local turn.
             if not is_call_terminating and frame.text.strip():
+                supersede_recovery = getattr(
+                    self._service, "supersede_recovery_for_caller_speech", None
+                )
+                if callable(supersede_recovery):
+                    supersede_recovery()
                 self._metadata["caller_interaction_seen"] = True
                 self._cancel_pending_agent_hangup_on_caller_activity()
                 self._inactivity_stage = 0
