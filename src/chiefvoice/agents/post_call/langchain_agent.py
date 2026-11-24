@@ -1,5 +1,6 @@
 import json
 import logging
+import traceback
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -23,6 +24,18 @@ from chiefvoice.core.config import settings
 
 logger = logging.getLogger(__name__)
 _AUTOMATIC_AUDIO_REVIEW_LANGUAGES = frozenset({"en", "kn", "ml", "ta", "te"})
+
+
+def _safe_exception_location(exc: Exception) -> dict[str, str | int | None]:
+    """Return source location metadata without logging exception contents."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else ()
+    origin = frames[-1] if frames else None
+    return {
+        "error_module": type(exc).__module__,
+        "error_origin_file": origin.filename.rsplit("/", 1)[-1] if origin else None,
+        "error_origin_function": origin.name if origin else None,
+        "error_origin_line": origin.lineno if origin else None,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +142,7 @@ class LangChainPostCallAgent(PostCallAgent):
                         "tenant_id": call.tenant_id,
                         "reason": "missing_live_transcript",
                         "error_type": type(exc).__name__,
+                        **_safe_exception_location(exc),
                     },
                 )
                 raise PostCallTranscriptionError(
@@ -444,6 +458,7 @@ class LangChainPostCallAgent(PostCallAgent):
                     "session_id": call.session_id,
                     "tenant_id": call.tenant_id,
                     "error_type": type(exc).__name__,
+                    **_safe_exception_location(exc),
                 },
             )
             raise PostCallTranscriptionError(
@@ -455,7 +470,7 @@ class LangChainPostCallAgent(PostCallAgent):
                     if analysis.transcript_status == "no_data"
                     else "unclear_transcript_transcription_failed"
                 ),
-            )
+            ) from exc
         if not audio_transcript or not audio_transcript.strip():
             logger.warning(
                 "post_call_recording_transcription_empty",
