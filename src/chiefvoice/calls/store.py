@@ -632,7 +632,12 @@ class SqlCallSessionStore:
             )
             if row is None or row.encrypted_session is None:
                 return None
-            return self._decrypt_session(row.encrypted_session)
+            session = self._decrypt_session(row.encrypted_session)
+            # The answer timestamp is stored alongside the encrypted session so
+            # provider hangup callbacks can distinguish unanswered outbound calls
+            # even when their signed state was created before the answer event.
+            session.metadata["call_answered"] = row.answered_at is not None
+            return session
 
     async def get_post_call_workflow_config(
         self, tenant_id: str, session_id: str, template_directory: Any | None = None

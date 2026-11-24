@@ -679,12 +679,19 @@ class CallCoordinator:
 
     async def mark_answered(self, session: AcceptedSession) -> datetime:
         if session.tenant_id is None:
+            session.metadata["call_answered"] = True
+            session.metadata["call_status"] = "answered"
             return session.started_at
         canonical_answered_at = await self.subscriptions.mark_answered(
             session.tenant_id, session.session_id, session.started_at
         )
         if canonical_answered_at is not None:
             session.started_at = canonical_answered_at
+        # Persist the answer marker with the encrypted session before returning
+        # answer XML. The later hangup callback reloads this envelope and needs
+        # to distinguish a no-answer from a call that reached the media path.
+        session.metadata["call_answered"] = True
+        session.metadata["call_status"] = "answered"
         self.attach_session_persistence(session)
         if self.call_session_store is not None:
             await self.call_session_store.update_state(
@@ -754,6 +761,11 @@ class CallCoordinator:
         if session.metadata.get("coordinator_session_ended"):
             return
         session.metadata["coordinator_session_ended"] = True
+        not_answered = reason == "provider_hangup_before_answer"
+        terminal_status = "failed" if reason in {
+            "provider_hangup_before_answer",
+            "provider_error",
+        } else "completed"
         ended_at = datetime.now(UTC)
         elapsed_seconds = max(
             0.0, (ended_at - _aware_utc(session.started_at)).total_seconds()
@@ -761,12 +773,17 @@ class CallCoordinator:
         emit_limit_event = False
         try:
             if session.tenant_id:
-                emit_limit_event = await self.subscriptions.settle_voice(
-                    session.tenant_id,
-                    session.session_id,
-                    _billable_seconds(session.started_at, ended_at),
-                    ended_at=ended_at,
-                )
+                if not_answered:
+                    # A call that never reached the answer callback has no
+                    # billable talk time; release its reservation outright.
+                    await self.subscriptions.release_voice(session.tenant_id, session.session_id)
+                else:
+                    emit_limit_event = await self.subscriptions.settle_voice(
+                        session.tenant_id,
+                        session.session_id,
+                        _billable_seconds(session.started_at, ended_at),
+                        ended_at=ended_at,
+                    )
                 if reason == "timeout":
                     emit_limit_event = (
                         await self.subscriptions.mark_duration_limit_event(
@@ -790,6 +807,10 @@ class CallCoordinator:
                     "call_transcript_checkpoint_incomplete",
                     extra={"session_id": session.session_id, "tenant_id": session.tenant_id},
                 )
+            session.metadata["call_status"] = terminal_status
+            session.metadata["call_end_reason"] = reason
+            if not_answered:
+                session.metadata["post_call_status"] = "skipped_no_data"
             finalize_recording = session.metadata.get("finalize_recording")
             if (
                 session.metadata.get("recording_pipeline_finished") is True
@@ -814,7 +835,7 @@ class CallCoordinator:
                 try:
                     await self.call_session_store.update_state(
                         session,
-                        status="completed",
+                        status=terminal_status,
                         provider_call_id=session.provider_call_id,
                         ended_at=ended_at,
                         end_reason=reason,
@@ -824,13 +845,33 @@ class CallCoordinator:
                         "call_lifecycle_persist_failed",
                         extra={"session_id": session.session_id, "error_type": type(exc).__name__},
                     )
-            session.metadata["call_status"] = "completed"
-            session.metadata["call_end_reason"] = reason
-            if reason == "provider_error":
+            if not_answered:
+                session.metadata["post_call_enqueued"] = True
+                if self.call_session_store is not None and session.tenant_id:
+                    try:
+                        await self.call_session_store.mark_post_call_enqueued(
+                            session.tenant_id, session.session_id
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "call_post_call_state_persist_failed",
+                            extra={
+                                "session_id": session.session_id,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                await self._enqueue_failure_webhook(
+                    session,
+                    stage="call",
+                    code="provider_hangup_before_answer",
+                    ended_at=ended_at,
+                )
+            elif reason == "provider_error":
                 await self._enqueue_failure_webhook(
                     session, stage="call", code="provider_media_pipeline_failed", ended_at=ended_at
                 )
-            await self._enqueue_post_call(session, ended_at)
+            if not not_answered:
+                await self._enqueue_post_call(session, ended_at)
 
     async def _enqueue_post_call(self, session: AcceptedSession, ended_at: datetime) -> None:
         if not session.tenant_id:
