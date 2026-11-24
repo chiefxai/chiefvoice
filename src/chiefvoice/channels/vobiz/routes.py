@@ -1,3 +1,4 @@
+import logging
 from xml.etree.ElementTree import Element, tostring
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -5,8 +6,10 @@ from fastapi.responses import Response
 
 from chiefvoice.calls.coordinator import CallCoordinator
 from chiefvoice.channels.vobiz.adapter import VobizAdapter
+from chiefvoice.sessions import Direction
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _adapter(request: Request) -> VobizAdapter:
@@ -63,7 +66,25 @@ async def hangup_callback(request: Request):
     if prepared_sessions is not None:
         await prepared_sessions.discard(session.session_id, "provider_hangup_before_media")
     if not media_session_closed:
-        await coordinator.end_session(session, "completed")
+        if (
+            session.direction is Direction.OUTBOUND
+            and session.metadata.get("call_answered") is not True
+        ):
+            callback = session.metadata.get("vobiz_hangup_callback")
+            callback = callback if isinstance(callback, dict) else {}
+            logger.warning(
+                "vobiz_outbound_hangup_before_answer",
+                extra={
+                    "session_id": session.session_id,
+                    "provider_call_id": session.provider_call_id,
+                    "call_status": callback.get("CallStatus"),
+                    "hangup_cause_code": callback.get("HangupCauseCode"),
+                    "hangup_source": callback.get("HangupSource"),
+                },
+            )
+            await coordinator.end_session(session, "provider_hangup_before_answer")
+        else:
+            await coordinator.end_session(session, "completed")
     return Response(
         content=tostring(Element("Response"), encoding="unicode"),
         media_type="application/xml",

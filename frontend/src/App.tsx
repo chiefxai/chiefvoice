@@ -968,7 +968,7 @@ function ApiCallRecord({ apiId, call }: { apiId: string; call: ApiCallLog }) {
   const [sessionIdCopyFailed, setSessionIdCopyFailed] = useState(false)
   const [requestRecording, setRequestRecording] = useState(false)
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null)
-  const detail = useQuery({ queryKey: ['platform-api-call-detail', apiId, call.session_id], queryFn: () => api.apiCallDetail(apiId, call.session_id), enabled: expanded, retry: false, refetchInterval: expanded && (call.status !== 'completed' || call.post_call_status === 'queued' || call.post_call_status === 'running') ? 4000 : false })
+  const detail = useQuery({ queryKey: ['platform-api-call-detail', apiId, call.session_id], queryFn: () => api.apiCallDetail(apiId, call.session_id), enabled: expanded, retry: false, refetchInterval: expanded && (!['completed', 'failed'].includes(call.status) || call.post_call_status === 'queued' || call.post_call_status === 'running') ? 4000 : false })
   const recording = useQuery({ queryKey: ['platform-api-call-recording', apiId, call.session_id], queryFn: () => api.apiCallRecording(apiId, call.session_id), enabled: expanded && requestRecording && Boolean(detail.data?.recording_available), retry: false })
 
   const copySessionId = () => {
