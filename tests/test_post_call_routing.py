@@ -6,7 +6,10 @@ from datetime import UTC, datetime
 import pytest
 
 from chiefvoice.agents.post_call.base import CompletedCall
-from chiefvoice.agents.post_call.errors import NoTranscriptDataError
+from chiefvoice.agents.post_call.errors import (
+    NoTranscriptDataError,
+    PostCallTranscriptionError,
+)
 from chiefvoice.agents.post_call.langchain_agent import LangChainPostCallAgent
 from chiefvoice.agents.post_call.workflows import PostCallWorkflowRegistry
 from chiefvoice.calls.coordinator import CallCoordinator
@@ -248,7 +251,7 @@ async def test_regional_languages_trigger_automatic_review_without_workflow_disp
 
 
 @pytest.mark.asyncio
-async def test_stt_failure_keeps_first_analysis_and_records_failure_status(monkeypatch):
+async def test_stt_failure_raises_retryable_error_after_first_analysis(monkeypatch):
     first_result = _custom_result(transcript_status="unclear")
     model = _FakeChatModel(first_result)
     agent = LangChainPostCallAgent(model)
@@ -258,11 +261,12 @@ async def test_stt_failure_keeps_first_analysis_and_records_failure_status(monke
 
     monkeypatch.setattr(agent, "_transcribe_recording", transcribe)
 
-    result = await agent.process(_call())
+    with pytest.raises(PostCallTranscriptionError) as error:
+        await agent.process(_call())
 
-    assert result.structured_output["outcome"] == "checked_out"
     assert len(model.messages) == 1
-    assert result.stt_status == "failed"
+    assert error.value.stt_status == "failed"
+    assert error.value.reason == "unclear_transcript_transcription_failed"
 
 
 @pytest.mark.asyncio
@@ -270,7 +274,8 @@ async def test_platform_assessment_does_not_change_client_result_shape():
     model = _FakeChatModel(_custom_result(transcript_status="clear"))
     agent = LangChainPostCallAgent(model)
 
-    result = await agent.process(_call())
+    # Isolate output shape from the automatic English audio review path.
+    result = await agent.process(_call(language="fr-FR"))
 
     assert result.structured_output == {
         "outcome": "checked_out",
