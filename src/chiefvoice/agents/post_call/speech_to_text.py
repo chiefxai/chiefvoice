@@ -35,11 +35,10 @@ def _transcribe_wav_sync(
     else:
         normalized_language = "auto"
 
-    client = SpeechClient(
-        client_options=ClientOptions(api_endpoint=f"{location}-speech.googleapis.com")
-    )
     transcript = ""
-    try:
+    with SpeechClient(
+        client_options=ClientOptions(api_endpoint=f"{location}-speech.googleapis.com")
+    ) as client:
         with wave.open(io.BytesIO(audio), "rb") as wav:
             params = wav.getparams()
             if params.comptype != "NONE":
@@ -73,8 +72,6 @@ def _transcribe_wav_sync(
                             for part in (transcript, result.alternatives[0].transcript.strip())
                             if part
                         )
-    finally:
-        client.close()
     return transcript
 
 
