@@ -3,14 +3,16 @@ name: Deploy to GCP
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "**.txt"
-      - "**.text"
-      - "infra/**"
-      - "cloudbuild.yaml"
-      - ".github/workflows/terraform-gcp-region.yml"
-      - ".github/workflows/deploy-gcp.yml"
+    paths:
+      - "**"
+      - "!**.md"
+      - "!**.txt"
+      - "!**.text"
+      - "!infra/**"
+      - "!cloudbuild.yaml"
+      - "!.github/workflows/terraform-gcp-region.yml"
+      - "!.github/workflows/deploy-gcp.yml"
+      - "deploy/gcp/post-call-function/requirements.txt"
   workflow_dispatch:
 
 concurrency:
