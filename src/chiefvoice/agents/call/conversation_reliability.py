@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from enum import StrEnum
 from typing import Any
 
@@ -139,6 +140,9 @@ class GeminiConversationWatchdog(FrameProcessor):
         self._call_state = CallLifecycleState.ACTIVE
         self._turn_state = ConversationTurnState.IDLE
         self._turn_id = 0
+        self._turn_triggered_at: float | None = None
+        self._generation_started_at: float | None = None
+        self._first_output_audio_at: float | None = None
         self._inactivity_stage = 0  # 0: silence 1, 1: silence 2, 2: final silence, 3: terminated
         self._caller_is_speaking = False
         self._gemini_is_generating = False
@@ -277,6 +281,17 @@ class GeminiConversationWatchdog(FrameProcessor):
                     self._arm_response_watchdog("gemini_input_transcription")
 
         elif isinstance(frame, BotStartedSpeakingFrame):
+            now = time.monotonic()
+            latency_fields = {**self._log_context()}
+            if self._turn_triggered_at is not None:
+                latency_fields["caller_turn_to_playback_ms"] = round(
+                    (now - self._turn_triggered_at) * 1000
+                )
+            if self._first_output_audio_at is not None:
+                latency_fields["first_model_audio_to_playback_ms"] = round(
+                    (now - self._first_output_audio_at) * 1000
+                )
+            logger.info("live_call_playback_started", extra=latency_fields)
             self._bot_audio_playing = True
             self._metadata["bot_audio_playing"] = True
             self._turn_state = ConversationTurnState.BOT_SPEAKING
@@ -291,6 +306,14 @@ class GeminiConversationWatchdog(FrameProcessor):
         elif direction is FrameDirection.DOWNSTREAM and isinstance(
             frame, LLMFullResponseStartFrame
         ):
+            self._generation_started_at = time.monotonic()
+            self._first_output_audio_at = None
+            latency_fields = {**self._log_context()}
+            if self._turn_triggered_at is not None:
+                latency_fields["caller_turn_to_generation_ms"] = round(
+                    (self._generation_started_at - self._turn_triggered_at) * 1000
+                )
+            logger.info("live_call_generation_started", extra=latency_fields)
             self._assistant_text_buffer = ""
             self._gemini_is_generating = True
             self._metadata["gemini_is_generating"] = True
@@ -319,6 +342,18 @@ class GeminiConversationWatchdog(FrameProcessor):
             self._maybe_arm_caller_inactivity_timer()
 
         elif direction is FrameDirection.DOWNSTREAM and isinstance(frame, OutputAudioRawFrame):
+            if self._first_output_audio_at is None:
+                self._first_output_audio_at = time.monotonic()
+                latency_fields = {**self._log_context()}
+                if self._turn_triggered_at is not None:
+                    latency_fields["caller_turn_to_first_model_audio_ms"] = round(
+                        (self._first_output_audio_at - self._turn_triggered_at) * 1000
+                    )
+                if self._generation_started_at is not None:
+                    latency_fields["generation_to_first_model_audio_ms"] = round(
+                        (self._first_output_audio_at - self._generation_started_at) * 1000
+                    )
+                logger.info("live_call_first_model_audio", extra=latency_fields)
             self._gemini_is_generating = True
             self._metadata["gemini_is_generating"] = True
             self._response_audio_seen = True
@@ -481,6 +516,9 @@ class GeminiConversationWatchdog(FrameProcessor):
             return
         self._turn_id += 1
         turn_id = self._turn_id
+        self._turn_triggered_at = time.monotonic()
+        self._generation_started_at = None
+        self._first_output_audio_at = None
         self._response_audio_seen = False
         self._turn_state = ConversationTurnState.WAITING_FOR_RESPONSE
         self._cancel_response_watchdog("superseded_by_new_turn")
