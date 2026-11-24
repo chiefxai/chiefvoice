@@ -262,7 +262,7 @@ async def test_stt_failure_raises_retryable_error_after_first_analysis(monkeypat
     monkeypatch.setattr(agent, "_transcribe_recording", transcribe)
 
     with pytest.raises(PostCallTranscriptionError) as error:
-        await agent.process(_call())
+        await agent.process(_call(language="fr-FR"))
 
     assert len(model.messages) == 1
     assert error.value.stt_status == "failed"
