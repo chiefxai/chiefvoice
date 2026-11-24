@@ -103,7 +103,10 @@ def build_pipeline(
             # enough to agree with Gemini's server-side speech detector.
             confidence=0.65,
             start_secs=0.20,
-            stop_secs=0.60,
+            # End a caller turn promptly after a natural pause. 450 ms is a
+            # conservative phone-audio compromise: it removes some dead air
+            # without making short in-sentence pauses as likely to split turns.
+            stop_secs=0.45,
             min_volume=0.15,
         ),
     )
