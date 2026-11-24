@@ -37,7 +37,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent
-from chiefvoice.agents.post_call.errors import NoTranscriptDataError
+from chiefvoice.agents.post_call.errors import (
+    NoTranscriptDataError,
+    PostCallTranscriptionError,
+)
 from chiefvoice.core.db_schema import CONSTRAINT_NAMING, verify_schema_revision
 from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.observability.setup import (
@@ -1039,6 +1042,17 @@ class SqlPostCallQueue:
             origin = trace[-1] if trace else None
             retry_at = datetime.now(UTC) + timedelta(seconds=min(2**attempt, 300))
             new_status = "queued" if attempt < self.max_attempts else "failed"
+            failure_status = (
+                {
+                    "stt_status": exc.stt_status,
+                    "decision_reason": exc.reason[:80],
+                    "transcript_status": "no_data"
+                    if exc.stt_status == "unavailable" and "no_data" in exc.reason
+                    else "unclear",
+                }
+                if isinstance(exc, PostCallTranscriptionError)
+                else {}
+            )
             async with self._sessions.begin() as session:
                 await session.execute(
                     update(PostCallJobRow)
@@ -1054,6 +1068,7 @@ class SqlPostCallQueue:
                         last_error_type=type(exc).__name__,
                         last_dispatched_at=None,
                         updated_at=datetime.now(UTC),
+                        **failure_status,
                     )
                 )
             logger.error(
@@ -1069,6 +1084,14 @@ class SqlPostCallQueue:
                     "error_origin_file": origin.filename.rsplit("/", 1)[-1] if origin else None,
                     "error_origin_function": origin.name if origin else None,
                     "error_origin_line": origin.lineno if origin else None,
+                    **(
+                        {
+                            "stt_status": exc.stt_status,
+                            "decision_reason": exc.reason,
+                        }
+                        if isinstance(exc, PostCallTranscriptionError)
+                        else {}
+                    ),
                 },
             )
             post_call_job_event("retrying" if new_status == "queued" else "failed")

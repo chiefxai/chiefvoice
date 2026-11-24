@@ -8,7 +8,10 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from pydantic import BaseModel, Field, create_model
 
 from chiefvoice.agents.post_call.base import CompletedCall, PostCallAgent, PostCallResult
-from chiefvoice.agents.post_call.errors import NoTranscriptDataError
+from chiefvoice.agents.post_call.errors import (
+    NoTranscriptDataError,
+    PostCallTranscriptionError,
+)
 from chiefvoice.agents.post_call.output_schema import build_output_model, validate_output_schema
 from chiefvoice.agents.post_call.tools import build_post_call_tools
 from chiefvoice.agents.post_call.workflows import (
@@ -128,7 +131,7 @@ class LangChainPostCallAgent(PostCallAgent):
                         "error_type": type(exc).__name__,
                     },
                 )
-                raise NoTranscriptDataError(
+                raise PostCallTranscriptionError(
                     stt_status="failed", reason="recording_transcription_failed"
                 ) from exc
             if not audio_transcript or not audio_transcript.strip():
@@ -143,7 +146,7 @@ class LangChainPostCallAgent(PostCallAgent):
                         ),
                     },
                 )
-                raise NoTranscriptDataError(
+                raise PostCallTranscriptionError(
                     stt_status="empty", reason="recording_transcription_empty"
                 )
             logger.info(
@@ -410,17 +413,9 @@ class LangChainPostCallAgent(PostCallAgent):
                     "automatic_language_review": requires_automatic_audio_review,
                 },
             )
-            return _PipelinePostCallResult(
-                summary=analysis.summary,
-                disposition=analysis.disposition,
-                extracted_data=analysis.extracted_data,
-                action_items=analysis.action_items,
-                structured_output=analysis.structured_output,
-                transcript_status=analysis.transcript_status,
-                needs_audio_review=analysis.needs_audio_review,
-                workflow_result=analysis.workflow_result,
+            raise PostCallTranscriptionError(
                 stt_status="unavailable",
-                decision_reason=(
+                reason=(
                     f"{review_reason_prefix}_recording_unavailable"
                     if requires_automatic_audio_review
                     else "no_data_transcript_recording_unavailable"
@@ -428,79 +423,20 @@ class LangChainPostCallAgent(PostCallAgent):
                     else "unclear_transcript_recording_unavailable"
                 ),
             )
-        try:
-            logger.info(
-                "post_call_recording_transcription_started",
-                extra={
-                    "session_id": call.session_id,
-                    "tenant_id": call.tenant_id,
-                    "language": call.live_agent_language or "auto",
-                    "automatic_language_review": requires_automatic_audio_review,
-                    "transcription_provider": (
-                        f"google_cloud_speech_{settings.post_call_transcription_model}"
-                    ),
-                },
-            )
-            audio_transcript = await self._transcribe_recording(call)
-            if not audio_transcript:
-                logger.warning(
-                    "post_call_recording_transcription_empty",
-                    extra={
-                        "session_id": call.session_id,
-                        "tenant_id": call.tenant_id,
-                        "transcript_status": analysis.transcript_status,
-                        "transcription_provider": (
-                            f"google_cloud_speech_{settings.post_call_transcription_model}"
-                        ),
-                    },
-                )
-                return _PipelinePostCallResult(
-                    summary=analysis.summary,
-                    disposition=analysis.disposition,
-                    extracted_data=analysis.extracted_data,
-                    action_items=analysis.action_items,
-                    structured_output=analysis.structured_output,
-                    transcript_status=analysis.transcript_status,
-                    needs_audio_review=analysis.needs_audio_review,
-                    workflow_result=analysis.workflow_result,
-                    stt_status="empty",
-                    decision_reason="recording_transcription_empty",
-                )
-            logger.info(
-                "post_call_recording_transcription_completed",
-                extra={
-                    "session_id": call.session_id,
-                    "tenant_id": call.tenant_id,
-                    "transcript_characters": len(audio_transcript),
-                    "language": call.live_agent_language or "auto",
-                    "automatic_language_review": requires_automatic_audio_review,
-                    "transcription_provider": (
-                        f"google_cloud_speech_{settings.post_call_transcription_model}"
-                    ),
-                },
-            )
-            reviewed = await self.process(
-                replace(
-                    call,
-                    audio_review_transcript=audio_transcript,
-                    audio_review_attempted=True,
-                    recording_audio=None,
-                    recording_loader=None,
-                )
-            )
-            return replace(
-                reviewed,
-                stt_status="completed",
-                decision_reason=(
-                    f"{review_reason_prefix}_transcribed"
-                    if requires_automatic_audio_review
-                    else "unclear_transcript_transcribed"
-                    if transcript_is_unclear
-                    else "no_data_transcript_transcribed"
-                    if analysis.transcript_status == "no_data"
-                    else "audio_review_requested_transcribed"
+        logger.info(
+            "post_call_recording_transcription_started",
+            extra={
+                "session_id": call.session_id,
+                "tenant_id": call.tenant_id,
+                "language": call.live_agent_language or "auto",
+                "automatic_language_review": requires_automatic_audio_review,
+                "transcription_provider": (
+                    f"google_cloud_speech_{settings.post_call_transcription_model}"
                 ),
-            )
+            },
+        )
+        try:
+            audio_transcript = await self._transcribe_recording(call)
         except Exception as exc:
             logger.warning(
                 "post_call_recording_transcription_failed",
@@ -510,17 +446,9 @@ class LangChainPostCallAgent(PostCallAgent):
                     "error_type": type(exc).__name__,
                 },
             )
-            return _PipelinePostCallResult(
-                summary=analysis.summary,
-                disposition=analysis.disposition,
-                extracted_data=analysis.extracted_data,
-                action_items=analysis.action_items,
-                structured_output=analysis.structured_output,
-                transcript_status=analysis.transcript_status,
-                needs_audio_review=analysis.needs_audio_review,
-                workflow_result=analysis.workflow_result,
+            raise PostCallTranscriptionError(
                 stt_status="failed",
-                decision_reason=(
+                reason=(
                     f"{review_reason_prefix}_transcription_failed"
                     if requires_automatic_audio_review
                     else "no_data_transcript_transcription_failed"
@@ -528,6 +456,57 @@ class LangChainPostCallAgent(PostCallAgent):
                     else "unclear_transcript_transcription_failed"
                 ),
             )
+        if not audio_transcript or not audio_transcript.strip():
+            logger.warning(
+                "post_call_recording_transcription_empty",
+                extra={
+                    "session_id": call.session_id,
+                    "tenant_id": call.tenant_id,
+                    "transcript_status": analysis.transcript_status,
+                    "transcription_provider": (
+                        f"google_cloud_speech_{settings.post_call_transcription_model}"
+                    ),
+                },
+            )
+            raise PostCallTranscriptionError(
+                stt_status="empty",
+                reason="recording_transcription_empty",
+            )
+        logger.info(
+            "post_call_recording_transcription_completed",
+            extra={
+                "session_id": call.session_id,
+                "tenant_id": call.tenant_id,
+                "transcript_characters": len(audio_transcript),
+                "language": call.live_agent_language or "auto",
+                "automatic_language_review": requires_automatic_audio_review,
+                "transcription_provider": (
+                    f"google_cloud_speech_{settings.post_call_transcription_model}"
+                ),
+            },
+        )
+        reviewed = await self.process(
+            replace(
+                call,
+                audio_review_transcript=audio_transcript,
+                audio_review_attempted=True,
+                recording_audio=None,
+                recording_loader=None,
+            )
+        )
+        return replace(
+            reviewed,
+            stt_status="completed",
+            decision_reason=(
+                f"{review_reason_prefix}_transcribed"
+                if requires_automatic_audio_review
+                else "unclear_transcript_transcribed"
+                if transcript_is_unclear
+                else "no_data_transcript_transcribed"
+                if analysis.transcript_status == "no_data"
+                else "audio_review_requested_transcribed"
+            ),
+        )
 
     def compatibility_fields(self, result: PostCallResult) -> dict[str, Any]:
         """Ask the selected workflow for optional legacy response projections."""
