@@ -32,9 +32,18 @@ async def run_call_session_reconciler(
                 if not calls:
                     break
                 for call in calls:
-                    await queue.enqueue(call)
+                    inserted = await queue.enqueue(call)
                     await call_sessions.mark_post_call_enqueued(
                         call.tenant_id, call.session_id
+                    )
+                    logger.info(
+                        "post_call_session_reconciled",
+                        extra={
+                            "session_id": call.session_id,
+                            "tenant_id": call.tenant_id,
+                            "queue_record_created": inserted is not False,
+                            "outcome": "enqueued" if inserted is not False else "already_present",
+                        },
                     )
                 if len(calls) < batch_size:
                     break

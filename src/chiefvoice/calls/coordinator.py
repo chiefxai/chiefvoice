@@ -759,8 +759,27 @@ class CallCoordinator:
 
     async def end_session(self, session: AcceptedSession, reason: str) -> None:
         if session.metadata.get("coordinator_session_ended"):
+            logger.info(
+                "call_end_finalization_skipped",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "reason": "already_finalized",
+                },
+            )
             return
-        session.metadata["coordinator_session_ended"] = True
+        logger.info(
+            "call_end_finalization_started",
+            extra={
+                "session_id": session.session_id,
+                "tenant_id": session.tenant_id,
+                "provider": session.provider,
+                "channel": session.channel,
+                "direction": session.direction.value,
+                "end_reason": reason,
+            },
+        )
         not_answered = reason == "provider_hangup_before_answer"
         terminal_status = "failed" if reason in {
             "provider_hangup_before_answer",
@@ -790,18 +809,44 @@ class CallCoordinator:
                             session.tenant_id, session.session_id
                         )
                     ) or emit_limit_event
+        except Exception as exc:
+            # Billing is a separate finalization concern. A transient billing
+            # store failure must not skip durable call completion or post-call
+            # enqueue; otherwise the early hangup callback can permanently lose
+            # analysis for an otherwise completed call.
+            logger.error(
+                "call_billing_finalization_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "error_type": type(exc).__name__,
+                },
+            )
         finally:
             # Setup failures release reservations; completed sessions settle them.
             # Billing policies must make settlement idempotent by session ID because
             # providers may deliver both a media disconnect and a hangup callback.
-            session_ended(
-                session.channel,
-                session.provider,
-                reason,
-                duration_seconds=elapsed_seconds,
-            )
-            if emit_limit_event:
-                call_duration_limit_event()
+            try:
+                session_ended(
+                    session.channel,
+                    session.provider,
+                    reason,
+                    duration_seconds=elapsed_seconds,
+                )
+                if emit_limit_event:
+                    call_duration_limit_event()
+            except Exception as exc:
+                # Telemetry must not block call persistence or post-call enqueue.
+                logger.error(
+                    "call_lifecycle_metrics_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "tenant_id": session.tenant_id,
+                        "provider": session.provider,
+                        "error_type": type(exc).__name__,
+                    },
+                )
             if session.metadata.get("transcript_persistence_error"):
                 logger.error(
                     "call_transcript_checkpoint_incomplete",
@@ -839,6 +884,14 @@ class CallCoordinator:
                         provider_call_id=session.provider_call_id,
                         ended_at=ended_at,
                         end_reason=reason,
+                    )
+                    logger.info(
+                        "call_lifecycle_persisted",
+                        extra={
+                            "session_id": session.session_id,
+                            "tenant_id": session.tenant_id,
+                            "call_status": terminal_status,
+                        },
                     )
                 except Exception as exc:
                     logger.error(
@@ -879,14 +932,60 @@ class CallCoordinator:
                 )
             if not not_answered:
                 await self._enqueue_post_call(session, ended_at)
+            session.metadata["coordinator_session_ended"] = True
+            logger.info(
+                "call_end_finalization_completed",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "call_status": terminal_status,
+                    "post_call_status": session.metadata.get("post_call_status"),
+                    "post_call_enqueued": session.metadata.get("post_call_enqueued") is True,
+                    "end_reason": reason,
+                },
+            )
 
     async def _enqueue_post_call(self, session: AcceptedSession, ended_at: datetime) -> None:
         if not session.tenant_id:
+            session.metadata["post_call_status"] = "skipped_missing_tenant"
+            logger.error(
+                "post_call_enqueue_skipped",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": session.provider,
+                    "reason": "tenant_id_missing",
+                },
+            )
             return
         if session.metadata.get("post_call_enqueued") is True:
+            logger.info(
+                "post_call_enqueue_skipped",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "reason": "already_enqueued",
+                },
+            )
             return
         if not session.post_call_agent_enabled or not self.post_call_required or self.post_call_dispatcher is None:
             session.metadata["post_call_status"] = "disabled"
+            logger.info(
+                "post_call_enqueue_skipped",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "reason": (
+                        "agent_disabled"
+                        if not session.post_call_agent_enabled
+                        else "post_call_not_required"
+                        if not self.post_call_required
+                        else "dispatcher_unavailable"
+                    ),
+                },
+            )
             if self.call_session_store is not None:
                 await self.call_session_store.mark_post_call_enqueued(
                     session.tenant_id, session.session_id
@@ -930,6 +1029,18 @@ class CallCoordinator:
                 )
             session.metadata["post_call_enqueued"] = True
             return
+        logger.info(
+            "post_call_enqueue_started",
+            extra={
+                "session_id": session.session_id,
+                "tenant_id": session.tenant_id,
+                "provider": session.provider,
+                "channel": session.channel,
+                "transcript_characters": len(transcript),
+                "recording_available": has_recording,
+                "workflow_configured": bool(session.post_call_workflow_id),
+            },
+        )
         if not transcript.strip():
             # A finalized recording is enough to start the post-call pipeline: the
             # worker can transcribe it first, then run analysis on that transcript.
@@ -972,13 +1083,26 @@ class CallCoordinator:
         )
         try:
             # This writes a durable queue record only; model work happens in the worker.
-            await self.post_call_dispatcher.enqueue(call)
+            inserted = await self.post_call_dispatcher.enqueue(call)
             if self.call_session_store is not None:
                 await self.call_session_store.mark_post_call_enqueued(
                     session.tenant_id, session.session_id
                 )
             session.metadata["post_call_enqueued"] = True
+            session.metadata["post_call_status"] = (
+                "queued" if inserted is not False else "already_present"
+            )
             session.metadata.pop("post_call_transcript", None)
+            logger.info(
+                "post_call_enqueue_succeeded",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                    "queue_record_created": inserted is not False,
+                    "outcome": "enqueued" if inserted is not False else "already_present",
+                },
+            )
         except Exception as exc:
             logger.error(
                 "post_call_enqueue_failed",
@@ -989,11 +1113,22 @@ class CallCoordinator:
                 },
             )
             if self.post_call_fallback_spool is None:
+                session.metadata["post_call_status"] = "enqueue_failed"
                 post_call_enqueue_fallback_event("unavailable")
+                logger.error(
+                    "post_call_enqueue_recovery_unavailable",
+                    extra={
+                        "session_id": session.session_id,
+                        "tenant_id": session.tenant_id,
+                        "provider": session.provider,
+                        "reason": "fallback_spool_not_configured",
+                    },
+                )
                 return
             try:
                 await self.post_call_fallback_spool.store(call)
             except Exception as spool_exc:
+                session.metadata["post_call_status"] = "enqueue_failed"
                 post_call_enqueue_fallback_event("failed")
                 logger.error(
                     "post_call_fallback_spool_failed",
@@ -1005,6 +1140,15 @@ class CallCoordinator:
                 )
                 return
             post_call_enqueue_fallback_event("saved")
+            session.metadata["post_call_status"] = "staged_for_recovery"
+            logger.warning(
+                "post_call_enqueue_staged_for_recovery",
+                extra={
+                    "session_id": session.session_id,
+                    "tenant_id": session.tenant_id,
+                    "provider": session.provider,
+                },
+            )
             if self.call_session_store is not None:
                 await self.call_session_store.mark_post_call_enqueued(
                     session.tenant_id, session.session_id

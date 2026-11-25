@@ -1055,12 +1055,57 @@ class VobizAdapter:
                 await asyncio.gather(agent_hangup_task, return_exceptions=True)
             diagnostics = session.metadata.get("call_audio_diagnostics")
             if isinstance(diagnostics, CallAudioDiagnostics):
-                diagnostics.log_summary()
+                try:
+                    diagnostics.log_summary()
+                except Exception as exc:
+                    logger.error(
+                        "call_audio_diagnostics_summary_failed",
+                        extra={
+                            "session_id": session.session_id,
+                            "provider": self.provider,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
             # The buffer must flush only after Pipecat's runner has drained and
             # stopped. A separate provider hangup webhook can race this cleanup.
             session.metadata["recording_pipeline_finished"] = True
+            logger.info(
+                "vobiz_media_session_finalization_started",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "end_reason": end_reason,
+                    "media_stage": (
+                        "media_pipeline"
+                        if active_media.pipeline_task is not None
+                        else "waiting_for_start_message"
+                    ),
+                },
+            )
             try:
                 await end_session(session, end_reason)
+            except Exception as exc:
+                logger.error(
+                    "vobiz_media_session_finalization_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "end_reason": end_reason,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise
+            else:
+                logger.info(
+                    "vobiz_media_session_finalization_completed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "end_reason": end_reason,
+                        "call_status": session.metadata.get("call_status"),
+                        "post_call_enqueued": session.metadata.get("post_call_enqueued") is True,
+                    },
+                )
             finally:
                 if self._active_media_sessions.get(session.session_id) is active_media:
                     self._active_media_sessions.pop(session.session_id, None)

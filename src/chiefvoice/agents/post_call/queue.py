@@ -349,6 +349,15 @@ class SqlPostCallQueue:
             and not call.recording_uri
             and not call.workflow_id
         ):
+            logger.warning(
+                "post_call_job_enqueue_skipped",
+                extra={
+                    "session_id": call.session_id,
+                    "tenant_id": call.tenant_id,
+                    "provider": call.provider,
+                    "reason": "no_transcript_recording_or_workflow",
+                },
+            )
             return False
         created_at = datetime.now(UTC)
         payload = {
@@ -429,6 +438,26 @@ class SqlPostCallQueue:
             inserted = result.rowcount == 1
         if inserted:
             post_call_job_event("enqueued")
+            logger.info(
+                "post_call_job_enqueued",
+                extra={
+                    "session_id": call.session_id,
+                    "tenant_id": call.tenant_id,
+                    "provider": call.provider,
+                    "transcript_characters": len(call.transcript or ""),
+                    "recording_available": bool(call.recording_uri),
+                    "workflow_configured": bool(call.workflow_id),
+                },
+            )
+        else:
+            logger.info(
+                "post_call_job_enqueue_deduplicated",
+                extra={
+                    "session_id": call.session_id,
+                    "tenant_id": call.tenant_id,
+                    "provider": call.provider,
+                },
+            )
         return inserted
 
     async def enqueue_failure(
@@ -716,6 +745,10 @@ class SqlPostCallQueue:
             post_call_job_event("dispatch_failed")
             return True
         post_call_job_event("dispatched")
+        logger.info(
+            "post_call_async_job_dispatched",
+            extra={"session_id": job_id, "dispatch_attempt": dispatch_attempt},
+        )
         return True
 
     async def process_one(self, agent: PostCallAgent, session_id: str | None = None) -> bool:
@@ -777,6 +810,14 @@ class SqlPostCallQueue:
                     }
 
         if lease_expired_failure is not None:
+            logger.error(
+                "post_call_worker_lease_exhausted",
+                extra={
+                    "session_id": lease_expired_failure["session_id"],
+                    "tenant_id": lease_expired_failure["tenant_id"],
+                    "attempts": lease_expired_failure["attempts"],
+                },
+            )
             lease_payload = {}
             try:
                 lease_payload = json.loads(
@@ -801,6 +842,16 @@ class SqlPostCallQueue:
                 custom_payload=lease_payload.get("failure_webhook_payload"),
             )
             return True
+
+        logger.info(
+            "post_call_job_processing_started",
+            extra={
+                "session_id": job["session_id"],
+                "tenant_id": job["tenant_id"],
+                "provider": job["provider"],
+                "attempt": attempt,
+            },
+        )
 
         failure_stage = "payload_decryption"
         payload: dict = {}
