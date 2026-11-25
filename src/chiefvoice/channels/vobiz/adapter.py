@@ -51,6 +51,17 @@ AGENT_HANGUP_AUDIO_DRAIN_TIMEOUT_SECONDS = 12.0
 PROVIDER_HANGUP_PIPELINE_STOP_TIMEOUT_SECONDS = 12.0
 PROVIDER_HANGUP_SOCKET_FALLBACK_TIMEOUT_SECONDS = 3.0
 PROVIDER_HANGUP_FINALIZER_TIMEOUT_SECONDS = 20.0
+DEFAULT_VOBIZ_MEDIA_START_TIMEOUT_SECONDS = 8.0
+
+
+def _media_start_timeout_seconds() -> float:
+    return float(
+        getattr(
+            settings,
+            "vobiz_media_start_timeout_seconds",
+            DEFAULT_VOBIZ_MEDIA_START_TIMEOUT_SECONDS,
+        )
+    )
 
 
 class _InvalidCallState(ValueError):
@@ -116,7 +127,7 @@ class VobizAdapter:
             raise ValueError("VOBIZ_SAMPLE_RATE must be 8000 or 16000")
         if settings.vobiz_encoding not in {"audio/x-mulaw", "audio/x-l16"}:
             raise ValueError("VOBIZ_ENCODING must be audio/x-mulaw or audio/x-l16")
-        if settings.vobiz_media_start_timeout_seconds <= 0:
+        if _media_start_timeout_seconds() <= 0:
             raise ValueError("VOBIZ_MEDIA_START_TIMEOUT_SECONDS must be greater than zero")
         self._state = URLSafeTimedSerializer(
             settings.vobiz_webhook_secret, salt="chiefvoice-vobiz-call-state-v1"
@@ -536,13 +547,13 @@ class VobizAdapter:
             extra={
                 "session_id": session.session_id,
                 "provider": self.provider,
-                "timeout_seconds": settings.vobiz_media_start_timeout_seconds,
+                "timeout_seconds": _media_start_timeout_seconds(),
             },
         )
         try:
             parsed = await asyncio.wait_for(
                 parse_vobiz_start(connection),
-                timeout=settings.vobiz_media_start_timeout_seconds,
+                timeout=_media_start_timeout_seconds(),
             )
         except TimeoutError as exc:
             logger.error(
@@ -550,7 +561,7 @@ class VobizAdapter:
                 extra={
                     "session_id": session.session_id,
                     "provider": self.provider,
-                    "timeout_seconds": settings.vobiz_media_start_timeout_seconds,
+                    "timeout_seconds": _media_start_timeout_seconds(),
                     "failure_stage": "waiting_for_start_message",
                 },
             )
