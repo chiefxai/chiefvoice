@@ -868,7 +868,14 @@ class CallCoordinator:
                 )
             elif reason == "provider_error":
                 await self._enqueue_failure_webhook(
-                    session, stage="call", code="provider_media_pipeline_failed", ended_at=ended_at
+                    session,
+                    stage="call",
+                    code=(
+                        session.metadata.get("call_failure_code")
+                        if isinstance(session.metadata.get("call_failure_code"), str)
+                        else "provider_media_pipeline_failed"
+                    ),
+                    ended_at=ended_at,
                 )
             if not not_answered:
                 await self._enqueue_post_call(session, ended_at)

@@ -156,6 +156,9 @@ class Settings:
     vobiz_auth_token: str | None = os.getenv("VOBIZ_AUTH_TOKEN") or None
     vobiz_encoding: str = os.getenv("VOBIZ_ENCODING", "audio/x-mulaw")
     vobiz_sample_rate: int = int(os.getenv("VOBIZ_SAMPLE_RATE", "8000"))
+    vobiz_media_start_timeout_seconds: float = float(
+        os.getenv("VOBIZ_MEDIA_START_TIMEOUT_SECONDS", "8")
+    )
     vobiz_record_inbound: bool = os.getenv("VOBIZ_RECORD_INBOUND", "false").lower() == "true"
 
 
