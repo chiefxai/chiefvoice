@@ -59,6 +59,14 @@ class _InvalidCallState(ValueError):
         self.reason = reason
 
 
+class _VobizMediaStartTimeout(Exception):
+    """The provider opened the media socket but never sent a start message."""
+
+
+class _VobizMediaStartFailure(Exception):
+    """The provider media start message could not be parsed."""
+
+
 @dataclass(frozen=True, slots=True)
 class VobizInboundCall:
     provider: str
@@ -108,6 +116,8 @@ class VobizAdapter:
             raise ValueError("VOBIZ_SAMPLE_RATE must be 8000 or 16000")
         if settings.vobiz_encoding not in {"audio/x-mulaw", "audio/x-l16"}:
             raise ValueError("VOBIZ_ENCODING must be audio/x-mulaw or audio/x-l16")
+        if settings.vobiz_media_start_timeout_seconds <= 0:
+            raise ValueError("VOBIZ_MEDIA_START_TIMEOUT_SECONDS must be greater than zero")
         self._state = URLSafeTimedSerializer(
             settings.vobiz_webhook_secret, salt="chiefvoice-vobiz-call-state-v1"
         )
@@ -521,7 +531,43 @@ class VobizAdapter:
         if not auth_id or not auth_token:
             raise HTTPException(status_code=404, detail="Vobiz credentials are incomplete")
         await connection.accept()
-        parsed = await parse_vobiz_start(connection)
+        logger.info(
+            "vobiz_media_start_wait_started",
+            extra={
+                "session_id": session.session_id,
+                "provider": self.provider,
+                "timeout_seconds": settings.vobiz_media_start_timeout_seconds,
+            },
+        )
+        try:
+            parsed = await asyncio.wait_for(
+                parse_vobiz_start(connection),
+                timeout=settings.vobiz_media_start_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            logger.error(
+                "vobiz_media_start_timeout",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "timeout_seconds": settings.vobiz_media_start_timeout_seconds,
+                    "failure_stage": "waiting_for_start_message",
+                },
+            )
+            raise _VobizMediaStartTimeout from exc
+        except WebSocketDisconnect:
+            raise
+        except Exception as exc:
+            logger.error(
+                "vobiz_media_start_parse_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "failure_stage": "parsing_start_message",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise _VobizMediaStartFailure from exc
         session.provider_call_id = parsed["call_id"]
         serializer = VobizFrameSerializer(
             stream_id=parsed["stream_id"],
@@ -537,7 +583,13 @@ class VobizAdapter:
         )
         logger.info(
             "vobiz_media_connected",
-            extra={"session_id": session.session_id, "provider": self.provider},
+            extra={
+                "session_id": session.session_id,
+                "provider": self.provider,
+                "failure_stage": "media_start_parsed",
+                "sample_rate": parsed["sample_rate"] or settings.vobiz_sample_rate,
+                "encoding": parsed["encoding"] or settings.vobiz_encoding,
+            },
         )
         diagnostics = diagnostics_for_session(session)
         playback_tracker = VobizPlaybackTracker(session.session_id, diagnostics)
@@ -802,6 +854,14 @@ class VobizAdapter:
             active_media.runner_task = runner_task
             if active_media.pipeline_ready is not None:
                 active_media.pipeline_ready.set()
+            logger.info(
+                "vobiz_media_pipeline_started",
+                extra={
+                    "session_id": session.session_id,
+                    "provider": self.provider,
+                    "failure_stage": "pipeline_running",
+                },
+            )
             agent_hangup_task = asyncio.create_task(
                 hang_up_after_audio_drain(),
                 name=f"vobiz-agent-hangup-{session.session_id}",
@@ -866,6 +926,43 @@ class VobizAdapter:
                 if timeout_task is not None:
                     timeout_task.cancel()
                     await asyncio.gather(timeout_task, return_exceptions=True)
+        except (_VobizMediaStartTimeout, _VobizMediaStartFailure) as exc:
+            end_reason = "provider_error"
+            failure_code = (
+                "provider_media_start_timeout"
+                if isinstance(exc, _VobizMediaStartTimeout)
+                else "provider_media_start_invalid"
+            )
+            session.metadata["call_failure_code"] = failure_code
+            session.metadata["media_failure_stage"] = "media_start"
+            try:
+                await self.hangup(
+                    session,
+                    "Vobiz media start message timed out"
+                    if isinstance(exc, _VobizMediaStartTimeout)
+                    else "Vobiz media start message was invalid",
+                )
+            except Exception as hangup_exc:
+                logger.error(
+                    "vobiz_media_start_failure_hangup_failed",
+                    extra={
+                        "session_id": session.session_id,
+                        "provider": self.provider,
+                        "error_type": type(hangup_exc).__name__,
+                    },
+                )
+            if websocket.client_state.name != "DISCONNECTED":
+                try:
+                    await websocket.close(
+                        code=1011,
+                        reason=(
+                            "Vobiz media start timed out"
+                            if isinstance(exc, _VobizMediaStartTimeout)
+                            else "Vobiz media start message was invalid"
+                        ),
+                    )
+                except RuntimeError:
+                    pass
         except WebSocketDisconnect as exc:
             if active_media.provider_hangup_received:
                 # Vobiz closes the media socket as part of a reported terminal
@@ -878,16 +975,29 @@ class VobizAdapter:
                         "session_id": session.session_id,
                         "provider": self.provider,
                         "error_type": type(exc).__name__,
+                        "media_stage": (
+                            "media_pipeline"
+                            if active_media.pipeline_task is not None
+                            else "waiting_for_start_message"
+                        ),
                     },
                 )
             else:
                 end_reason = "provider_error"
+                if active_media.pipeline_task is None:
+                    session.metadata["call_failure_code"] = "provider_media_start_disconnected"
+                    session.metadata["media_failure_stage"] = "media_start"
                 logger.error(
                     "vobiz_media_session_failed",
                     extra={
                         "session_id": session.session_id,
                         "provider": self.provider,
                         "error_type": type(exc).__name__,
+                        "media_stage": (
+                            "media_pipeline"
+                            if active_media.pipeline_task is not None
+                            else "waiting_for_start_message"
+                        ),
                     },
                 )
                 try:
