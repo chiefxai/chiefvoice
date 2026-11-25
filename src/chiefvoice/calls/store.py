@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import replace
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,8 @@ from chiefvoice.agents.post_call.queue import PostCallJobRow
 from chiefvoice.core.db_schema import verify_schema_revision
 from chiefvoice.data_lifecycle.retention import RetentionClass
 from chiefvoice.sessions import AcceptedSession, Direction
+
+logger = logging.getLogger(__name__)
 
 
 class CallSessionRow(Base):
@@ -813,9 +816,24 @@ class SqlCallSessionStore:
             for row in rows:
                 session = self._decrypt_session(row.encrypted_session or "")
                 if not session.tenant_id:
+                    logger.error(
+                        "post_call_reconciliation_skipped",
+                        extra={
+                            "session_id": session.session_id,
+                            "reason": "tenant_id_missing",
+                        },
+                    )
                     continue
                 if not session.post_call_agent_enabled:
                     await self.mark_post_call_enqueued(session.tenant_id, session.session_id)
+                    logger.info(
+                        "post_call_reconciliation_skipped",
+                        extra={
+                            "session_id": session.session_id,
+                            "tenant_id": session.tenant_id,
+                            "reason": "agent_disabled",
+                        },
+                    )
                     continue
                 transcript = (
                     self._fernet.decrypt(row.encrypted_transcript.encode("ascii")).decode("utf-8")
@@ -834,6 +852,14 @@ class SqlCallSessionStore:
                     # item to enqueue, so terminalize the reconciliation marker to
                     # keep these rows from starving recoverable calls on every scan.
                     await self.mark_post_call_enqueued(session.tenant_id, session.session_id)
+                    logger.warning(
+                        "post_call_reconciliation_skipped",
+                        extra={
+                            "session_id": session.session_id,
+                            "tenant_id": session.tenant_id,
+                            "reason": "no_transcript_recording_or_workflow",
+                        },
+                    )
                     continue
                 calls.append(
                     CompletedCall(

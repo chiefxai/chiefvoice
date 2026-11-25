@@ -62,6 +62,15 @@ async def hangup_callback(request: Request):
     # Let an already-starting WebSocket consume or unwind its prepared model
     # session before removing any unclaimed preflight state.
     media_session_closed = await adapter.close_active_media_session(session.session_id)
+    logger.info(
+        "vobiz_hangup_callback_finalization_owner",
+        extra={
+            "session_id": session.session_id,
+            "provider_call_id": session.provider_call_id,
+            "active_media_session": media_session_closed,
+            "finalization_owner": "media_session_finalizer" if media_session_closed else "hangup_callback",
+        },
+    )
     prepared_sessions = getattr(request.app.state, "prepared_realtime_sessions", None)
     if prepared_sessions is not None:
         await prepared_sessions.discard(session.session_id, "provider_hangup_before_media")
