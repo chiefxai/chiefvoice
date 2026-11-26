@@ -846,16 +846,27 @@ async def list_platform_api_calls(
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
 ):
     del principal
     _, api_keys = _stores(request)
     key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
+    if start_at is not None and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=UTC)
+    if end_at is not None and end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=UTC)
+    if start_at is not None and end_at is not None and start_at > end_at:
+        raise HTTPException(status_code=422, detail="start_at must be before or equal to end_at")
     call_store = getattr(request.app.state, "call_session_store", None)
     if call_store is None or not hasattr(call_store, "list_for_api_key"):
         raise HTTPException(status_code=503, detail="Call history storage is not configured")
-    result = await call_store.list_for_api_key(key.tenant_id, key_id, limit=limit, offset=offset)
+    result = await call_store.list_for_api_key(
+        key.tenant_id, key_id, limit=limit, offset=offset,
+        start_at=start_at, end_at=end_at,
+    )
     dispatcher = getattr(request.app.state, "post_call_dispatcher", None)
     if dispatcher is not None and hasattr(dispatcher, "get_status"):
         for call in result["items"]:
@@ -989,16 +1000,26 @@ async def get_platform_api_billing(
     key_id: str,
     request: Request,
     principal: Annotated[Principal, Depends(_platform_admin("platform:customers:read"))],
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
 ):
     del principal
     _, api_keys = _stores(request)
     key = next((item for item in await api_keys.list_all() if item.key_id == key_id), None)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
+    if start_at is not None and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=UTC)
+    if end_at is not None and end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=UTC)
+    if start_at is not None and end_at is not None and start_at > end_at:
+        raise HTTPException(status_code=422, detail="start_at must be before or equal to end_at")
     billing = getattr(request.app.state, "billing_directory", None)
     if billing is None or not hasattr(billing, "get_usage_for_api_key"):
         raise HTTPException(status_code=503, detail="Billing storage is not configured")
-    usage = await billing.get_usage_for_api_key(key.tenant_id, key_id)
+    usage = await billing.get_usage_for_api_key(
+        key.tenant_id, key_id, start_at=start_at, end_at=end_at,
+    )
     if usage is None:
         return {"configured": False, "api_key_id": key_id, "message": "No customer voice plan is configured."}
     return {"configured": True, "api_key_id": key_id, **usage}

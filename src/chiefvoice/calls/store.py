@@ -978,21 +978,24 @@ class SqlCallSessionStore:
             }
 
     async def list_for_api_key(
-        self, tenant_id: str, api_key_id: str, *, limit: int = 50, offset: int = 0
+        self, tenant_id: str, api_key_id: str, *, limit: int = 50, offset: int = 0,
+        start_at: datetime | None = None, end_at: datetime | None = None,
     ) -> dict[str, Any]:
+        filters = [
+            CallSessionRow.tenant_id == tenant_id,
+            CallSessionRow.api_key_id == api_key_id,
+        ]
+        if start_at is not None:
+            filters.append(CallSessionRow.started_at >= start_at)
+        if end_at is not None:
+            filters.append(CallSessionRow.started_at <= end_at)
         async with self._sessions() as db:
             count = await db.scalar(
-                select(func.count()).select_from(CallSessionRow).where(
-                    CallSessionRow.tenant_id == tenant_id,
-                    CallSessionRow.api_key_id == api_key_id,
-                )
+                select(func.count()).select_from(CallSessionRow).where(*filters)
             )
             rows = await db.scalars(
                 select(CallSessionRow)
-                .where(
-                    CallSessionRow.tenant_id == tenant_id,
-                    CallSessionRow.api_key_id == api_key_id,
-                )
+                .where(*filters)
                 .order_by(CallSessionRow.created_at.desc())
                 .limit(limit)
                 .offset(offset)
