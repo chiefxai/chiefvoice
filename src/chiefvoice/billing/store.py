@@ -254,23 +254,31 @@ class SqlBillingDirectory:
             )
             return self._serialize(row) if row else None
 
-    async def get_usage_for_api_key(self, tenant_id: str, api_key_id: str) -> dict | None:
+    async def get_usage_for_api_key(
+        self, tenant_id: str, api_key_id: str, *,
+        start_at: datetime | None = None, end_at: datetime | None = None,
+    ) -> dict | None:
         async with self._sessions() as session:
             plan = await session.scalar(
                 select(TenantVoicePlanRow).where(TenantVoicePlanRow.tenant_id == tenant_id)
             )
             if plan is None:
                 return None
+            usage_filters = [
+                VoiceReservationRow.tenant_id == tenant_id,
+                VoiceReservationRow.api_key_id == api_key_id,
+            ]
+            if start_at is not None:
+                usage_filters.append(VoiceReservationRow.created_at >= start_at)
+            if end_at is not None:
+                usage_filters.append(VoiceReservationRow.created_at <= end_at)
             row = await session.execute(
                 select(
                     func.count(VoiceReservationRow.session_id),
                     func.coalesce(func.sum(VoiceReservationRow.billable_seconds), 0),
                     func.coalesce(func.sum(VoiceReservationRow.charged_minor), 0),
                     func.count().filter(VoiceReservationRow.status == "reserved"),
-                ).where(
-                    VoiceReservationRow.tenant_id == tenant_id,
-                    VoiceReservationRow.api_key_id == api_key_id,
-                )
+                ).where(*usage_filters)
             )
             calls, seconds, charges, active = row.one()
             return {
